@@ -72,6 +72,12 @@ if 'AdvancedModeReminder' in t2[t2.find('%ctor'):]:
     raise SystemExit("First-launch reminder reference remains in the constructor.")
 tweak.write_text(t2)
 
+makefile = root / "Makefile"
+make_source = makefile.read_text()
+if "PACKAGE_VERSION = 3.0.1" not in make_source:
+    raise SystemExit("Unexpected upstream Makefile version; refusing an unreviewed version rewrite.")
+makefile.write_text(make_source.replace("PACKAGE_VERSION = 3.0.1", "PACKAGE_VERSION = 6.0.0", 1))
+
 # Record the exact source revision and patch scope for build verification.
 (root / "TRAPTUBE-YTLITE-PATCH-REPORT.txt").write_text(
     "TrapTube YTLite v6.0 source patch\n"
