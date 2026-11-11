@@ -177,7 +177,7 @@ static BOOL TTShouldHideSettingsItem(id item) {
     NSString *identifier = nil;
     @try {
         if ([item respondsToSelector:@selector(title)]) title = [item title];
-        if ([item respondsToSelector:@selector(titleDescription)]) detail = [item titleDescription];
+        if ([item respondsToSelector:NSSelectorFromString(@"titleDescription")]) detail = ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"titleDescription"));
         if ([item respondsToSelector:@selector(accessibilityIdentifier)]) identifier = [item accessibilityIdentifier];
     } @catch (__unused NSException *exception) {}
     NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
