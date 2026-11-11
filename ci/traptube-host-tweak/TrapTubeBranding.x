@@ -803,6 +803,130 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 %end
 
+
+#pragma mark - Host-wide TrapTube identity
+
+static NSString *TTRebrandedHostText(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || text.length == 0) return text;
+    NSString *trimmed = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([trimmed caseInsensitiveCompare:@"YouTube"] == NSOrderedSame) {
+        return [text stringByReplacingOccurrencesOfString:trimmed withString:@"TrapTube"];
+    }
+    // Only rewrite explicit product/brand UI phrases. Creator-authored video titles
+    // and descriptions that merely discuss YouTube remain untouched unless they
+    // are clearly a short branded control/header phrase.
+    NSArray<NSString *> *brandPhrases = @[
+        @"YouTube Premium", @"YouTube Music", @"YouTube Shorts",
+        @"YouTube Kids", @"YouTube TV", @"YouTube Studio",
+        @"YouTube Originals", @"YouTube Settings"
+    ];
+    for (NSString *phrase in brandPhrases) {
+        NSRange range = [text rangeOfString:phrase options:NSCaseInsensitiveSearch];
+        if (range.location != NSNotFound) {
+            NSString *replacement = [phrase stringByReplacingOccurrencesOfString:@"YouTube" withString:@"TrapTube"];
+            return [text stringByReplacingCharactersInRange:range withString:replacement];
+        }
+    }
+    // Header/action copy such as "Sign in to YouTube" or "Watch on YouTube".
+    if (text.length <= 80) {
+        NSRange range = [text rangeOfString:@"YouTube" options:NSCaseInsensitiveSearch];
+        if (range.location != NSNotFound) {
+            return [text stringByReplacingCharactersInRange:range withString:@"TrapTube"];
+        }
+    }
+    return text;
+}
+
+static BOOL TTIsYouTubeLogoAssetName(NSString *name) {
+    if (![name isKindOfClass:NSString.class] || name.length == 0) return NO;
+    NSString *lower = name.lowercaseString;
+    BOOL identifiesYouTube = [lower containsString:@"youtube"] ||
+                             [lower containsString:@"you_tube"] ||
+                             [lower containsString:@"yt_logo"];
+    BOOL identifiesBrandArt = [lower containsString:@"logo"] ||
+                              [lower containsString:@"wordmark"] ||
+                              [lower containsString:@"branding"] ||
+                              [lower containsString:@"brand"] ||
+                              [lower containsString:@"app_icon"];
+    return identifiesYouTube && identifiesBrandArt;
+}
+
+static UIImage *TTTrapTubeHouseLogo(void) {
+    static UIImage *logo = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *path = [NSBundle.mainBundle pathForResource:@"TrapTubeLaunchLogo" ofType:@"png"];
+        if (path.length) logo = [UIImage imageWithContentsOfFile:path];
+    });
+    return logo;
+}
+
+%hook UILabel
+- (void)setText:(NSString *)text {
+    %orig(TTRebrandedHostText(text));
+}
+%end
+
+%hook UIButton
+- (void)setTitle:(NSString *)title forState:(UIControlState)state {
+    %orig(TTRebrandedHostText(title), state);
+}
+%end
+
+%hook UINavigationItem
+- (void)setTitle:(NSString *)title {
+    %orig(TTRebrandedHostText(title));
+}
+%end
+
+%hook UIBarButtonItem
+- (void)setTitle:(NSString *)title {
+    %orig(TTRebrandedHostText(title));
+}
+%end
+
+%hook UITabBarItem
+- (void)setTitle:(NSString *)title {
+    %orig(TTRebrandedHostText(title));
+}
+%end
+
+%hook UITextField
+- (void)setPlaceholder:(NSString *)placeholder {
+    %orig(TTRebrandedHostText(placeholder));
+}
+%end
+
+%hook UISearchBar
+- (void)setPlaceholder:(NSString *)placeholder {
+    %orig(TTRebrandedHostText(placeholder));
+}
+%end
+
+%hook UIAlertController
+- (instancetype)initWithTitle:(NSString *)title message:(NSString *)message preferredStyle:(UIAlertControllerStyle)preferredStyle {
+    return %orig(TTRebrandedHostText(title), TTRebrandedHostText(message), preferredStyle);
+}
+%end
+
+%hook UIImage
++ (UIImage *)imageNamed:(NSString *)name {
+    if (TTIsYouTubeLogoAssetName(name)) {
+        UIImage *house = TTTrapTubeHouseLogo();
+        if (house) return house;
+    }
+    return %orig;
+}
++ (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
+    if (TTIsYouTubeLogoAssetName(name)) {
+        UIImage *house = TTTrapTubeHouseLogo();
+        if (house) return house;
+    }
+    return %orig;
+}
+%end
+
+
 %ctor {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:@"advancedMode"];
