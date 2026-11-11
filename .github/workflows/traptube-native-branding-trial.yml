@@ -234,6 +234,8 @@ jobs:
           replacements = (
               ("YouTube Plus", "TrapTube"),
               ("YouTube+", "TrapTube"),
+              ("YouTube", "TrapTube"),
+              ("Youtube", "TrapTube"),
               ("YTPlus", "TrapTube"),
               ("YTLite", "TrapTube"),
           )
@@ -261,8 +263,20 @@ jobs:
                       continue
                   try:
                       with path.open("rb") as stream:
-                          values = plistlib.load(stream)
-                  except Exception:
+                          raw = stream.read()
+                      try:
+                          values = plistlib.loads(raw)
+                      except Exception:
+                          # Some app-bundled .strings files use Apple's OpenStep
+                          # text format rather than binary/XML plist encoding.
+                          import subprocess
+                          converted = subprocess.run(
+                              ["plutil", "-convert", "xml1", "-o", "-", str(path)],
+                              check=True, capture_output=True
+                          ).stdout
+                          values = plistlib.loads(converted)
+                  except Exception as error:
+                      print(f"Skipping unparseable localization resource {path}: {error}")
                       continue
                   updated = rewrite(values)
                   if updated != values:
@@ -270,7 +284,7 @@ jobs:
                           plistlib.dump(updated, stream, fmt=plistlib.FMT_BINARY, sort_keys=False)
                       changed_files += 1
 
-          print(f"TrapTube localization: updated {changed_values} string values across {changed_files} files.")
+          print(f"TrapTube localization: updated {changed_values} string values across {changed_files} files under {root}.")
           PY
           cp ci/patches/TrapTube-Third-Party-Notices.md "$APP/TrapTube-Third-Party-Notices.md"
           find "$APP" -type d -name _CodeSignature -prune -exec rm -rf {} +
