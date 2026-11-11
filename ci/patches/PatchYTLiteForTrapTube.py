@@ -18,8 +18,8 @@ if not settings.is_file() or not tweak.is_file():
 s = settings.read_text()
 # Remove the now-unused helper that creates outbound link rows.
 link_helper = re.compile(
-    r'%new\\s+'
-    r'- \\(YTSettingsSectionItem \\*\\)linkWithTitle:.*?\\n}\\n',
+    r'%new\s+'
+    r'- \(YTSettingsSectionItem \*\)linkWithTitle:.*?\n}\n',
     re.DOTALL,
 )
 s, helper_count = link_helper.subn('', s, count=1)
