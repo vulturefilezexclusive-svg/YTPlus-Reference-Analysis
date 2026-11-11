@@ -144,12 +144,16 @@ private final class TrapTubeStemModel: ObservableObject {
         let selectedModel = self.selectedModel
 
         Task.detached(priority: .userInitiated) {
+            var stage = "Audio decoding"
             do {
                 let pcm = try Self.readStereo(selectedFile)
+                stage = "HTDemucs model loading"
                 await self.setStatus("Loading HTDemucs…", progress: 0.02)
                 try await engine.load(selectedModel)
+                stage = "Metal GPU warmup"
                 await self.setStatus("Preparing Metal inference…", progress: 0.05)
                 try await engine.warmup()
+                stage = "HTDemucs source separation"
                 let separated = try await engine.separate(
                     left: pcm.left,
                     right: pcm.right,
@@ -161,6 +165,7 @@ private final class TrapTubeStemModel: ObservableObject {
                     }
                 }
 
+                stage = "Stem WAV export"
                 try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
                 var result: [String: URL] = [:]
                 for stem in separated {
@@ -180,7 +185,7 @@ private final class TrapTubeStemModel: ObservableObject {
                 }
                 await self.finish(result)
             } catch {
-                let detail = "Demucs processing failed: \\(error.localizedDescription)"
+                let detail = "\(stage) failed: \(error.localizedDescription)"
                 NSLog("[TrapTube Stem Studio] %@", detail)
                 await self.fail(detail)
             }
