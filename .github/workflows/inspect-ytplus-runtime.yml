@@ -26,7 +26,7 @@ jobs:
           curl --fail --location --retry 3 "$URL" -o reference.ipa
           echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
 
-      - name: Dump original YTLite Objective-C runtime metadata
+      - name: Dump original YTLite and YouTube host runtime metadata
         shell: bash
         run: |
           set -euo pipefail
@@ -35,25 +35,41 @@ jobs:
           APP="$(find unpack/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -s "$APP/Frameworks/YTLite.dylib"
           otool -ov "$APP/Frameworks/YTLite.dylib" > output/ytlite-objc-runtime.txt
+          otool -ov "$APP/YouTube" > output/youtube-host-objc-runtime.txt
+          otool -v -s __TEXT __objc_methname "$APP/Frameworks/YTLite.dylib" > output/ytlite-method-names.txt
           strings -a "$APP/Frameworks/YTLite.dylib" > output/ytlite-strings.txt
           otool -L "$APP/Frameworks/YTLite.dylib" > output/ytlite-linkage.txt
           python3 - <<'PY'
           from pathlib import Path
-          source = Path("output/ytlite-objc-runtime.txt").read_text(errors="replace").splitlines()
-          terms = [
+          output = []
+          tweak = Path("output/ytlite-objc-runtime.txt").read_text(errors="replace").splitlines()
+          tweak_terms = [
               "WelcomeVC", "YTPivotTabBarController", "YTSettingsViewController",
               "YTSettingsSectionItemManager", "YTPTabHelper", "YTPDownloader",
               "YTPPlayerEngine", "YTPPlayerSettings", "YTPActionButton",
           ]
-          output = []
-          for term in terms:
-              hits = [i for i, line in enumerate(source) if term in line]
-              output.append(f"===== {term}: {len(hits)} matches =====")
+          for term in tweak_terms:
+              hits = [i for i, line in enumerate(tweak) if term in line]
+              output.append(f"===== YTLITE {term}: {len(hits)} matches =====")
               for i in hits[:8]:
-                  lo, hi = max(0, i - 12), min(len(source), i + 90)
-                  output.extend(f"{n+1}: {source[n]}" for n in range(lo, hi))
+                  lo, hi = max(0, i - 12), min(len(tweak), i + 90)
+                  output.extend(f"T{n+1}: {tweak[n]}" for n in range(lo, hi))
+
+          host = Path("output/youtube-host-objc-runtime.txt").read_text(errors="replace").splitlines()
+          host_terms = [
+              "YTPivotBarView", "YTPivotBarViewController", "YTPivotBarItemView",
+              "YTTabViewController", "YTTabInsertionCommandHandler",
+              "YTTabUpdateCommandHandler", "YTSettingsViewController",
+          ]
+          for term in host_terms:
+              hits = [i for i, line in enumerate(host) if term in line]
+              output.append(f"===== HOST {term}: {len(hits)} matches =====")
+              for i in hits[:6]:
+                  lo, hi = max(0, i - 8), min(len(host), i + 75)
+                  output.extend(f"H{n+1}: {host[n]}" for n in range(lo, hi))
+
           Path("output/runtime-class-excerpts.txt").write_text("\n".join(output) + "\n")
-          print("Wrote Objective-C class and method excerpts.")
+          print("Wrote YTLite and host Objective-C class excerpts.")
           PY
           test -s output/runtime-class-excerpts.txt
           echo "Runtime metadata captured; class availability is reported rather than assumed."
