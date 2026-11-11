@@ -20,7 +20,7 @@ jobs:
           set -euo pipefail
           mkdir -p input output
           curl --fail --location --retry 3 --retry-all-errors \
-            'https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube' \
+            'https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.%40ipavault.ipa' \
             --output input/reference.ipa
           echo "## Download validation" > output/download-validation.txt
           file input/reference.ipa | tee -a output/download-validation.txt
