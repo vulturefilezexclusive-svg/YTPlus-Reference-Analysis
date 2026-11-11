@@ -755,6 +755,9 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
             if ([item respondsToSelector:setNavigationEndpoint]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(item, setNavigationEndpoint, nil);
             }
+            if ([item respondsToSelector:setIconType]) {
+                ((void (*)(id, SEL, NSInteger))objc_msgSend)(item, setIconType, YT_AUDIO);
+            }
             [items addObject:stem];
         }
     }
