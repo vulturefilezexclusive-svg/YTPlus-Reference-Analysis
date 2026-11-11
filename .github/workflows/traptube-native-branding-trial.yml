@@ -102,7 +102,10 @@ jobs:
             STEMKIT_BINARY="$GITHUB_WORKSPACE/build-output/Frameworks/TrapTubeStemKit.framework/TrapTubeStemKit"
             STEMKIT_KIND="framework"
           else
-            STEMKIT_DYLIB="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type f \\( -name 'libTrapTubeStemKit.dylib' -o -name 'TrapTubeStemKit.dylib' \\) -print -quit)"
+            STEMKIT_DYLIB="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type f -name 'libTrapTubeStemKit.dylib' -print -quit)"
+            if [[ -z "$STEMKIT_DYLIB" ]]; then
+              STEMKIT_DYLIB="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type f -name 'TrapTubeStemKit.dylib' -print -quit)"
+            fi
             test -n "$STEMKIT_DYLIB" && test -s "$STEMKIT_DYLIB" || { echo "SwiftPM StemKit product was neither a framework nor a dylib."; exit 4; }
             cp "$STEMKIT_DYLIB" "$GITHUB_WORKSPACE/build-output/Frameworks/libTrapTubeStemKit.dylib"
             install_name_tool -id '@rpath/libTrapTubeStemKit.dylib' "$GITHUB_WORKSPACE/build-output/Frameworks/libTrapTubeStemKit.dylib"
