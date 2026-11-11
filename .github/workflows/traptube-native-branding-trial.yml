@@ -323,7 +323,11 @@ jobs:
             echo "Unsafe four-submodel fine-tuned load path reintroduced in TrapTube StemKit." >&2
             exit 6
           fi
-          grep -Fq 'private let engine = DemucsEngine()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'private lazy var engine: DemucsEngine = {' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq '_ = TrapTubeStemStorage.configured' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'return DemucsEngine()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'HTDemucs model loading' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'HTDemucs source separation' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           if [[ -d "$APP/Frameworks/DemucsFramework.framework" ]]; then
             test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
           fi
