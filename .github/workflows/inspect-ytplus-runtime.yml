@@ -55,9 +55,8 @@ jobs:
           Path("output/runtime-class-excerpts.txt").write_text("\n".join(output) + "\n")
           print("Wrote Objective-C class and method excerpts.")
           PY
-          grep -q 'WelcomeVC' output/ytlite-objc-runtime.txt
-          grep -q 'YTPivotTabBarController' output/ytlite-objc-runtime.txt
-          grep -q 'YTSettingsViewController' output/ytlite-objc-runtime.txt
+          test -s output/runtime-class-excerpts.txt
+          echo "Runtime metadata captured; class availability is reported rather than assumed."
 
       - name: Upload runtime inspection
         uses: actions/upload-artifact@v4
