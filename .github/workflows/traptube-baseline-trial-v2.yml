@@ -1,0 +1,87 @@
+name: TrapTube Baseline Trial IPA v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/traptube-baseline-trial-v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-trial:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        name: Checkout isolated packaging workflow
+
+      - name: Download and verify pinned baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa'
+          curl --fail --location --retry 3 "$URL" -o reference.ipa
+          echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
+
+      - name: Rebrand and package trial IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work output
+          ditto -x -k reference.ipa work
+          python3 <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          payload = Path("work/Payload")
+          apps = list(payload.glob("*.app"))
+          if len(apps) != 1:
+              raise SystemExit(f"Expected one app bundle, found {len(apps)}")
+          app = apps[0]
+          plist_path = app / "Info.plist"
+          with plist_path.open("rb") as f:
+              info = plistlib.load(f)
+          bundle_id = info.get("CFBundleIdentifier")
+          if bundle_id != "com.google.ios.youtube":
+              raise SystemExit(f"Unexpected bundle ID: {bundle_id!r}")
+          executable = info.get("CFBundleExecutable")
+          if not executable or not (app / executable).is_file():
+              raise SystemExit(f"Missing main executable: {executable!r}")
+          info["CFBundleDisplayName"] = "TrapTube"
+          info["CFBundleName"] = "TrapTube"
+          with plist_path.open("wb") as f:
+              plistlib.dump(info, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+          dylibs = sorted(str(p.relative_to(app)) for p in app.rglob("*.dylib"))
+          ytlite = any(Path(p).name == "YTLite.dylib" for p in dylibs)
+          Path("output/dylib-inventory.txt").write_text("\\n".join(dylibs) + "\\n")
+          Path("output/TRIAL-SCOPE.txt").write_text(
+              "TrapTube / YTPlus baseline packaging trial\\n"
+              "Base: YouTube 21.40.5 + YTPlus 6.0b2\\n"
+              f"Bundle ID preserved: {bundle_id}\\n"
+              "Display name: TrapTube\\n"
+              f"YTLite.dylib found: {ytlite}\\n"
+              "This is a baseline repackaging trial, not the completed feature integration.\\n"
+              "Stem Studio tab, native TrapTube theme settings, custom splash screen, and HTDemucs "
+              "injection are not included in this trial.\\n"
+              "IPA is unsigned and requires compatible sideloading signing before installation.\\n"
+          )
+          print(f"Validated {app.name}; bundle={bundle_id}; executable={executable}")
+          print(f"Dylib count={len(dylibs)}; YTLite present={ytlite}")
+          PY
+          ditto -c -k --sequesterRsrc --keepParent work/Payload output/TrapTube-YTPlus-Baseline-Trial.ipa
+          shasum -a 256 output/TrapTube-YTPlus-Baseline-Trial.ipa | tee output/ipa-sha256.txt
+
+      - name: Upload trial IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: traptube-ytplus-baseline-trial-v2
+          path: |
+            output/TrapTube-YTPlus-Baseline-Trial.ipa
+            output/ipa-sha256.txt
+            output/TRIAL-SCOPE.txt
+            output/dylib-inventory.txt
+          if-no-files-found: error
+          retention-days: 14
