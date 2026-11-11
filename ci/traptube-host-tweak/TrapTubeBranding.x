@@ -270,7 +270,8 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
     self.view.backgroundColor = [UIColor colorWithRed:0.025 green:0.025 blue:0.035 alpha:1.0];
 
     CGFloat hue = 0.98, saturation = 0.92, brightness = 0.82;
-    CGFloat initialAlpha = 1.0;\n    [TTAccentColor() getHue:&hue saturation:&saturation brightness:&brightness alpha:&initialAlpha];
+    CGFloat initialAlpha = 1.0;
+    [TTAccentColor() getHue:&hue saturation:&saturation brightness:&brightness alpha:&initialAlpha];
     self.hue = hue; self.saturation = saturation; self.brightness = brightness;
 
     UIScrollView *scroll = [[UIScrollView alloc] init];
@@ -416,7 +417,8 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
 }
 
 - (void)setFromColor:(UIColor *)color {
-    CGFloat alpha = 1.0;\n    [color getHue:&_hue saturation:&_saturation brightness:&_brightness alpha:&alpha];
+    CGFloat alpha = 1.0;
+    [color getHue:&_hue saturation:&_saturation brightness:&_brightness alpha:&alpha];
     self.hueWheel.hue = self.hue;
     self.svSquare.hue = self.hue;
     self.svSquare.saturation = self.saturation;
@@ -494,7 +496,8 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
             if ([controller respondsToSelector:@selector(message)]) message = [controller valueForKey:@"message"];
         } @catch (__unused NSException *exception) {}
         NSString *combined = [NSString stringWithFormat:@"%@ %@", title ?: @"", message ?: @""].lowercaseString;
-        if ([title.lowercaseString isEqualToString:@"advanced"] ||\n            [combined containsString:@"advanced mode"] ||
+        if ([title.lowercaseString isEqualToString:@"advanced"] ||
+            [combined containsString:@"advanced mode"] ||
             [combined containsString:@"advanced settings"] ||
             [combined containsString:@"ytlite"] ||
             [combined containsString:@"ytplus"] ||
