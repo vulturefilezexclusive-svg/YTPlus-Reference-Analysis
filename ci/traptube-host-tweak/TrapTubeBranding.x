@@ -999,11 +999,10 @@ static void TTShowHostileTakeoverSplash(void) {
     [controller.view addSubview:title];
 
     UILabel *tagline = [[UILabel alloc] init];
-    tagline.text = @"HOSTILE YOUTUBE TAKEOVER";
+    tagline.attributedText = [[NSAttributedString alloc] initWithString:@"HOSTILE YOUTUBE TAKEOVER" attributes:@{NSKernAttributeName: @1.4}];
     tagline.textColor = [UIColor colorWithRed:0.91 green:0.035 blue:0.12 alpha:1.0];
     tagline.textAlignment = NSTextAlignmentCenter;
     tagline.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
-    tagline.letterSpacing = 1.4;
     tagline.translatesAutoresizingMaskIntoConstraints = NO;
     [controller.view addSubview:tagline];
 
