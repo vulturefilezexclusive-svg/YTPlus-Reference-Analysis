@@ -186,7 +186,7 @@ static BOOL TTShouldHideSettingsItem(id item) {
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
         @"twitter", @"support", @"github", @"telegram", @"social",
-        @"developer", @"credits", @"open source", @"contributors", "feedback"
+        @"developer", @"credits", @"open source", @@"contributors", @"feedback"
     ];
     for (NSString *label in hiddenLabels) {
         if ([value containsString:label]) return YES;
