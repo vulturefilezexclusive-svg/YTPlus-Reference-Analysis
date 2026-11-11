@@ -105,7 +105,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet Pillow
+          python3 -m venv "$RUNNER_TEMP/traptube-venv"
+          source "$RUNNER_TEMP/traptube-venv/bin/activate"
+          python -m pip install --quiet Pillow
           mkdir -p host output
           ditto -x -k reference.ipa host
           APP="$(find host/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
