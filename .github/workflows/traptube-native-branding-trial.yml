@@ -1,0 +1,222 @@
+name: TrapTube Native Branding and Theme Trial
+
+on:
+  push:
+    branches: [feature/traptube-ytplus-native-rebrand]
+    paths:
+      - .github/workflows/traptube-native-branding-trial.yml
+      - ci/traptube-host-tweak/**
+      - ci/patches/TrapTube-Third-Party-Notices.md
+      - ci/patches/TrapTubeLaunch.storyboard
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout TrapTube host integration
+        uses: actions/checkout@v4
+
+      - name: Download and verify pinned YTPlus host IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa'
+          curl --fail --location --retry 3 "$URL" -o reference.ipa
+          echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
+
+      - name: Extract TrapTube's existing house and crown app icon
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 https://github.com/vulturefilezexclusive-svg/TrapTube.git traptube-source
+          mkdir -p traptube-source-project
+          unzip -oq traptube-source/ci/source.zip -d traptube-source-project
+          ICON_SET="$(find traptube-source-project -type d -name 'AppIcon.appiconset' -print -quit)"
+          if [[ -n "$ICON_SET" ]]; then
+            ICON_SOURCE="$(python3 - "$ICON_SET" <<'PY'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1])
+          images = [p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+          print(max(images, key=lambda p: p.stat().st_size) if images else "")
+          PY
+          )"
+          else
+            ICON_SOURCE="$(find traptube-source-project -type f \( -iname '*traptube*icon*.png' -o -iname '*appicon*.png' -o -iname '*logo*.png' \) -print -quit)"
+          fi
+          test -n "$ICON_SOURCE" && test -s "$ICON_SOURCE" || { echo "TrapTube's existing app icon asset was not found in ci/source.zip."; exit 3; }
+          mkdir -p build-assets
+          cp "$ICON_SOURCE" build-assets/TrapTube-source-icon
+          echo "Using TrapTube icon asset: $ICON_SOURCE"
+
+      - name: Install Theos build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install make ldid
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
+
+      - name: Install Theos, iOS SDK, and YouTube headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --recurse-submodules https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+          git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          cd "$RUNNER_TEMP/theos-sdks"
+          git sparse-checkout set --no-cone iPhoneOS16.5.sdk
+          git checkout
+          mkdir -p "$RUNNER_TEMP/theos/sdks" "$RUNNER_TEMP/theos/include"
+          cp -R iPhoneOS16.5.sdk "$RUNNER_TEMP/theos/sdks/"
+          git clone --quiet --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$RUNNER_TEMP/theos/include/YouTubeHeader"
+          git clone --quiet --depth 1 https://github.com/PoomSmart/PSHeader.git "$RUNNER_TEMP/theos/include/PSHeader"
+
+      - name: Compile native TrapTube host branding tweak
+        shell: bash
+        run: |
+          set -euo pipefail
+          make -C ci/traptube-host-tweak clean all
+          DYLIB="$(find ci/traptube-host-tweak -type f -name 'TrapTubeBranding.dylib' -print -quit)"
+          test -n "$DYLIB" && test -s "$DYLIB"
+          mkdir -p build-output
+          cp "$DYLIB" build-output/TrapTubeBranding.dylib
+          if otool -L build-output/TrapTubeBranding.dylib | grep -Fq '@rpath/libsubstrate.dylib'; then
+            install_name_tool -change '@rpath/libsubstrate.dylib' '@rpath/CydiaSubstrate.framework/CydiaSubstrate' build-output/TrapTubeBranding.dylib
+          fi
+          lipo -info build-output/TrapTubeBranding.dylib
+          otool -L build-output/TrapTubeBranding.dylib | tee build-output/branding-linkage.txt
+
+      - name: Build Mach-O dylib injector
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 https://github.com/tyilo/insert_dylib.git insert-dylib-source
+          xcrun --sdk macosx clang -O2 -Wall -Wno-deprecated-declarations \
+            insert-dylib-source/insert_dylib/main.c -o insert_dylib
+          chmod +x insert_dylib
+          ./insert_dylib --help || true
+
+      - name: Rebrand host app, install native launch screen, and inject TrapTube settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet Pillow
+          mkdir -p host output
+          ditto -x -k reference.ipa host
+          APP="$(find host/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          with path.open("rb") as f:
+              info = plistlib.load(f)
+          if info.get("CFBundleIdentifier") != "com.google.ios.youtube":
+              raise SystemExit("Unexpected host bundle identifier; refusing to change it.")
+          info["CFBundleDisplayName"] = "TrapTube"
+          info["CFBundleName"] = "TrapTube"
+          info["UILaunchStoryboardName"] = "TrapTubeLaunch"
+          for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
+              icons = info.get(key)
+              if not isinstance(icons, dict):
+                  continue
+              icons.pop("CFBundleAlternateIcons", None)
+              primary = icons.get("CFBundlePrimaryIcon")
+              if isinstance(primary, dict):
+                  primary.pop("CFBundleIconName", None)
+          with path.open("wb") as f:
+              plistlib.dump(info, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+          PY
+          python3 - build-assets/TrapTube-source-icon "$APP" <<'PY'
+          from pathlib import Path
+          from PIL import Image, ImageDraw, ImageFilter
+          import sys
+          source = Path(sys.argv[1])
+          app = Path(sys.argv[2])
+          icon = Image.open(source).convert("RGBA")
+          side = min(icon.size)
+          left = (icon.width - side) // 2
+          top = (icon.height - side) // 2
+          icon = icon.crop((left, top, left + side, top + side))
+          icon1024 = icon.resize((1024, 1024), Image.Resampling.LANCZOS)
+          # Flatten app icons onto the app's dark base so they remain opaque.
+          opaque = Image.new("RGBA", (1024, 1024), (7, 6, 10, 255))
+          opaque.alpha_composite(icon1024)
+          opaque.convert("RGB").save(app / "logo_youtube_2024_q4_color60x60@2x.png", quality=100)
+          opaque.resize((152, 152), Image.Resampling.LANCZOS).save(app / "logo_youtube_2024_q4_color76x76@2x~ipad.png")
+          opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon1.png")
+          opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon2.png")
+          opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon3.png")
+          # A transparent launch logo is placed on the launch screen's near-black canvas.
+          icon_launch = icon.resize((512, 512), Image.Resampling.LANCZOS)
+          icon_launch.save(app / "TrapTubeLaunchLogo.png")
+          print(f"Prepared TrapTube app icon from {source}")
+          PY
+          ibtool --compile "$APP/TrapTubeLaunch.storyboardc" ci/patches/TrapTubeLaunch.storyboard
+          mkdir -p "$APP/Frameworks"
+          cp build-output/TrapTubeBranding.dylib "$APP/Frameworks/TrapTubeBranding.dylib"
+          ./insert_dylib --inplace --all-yes '@rpath/TrapTubeBranding.dylib' "$APP/YouTube"
+          python3 - "$APP/YTLite.bundle" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          if root.is_dir():
+              for path in root.rglob("Localizable.strings"):
+                  try:
+                      with path.open("rb") as f:
+                          values = plistlib.load(f)
+                  except Exception:
+                      continue
+                  if isinstance(values, dict):
+                      for key, value in list(values.items()):
+                          if isinstance(value, str):
+                              values[key] = value.replace("YouTube Plus", "TrapTube").replace("YTPlus", "TrapTube").replace("YTLite", "TrapTube")
+                      with path.open("wb") as f:
+                          plistlib.dump(values, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+          PY
+          cp ci/patches/TrapTube-Third-Party-Notices.md "$APP/TrapTube-Third-Party-Notices.md"
+          find "$APP" -type d -name _CodeSignature -prune -exec rm -rf {} +
+          find "$APP" -type f -name CodeResources -delete
+          ditto -c -k --sequesterRsrc --keepParent host/Payload output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
+          shasum -a 256 output/TrapTube-YTPlus-Branding-Theme-Trial.ipa | tee output/ipa-sha256.txt
+
+      - name: Verify actual in-app integration payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          ditto -x -k output/TrapTube-YTPlus-Branding-Theme-Trial.ipa verify
+          APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunch"
+          test -s "$APP/TrapTubeLaunch.storyboardc/Info.plist"
+          test -s "$APP/TrapTubeLaunchLogo.png"
+          test -s "$APP/Frameworks/TrapTubeBranding.dylib"
+          test -s "$APP/TrapTube-Third-Party-Notices.md"
+          otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
+          otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'CydiaSubstrate.framework/CydiaSubstrate'
+          strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
+          grep -q 'TrapTube Extensions' output/branding-binary-strings.txt
+          grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
+          grep -q 'WelcomeVC' output/branding-binary-strings.txt
+          test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
+          test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
+          unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
+          echo "Verified: TrapTube app icon payload, native launch storyboard, injected settings/branding tweak, and preserved original YTLite dylib."
+
+      - name: Upload TrapTube branded trial IPA and build audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: traptube-ytplus-branding-theme-trial-v1
+          path: |
+            output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
+            output/ipa-sha256.txt
+            output/branding-linkage.txt
+            output/branding-binary-strings.txt
+          if-no-files-found: error
+          retention-days: 14
