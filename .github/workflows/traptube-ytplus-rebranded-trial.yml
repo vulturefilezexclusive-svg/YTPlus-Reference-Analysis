@@ -1,6 +1,12 @@
 name: TrapTube YTPlus Rebranded Trial IPA
 
 on:
+  push:
+    branches: [feature/traptube-ytplus-native-rebrand]
+    paths:
+      - .github/workflows/traptube-ytplus-rebranded-trial.yml
+      - ci/patches/PatchYTLiteForTrapTube.py
+      - ci/patches/TrapTube-Third-Party-Notices.md
   workflow_dispatch:
 
 permissions:
