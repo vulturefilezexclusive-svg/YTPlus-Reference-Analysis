@@ -4,7 +4,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 import Demucs
 
-@objc public final class TrapTubeStemStudioFactory: NSObject {
+@objc(TrapTubeStemStudioFactory) public final class TrapTubeStemStudioFactory: NSObject {
     @objc public static func makeViewController() -> UIViewController {
         let controller = UIHostingController(rootView: TrapTubeStemStudioView())
         controller.title = "Stem Studio"
