@@ -1,0 +1,73 @@
+name: Inspect Complete YTPlus Host Runtime
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Download and verify pinned host IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa'
+          curl --fail --location --retry 3 "$URL" -o reference.ipa
+          echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
+          mkdir -p unpack output
+          ditto -x -k reference.ipa unpack
+          APP="$(find unpack/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          HOST="$APP/$EXECUTABLE"
+          YTLITE="$APP/Frameworks/YTLite.dylib"
+          test -s "$HOST"
+          test -s "$YTLITE"
+          printf 'App=%s\nExecutable=%s\n' "$APP" "$EXECUTABLE" > output/host-identity.txt
+          shasum -a 256 "$HOST" "$YTLITE" >> output/host-identity.txt
+          file "$HOST" "$YTLITE" >> output/host-identity.txt
+          lipo -info "$HOST" >> output/host-identity.txt
+          lipo -info "$YTLITE" >> output/host-identity.txt
+      - name: Dump Objective-C runtime metadata for host and tweak
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="$(find unpack/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          HOST="$APP/$EXECUTABLE"
+          YTLITE="$APP/Frameworks/YTLite.dylib"
+          otool -ov "$HOST" > output/youtube-host-objc-runtime.txt
+          otool -ov "$YTLITE" > output/ytlite-objc-runtime.txt
+          otool -v -s __TEXT __objc_methname "$HOST" > output/youtube-host-method-names.txt
+          otool -v -s __TEXT __objc_methname "$YTLITE" > output/ytlite-method-names.txt
+          strings -a "$HOST" > output/youtube-host-strings.txt
+          strings -a "$YTLITE" > output/ytlite-strings.txt
+          otool -L "$HOST" > output/youtube-host-linkage.txt
+          otool -L "$YTLITE" > output/ytlite-linkage.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          host=Path("output/youtube-host-objc-runtime.txt").read_text(errors="replace").splitlines()
+          tweak=Path("output/ytlite-objc-runtime.txt").read_text(errors="replace").splitlines()
+          host_terms=["YTPivotBarView","YTPivotBarViewController","YTPivotBarItemView","YTTabViewController","YTTabsViewController","YTTabInsertionCommandHandler","YTTabUpdateCommandHandler","YTSettingsViewController","YTSettingsViewControllerRegistrationProvider"]
+          tweak_terms=["WelcomeVC","YTSettingsViewController","YTSettingsSectionItemManager","YTPivotTabBarController"]
+          out=[]
+          for label,lines,terms in [("HOST",host,host_terms),("YTLITE",tweak,tweak_terms)]:
+              for term in terms:
+                  hits=[i for i,line in enumerate(lines) if term in line]
+                  out.append(f"===== {label} {term}: {len(hits)} matches =====")
+                  for i in hits[:8]:
+                      out.extend(f"{j+1}: {lines[j]}" for j in range(max(0,i-10),min(len(lines),i+95)))
+          Path("output/runtime-class-excerpts.txt").write_text("\n".join(out)+"\n")
+          print("Host and tweak runtime metadata captured.")
+          PY
+          test -s output/youtube-host-objc-runtime.txt
+          test -s output/ytlite-objc-runtime.txt
+          test -s output/runtime-class-excerpts.txt
+      - name: Upload complete runtime inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: traptube-ytplus-complete-runtime
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
