@@ -31,38 +31,55 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p work
+          mkdir -p work output
           ditto -x -k reference.ipa work
-          APP='work/Payload/YouTube.app'
-          test -d "$APP"
-          PLIST="$APP/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" | grep -Fx 'com.google.ios.youtube'
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName TrapTube' "$PLIST"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleName TrapTube' "$PLIST"
-          /usr/libexec/PlistBuddy -c 'Set :CFBundleShortVersionString 21.40.5' "$PLIST"
-          /usr/libexec/PlistBuddy -c 'Set :MinimumOSVersion 17.0' "$PLIST"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$PLIST" | grep -Fx 'TrapTube'
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST" | grep -Fx 'com.google.ios.youtube'
-          test -x "$APP/YouTube"
-          file "$APP/YouTube"
-          find "$APP" -name '*.dylib' -print | sort > dylibs.txt
-          cat dylibs.txt
-          grep -q '/YTLite.dylib
-          mkdir -p output
+          python3 <<'PY'
+          import plistlib
+          from pathlib import Path
+
+          payload = Path("work/Payload")
+          apps = list(payload.glob("*.app"))
+          if len(apps) != 1:
+              raise SystemExit(f"Expected exactly one .app, found {len(apps)}")
+          app = apps[0]
+          plist_path = app / "Info.plist"
+          with plist_path.open("rb") as f:
+              info = plistlib.load(f)
+          bundle_id = info.get("CFBundleIdentifier")
+          if bundle_id != "com.google.ios.youtube":
+              raise SystemExit(f"Unexpected bundle ID: {bundle_id!r}")
+          executable = info.get("CFBundleExecutable")
+          if not executable or not (app / executable).is_file():
+              raise SystemExit(f"Main executable missing: {executable!r}")
+          info["CFBundleDisplayName"] = "TrapTube"
+          info["CFBundleName"] = "TrapTube"
+          info["CFBundleShortVersionString"] = "21.40.5"
+          info["MinimumOSVersion"] = "17.0"
+          with plist_path.open("wb") as f:
+              plistlib.dump(info, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+          dylibs = sorted(str(p.relative_to(app)) for p in app.rglob("*.dylib"))
+          ytlite = [p for p in dylibs if Path(p).name == "YTLite.dylib"]
+          (Path("output") / "dylib-inventory.txt").write_text(
+              "\\n".join(dylibs) + "\\n", encoding="utf-8"
+          )
+          (Path("output") / "TRIAL-SCOPE.txt").write_text(
+              "TrapTube / YTPlus baseline packaging trial\\n"
+              "Base: YouTube 21.40.5 + YTPlus 6.0b2\\n"
+              f"Bundle ID: {bundle_id} (preserved)\\n"
+              "Display name: TrapTube\\n"
+              f"YTLite.dylib found: {bool(ytlite)}\\n"
+              "This trial verifies the pinned host archive, metadata rebrand, and IPA repackaging.\\n"
+              "It does NOT yet include the native Stem Studio tab, TrapTube theme settings integration, "
+              "custom TrapTube launch screen, or HTDemucs feature injection. Those require a separately "
+              "compiled and runtime-verified host integration component.\\n"
+              "The IPA is unsigned and must be signed with a compatible sideloading identity.\\n",
+              encoding="utf-8"
+          )
+          print(f"Validated {app.name}; bundle={bundle_id}; executable={executable}")
+          print(f"Found {len(dylibs)} dylibs; YTLite.dylib present={bool(ytlite)}")
+          PY
           ditto -c -k --sequesterRsrc --keepParent work/Payload output/TrapTube-YTPlus-Baseline-Trial.ipa
           shasum -a 256 output/TrapTube-YTPlus-Baseline-Trial.ipa | tee output/ipa-sha256.txt
-          cat > output/TRIAL-SCOPE.txt <<'EOF'
-          TrapTube / YTPlus baseline packaging trial
-          Base: YouTube 21.40.5 + YTPlus 6.0b2
-          Bundle ID: com.google.ios.youtube (preserved)
-          Display name: TrapTube
-          YTLite.dylib: verified present
-          This trial verifies the pinned host archive, metadata rebrand, and IPA repackaging.
-          It does NOT yet include the native Stem Studio tab, TrapTube theme settings integration,
-          custom TrapTube launch screen, or HTDemucs feature injection. Those require a separately
-          compiled and runtime-verified host integration component.
-          The IPA is unsigned and must be signed with a compatible sideloading identity.
-          EOF
 
       - name: Upload trial IPA and validation report
         uses: actions/upload-artifact@v4
@@ -71,7 +88,7 @@ jobs:
           path: |
             output/TrapTube-YTPlus-Baseline-Trial.ipa
             output/ipa-sha256.txt
-            output/TRIAL-SCOPE.txt
+            output/TRIAL-SCOPE.txt\n            output/dylib-inventory.txt
           if-no-files-found: error
           retention-days: 14
  dylibs.txt
