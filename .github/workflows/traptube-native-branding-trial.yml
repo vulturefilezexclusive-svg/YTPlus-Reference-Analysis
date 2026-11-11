@@ -94,10 +94,23 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build
           FRAMEWORK="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type d -name 'TrapTubeStemKit.framework' -print -quit)"
-          test -n "$FRAMEWORK" && test -s "$FRAMEWORK/TrapTubeStemKit"
-          ditto "$FRAMEWORK" "$GITHUB_WORKSPACE/build-output/Frameworks/TrapTubeStemKit.framework"
-          otool -L "$FRAMEWORK/TrapTubeStemKit" | tee "$GITHUB_WORKSPACE/build-output/stemkit-linkage.txt"
-          if otool -L "$FRAMEWORK/TrapTubeStemKit" | grep -Fq 'DemucsFramework.framework/DemucsFramework'; then
+          STEMKIT_KIND=""
+          STEMKIT_BINARY=""
+          if [[ -n "$FRAMEWORK" ]]; then
+            test -s "$FRAMEWORK/TrapTubeStemKit"
+            ditto "$FRAMEWORK" "$GITHUB_WORKSPACE/build-output/Frameworks/TrapTubeStemKit.framework"
+            STEMKIT_BINARY="$GITHUB_WORKSPACE/build-output/Frameworks/TrapTubeStemKit.framework/TrapTubeStemKit"
+            STEMKIT_KIND="framework"
+          else
+            STEMKIT_DYLIB="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type f \\( -name 'libTrapTubeStemKit.dylib' -o -name 'TrapTubeStemKit.dylib' \\) -print -quit)"
+            test -n "$STEMKIT_DYLIB" && test -s "$STEMKIT_DYLIB" || { echo "SwiftPM StemKit product was neither a framework nor a dylib."; exit 4; }
+            cp "$STEMKIT_DYLIB" "$GITHUB_WORKSPACE/build-output/Frameworks/libTrapTubeStemKit.dylib"
+            install_name_tool -id '@rpath/libTrapTubeStemKit.dylib' "$GITHUB_WORKSPACE/build-output/Frameworks/libTrapTubeStemKit.dylib"
+            STEMKIT_BINARY="$GITHUB_WORKSPACE/build-output/Frameworks/libTrapTubeStemKit.dylib"
+            STEMKIT_KIND="dylib"
+          fi
+          otool -L "$STEMKIT_BINARY" | tee "$GITHUB_WORKSPACE/build-output/stemkit-linkage.txt"
+          if otool -L "$STEMKIT_BINARY" | grep -Fq 'DemucsFramework.framework/DemucsFramework'; then
             XCFRAMEWORK="$(find "$RUNNER_TEMP/stemkit-build/SourcePackages/artifacts" "$GITHUB_WORKSPACE/ci/TrapTubeStemKit" -type d -name 'DemucsFramework.xcframework' -print -quit)"
             test -n "$XCFRAMEWORK" || { echo "DemucsFramework.xcframework dependency was not found."; exit 5; }
             DEMUCS_SLICE="$(find "$XCFRAMEWORK" -type d -path '*/ios-arm64/DemucsFramework.framework' -print -quit)"
@@ -105,6 +118,7 @@ jobs:
             ditto "$DEMUCS_SLICE" "$GITHUB_WORKSPACE/build-output/Frameworks/DemucsFramework.framework"
           fi
           echo "TRAPTUBE_STEMKIT_FRAMEWORKS=$GITHUB_WORKSPACE/build-output/Frameworks" >> "$GITHUB_ENV"
+          echo "TRAPTUBE_STEMKIT_KIND=$STEMKIT_KIND" >> "$GITHUB_ENV"
 
       - name: Compile native TrapTube host branding tweak
         shell: bash
@@ -191,7 +205,11 @@ jobs:
           PY
           ibtool --compile "$APP/TrapTubeLaunch.storyboardc" ci/patches/TrapTubeLaunch.storyboard
           mkdir -p "$APP/Frameworks"
-          ditto build-output/Frameworks/TrapTubeStemKit.framework "$APP/Frameworks/TrapTubeStemKit.framework"
+          if [[ -d build-output/Frameworks/TrapTubeStemKit.framework ]]; then
+            ditto build-output/Frameworks/TrapTubeStemKit.framework "$APP/Frameworks/TrapTubeStemKit.framework"
+          else
+            cp build-output/Frameworks/libTrapTubeStemKit.dylib "$APP/Frameworks/libTrapTubeStemKit.dylib"
+          fi
           if [[ -d build-output/Frameworks/DemucsFramework.framework ]]; then
             ditto build-output/Frameworks/DemucsFramework.framework "$APP/Frameworks/DemucsFramework.framework"
           fi
@@ -246,8 +264,16 @@ jobs:
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
           otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'CydiaSubstrate.framework/CydiaSubstrate'
-          otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'TrapTubeStemKit.framework/TrapTubeStemKit'
-          test -s "$APP/Frameworks/TrapTubeStemKit.framework/TrapTubeStemKit"
+          otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'TrapTubeStemKit'
+          if [[ -d "$APP/Frameworks/TrapTubeStemKit.framework" ]]; then
+            STEMKIT_BINARY="$APP/Frameworks/TrapTubeStemKit.framework/TrapTubeStemKit"
+            test -s "$STEMKIT_BINARY"
+          else
+            STEMKIT_BINARY="$APP/Frameworks/libTrapTubeStemKit.dylib"
+            test -s "$STEMKIT_BINARY"
+          fi
+          strings "$STEMKIT_BINARY" | grep -F 'TrapTubeStemStudioFactory'
+          strings "$STEMKIT_BINARY" | grep -F 'Separate into four stems'
           if [[ -d "$APP/Frameworks/DemucsFramework.framework" ]]; then
             test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
           fi
