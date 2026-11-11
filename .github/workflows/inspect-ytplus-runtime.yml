@@ -1,0 +1,68 @@
+name: Inspect YTPlus Runtime Integration Points
+
+on:
+  push:
+    branches: [feature/traptube-ytplus-native-rebrand]
+    paths:
+      - .github/workflows/inspect-ytplus-runtime.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout analysis workflow
+        uses: actions/checkout@v4
+
+      - name: Download pinned YTPlus host
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa'
+          curl --fail --location --retry 3 "$URL" -o reference.ipa
+          echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
+
+      - name: Dump original YTLite Objective-C runtime metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p unpack output
+          ditto -x -k reference.ipa unpack
+          APP="$(find unpack/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -s "$APP/Frameworks/YTLite.dylib"
+          otool -ov "$APP/Frameworks/YTLite.dylib" > output/ytlite-objc-runtime.txt
+          strings -a "$APP/Frameworks/YTLite.dylib" > output/ytlite-strings.txt
+          otool -L "$APP/Frameworks/YTLite.dylib" > output/ytlite-linkage.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path("output/ytlite-objc-runtime.txt").read_text(errors="replace").splitlines()
+          terms = [
+              "WelcomeVC", "YTPivotTabBarController", "YTSettingsViewController",
+              "YTSettingsSectionItemManager", "YTPTabHelper", "YTPDownloader",
+              "YTPPlayerEngine", "YTPPlayerSettings", "YTPActionButton",
+          ]
+          output = []
+          for term in terms:
+              hits = [i for i, line in enumerate(source) if term in line]
+              output.append(f"===== {term}: {len(hits)} matches =====")
+              for i in hits[:8]:
+                  lo, hi = max(0, i - 12), min(len(source), i + 90)
+                  output.extend(f"{n+1}: {source[n]}" for n in range(lo, hi))
+          Path("output/runtime-class-excerpts.txt").write_text("\n".join(output) + "\n")
+          print("Wrote Objective-C class and method excerpts.")
+          PY
+          grep -q 'WelcomeVC' output/ytlite-objc-runtime.txt
+          grep -q 'YTPivotTabBarController' output/ytlite-objc-runtime.txt
+          grep -q 'YTSettingsViewController' output/ytlite-objc-runtime.txt
+
+      - name: Upload runtime inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: traptube-ytplus-runtime-inspection
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
