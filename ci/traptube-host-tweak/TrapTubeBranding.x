@@ -318,7 +318,6 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
     hueLabel.text = @"HUE";
     hueLabel.textColor = [UIColor colorWithWhite:0.72 alpha:1];
     hueLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
-    hueLabel.letterSpacing = 2;
     [stack addArrangedSubview:hueLabel];
 
     self.hueWheel = [[TTHueWheelView alloc] init];
@@ -334,7 +333,6 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
     svLabel.text = @"SATURATION  /  BRIGHTNESS";
     svLabel.textColor = [UIColor colorWithWhite:0.72 alpha:1];
     svLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
-    svLabel.letterSpacing = 1.2;
     [stack addArrangedSubview:svLabel];
 
     self.svSquare = [[TTSaturationValueView alloc] init];
@@ -352,7 +350,6 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
     presetsLabel.text = @"TRAPTUBE PRESETS";
     presetsLabel.textColor = [UIColor colorWithWhite:0.72 alpha:1];
     presetsLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightHeavy];
-    presetsLabel.letterSpacing = 1.2;
     [stack addArrangedSubview:presetsLabel];
 
     UIStackView *presets = [[UIStackView alloc] init];
