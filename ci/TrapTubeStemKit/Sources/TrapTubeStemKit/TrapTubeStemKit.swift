@@ -135,12 +135,13 @@ private final class TrapTubeStemModel: ObservableObject {
         status = "Preparing stereo audio…"
         let destination = TrapTubeStemStorage.stems.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let engine = self.engine
+        let selectedModel = self.selectedModel
 
         Task.detached(priority: .userInitiated) {
             do {
                 let pcm = try Self.readStereo(selectedFile)
                 await self.setStatus("Loading HTDemucs…", progress: 0.02)
-                try await engine.load(self.selectedModel)
+                try await engine.load(selectedModel)
                 await self.setStatus("Preparing Metal inference…", progress: 0.05)
                 try await engine.warmup()
                 let separated = try await engine.separate(
