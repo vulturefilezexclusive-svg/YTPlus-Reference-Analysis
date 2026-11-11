@@ -318,6 +318,12 @@ jobs:
           fi
           strings "$STEMKIT_BINARY" | grep -F 'TrapTubeStemStudioFactory'
           strings "$STEMKIT_BINARY" | grep -F 'Separate into four stems'
+          grep -Fq 'private let selectedModel: DemucsModel = .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          if grep -Fq '.fineTunedAll' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then
+            echo "Unsafe four-submodel fine-tuned load path reintroduced in TrapTube StemKit." >&2
+            exit 6
+          fi
+          grep -Fq 'private let engine = DemucsEngine()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           if [[ -d "$APP/Frameworks/DemucsFramework.framework" ]]; then
             test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
           fi
