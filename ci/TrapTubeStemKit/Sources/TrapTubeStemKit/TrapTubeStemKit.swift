@@ -4,7 +4,7 @@ import AVFoundation
 import UniformTypeIdentifiers
 import Demucs
 
-@objc(TrapTubeStemStudioFactory) public final class TrapTubeStemStudioFactory: NSObject {
+@MainActor\n@objc(TrapTubeStemStudioFactory) public final class TrapTubeStemStudioFactory: NSObject {
     @objc public static func makeViewController() -> UIViewController {
         let controller = UIHostingController(rootView: TrapTubeStemStudioView())
         controller.title = "Stem Studio"
@@ -278,7 +278,7 @@ private final class TrapTubeStemModel: ObservableObject {
     }
 }
 
-private struct TrapTubeStemStudioView: View {
+@MainActor\nprivate struct TrapTubeStemStudioView: View {
     @StateObject private var model = TrapTubeStemModel()
     @State private var showImporter = false
 
