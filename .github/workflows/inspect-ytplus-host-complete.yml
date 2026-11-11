@@ -1,5 +1,9 @@
 name: Inspect Complete YTPlus Host Runtime
 on:
+  push:
+    branches: [feature/traptube-ytplus-native-rebrand]
+    paths:
+      - .github/workflows/inspect-ytplus-host-complete.yml
   workflow_dispatch:
 permissions:
   contents: read
