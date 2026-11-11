@@ -721,6 +721,7 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
         TTSelectStemStudio(controller);
         return;
     }
+    TTHideStemStudio(controller);
     %orig;
 }
 
