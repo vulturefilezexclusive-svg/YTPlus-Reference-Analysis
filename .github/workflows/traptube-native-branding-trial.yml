@@ -147,7 +147,7 @@ jobs:
           # Flatten app icons onto the app's dark base so they remain opaque.
           opaque = Image.new("RGBA", (1024, 1024), (7, 6, 10, 255))
           opaque.alpha_composite(icon1024)
-          opaque.convert("RGB").save(app / "logo_youtube_2024_q4_color60x60@2x.png", quality=100)
+          opaque.resize((120, 120), Image.Resampling.LANCZOS).convert("RGB").save(app / "logo_youtube_2024_q4_color60x60@2x.png")
           opaque.resize((152, 152), Image.Resampling.LANCZOS).save(app / "logo_youtube_2024_q4_color76x76@2x~ipad.png")
           opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon1.png")
           opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon2.png")
