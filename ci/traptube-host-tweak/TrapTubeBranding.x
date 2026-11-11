@@ -9,12 +9,32 @@
 #import "YTIIcon.h"
 #import "YTPivotBarItemView.h"
 #import "YTQTMButton.h"
+#import "YTIPivotBarRenderer.h"
+#import "YTIPivotBarSupportedRenderers.h"
+#import "YTIPivotBarItemRenderer.h"
+#import "YTIcon.h"
 
 @interface WelcomeVC : UIViewController
 @end
 
 @interface DVNAlertController : UIViewController
 @end
+
+@interface YTPivotBarView : UIView
+- (void)setRenderer:(YTIPivotBarRenderer *)renderer;
+@end
+
+@interface YTPivotBarViewController : UIViewController
+@property (nonatomic, copy) NSString *selectedPivotIdentifier;
+- (void)selectItemWithPivotIdentifier:(NSString *)identifier;
+- (void)updateViewsWithSelectedPivotIdentifier:(NSString *)identifier;
+@end
+
+@interface YTAppPivotBarController : NSObject
+@end
+
+static NSString * const TTStemPivotIdentifier = @"TRAPTUBE_STEM_STUDIO";
+static char TTStemStudioControllerKey;
 
 #pragma mark - TrapTube accent
 
@@ -54,6 +74,69 @@ static void TTApplyAccentGlobally(void) {
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         TTApplyAccentToWindow(window);
     }
+}
+
+static UINavigationController *TTAppNavigationController(YTPivotBarViewController *pivot) {
+    id parent = pivot.parentViewController;
+    id candidate = nil;
+    @try {
+        if ([parent respondsToSelector:NSSelectorFromString(@"appNavigationController")]) {
+            candidate = [parent valueForKey:@"appNavigationController"];
+        }
+    } @catch (__unused NSException *exception) {}
+    if ([candidate isKindOfClass:UINavigationController.class]) return candidate;
+    return pivot.navigationController;
+}
+
+static void TTShowStemStudio(YTPivotBarViewController *pivot) {
+    UINavigationController *navigation = TTAppNavigationController(pivot);
+    if (navigation && objc_getAssociatedObject(navigation.topViewController, &TTStemStudioControllerKey)) return;
+
+    Class factory = NSClassFromString(@"TrapTubeStemStudioFactory");
+    SEL selector = NSSelectorFromString(@"makeViewController");
+    UIViewController *controller = nil;
+    if (factory && [factory respondsToSelector:selector]) {
+        controller = ((id (*)(id, SEL))objc_msgSend)(factory, selector);
+    }
+    if (!controller) {
+        controller = [[UIViewController alloc] init];
+        controller.view.backgroundColor = [UIColor colorWithRed:0.025 green:0.025 blue:0.035 alpha:1];
+        UILabel *label = [[UILabel alloc] init];
+        label.text = @"Stem Studio is unavailable";
+        label.textColor = UIColor.whiteColor;
+        label.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
+        label.translatesAutoresizingMaskIntoConstraints = NO;
+        [controller.view addSubview:label];
+        [NSLayoutConstraint activateConstraints:@[
+            [label.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+            [label.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor]
+        ]];
+    }
+    controller.title = @"Stem Studio";
+    objc_setAssociatedObject(controller, &TTStemStudioControllerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (navigation) {
+        [navigation pushViewController:controller animated:YES];
+    } else {
+        UIViewController *presenter = pivot.parentViewController ?: pivot;
+        [presenter presentViewController:controller animated:YES completion:nil];
+    }
+}
+
+static void TTHideStemStudio(YTPivotBarViewController *pivot) {
+    UINavigationController *navigation = TTAppNavigationController(pivot);
+    UIViewController *top = navigation.topViewController;
+    if (top && objc_getAssociatedObject(top, &TTStemStudioControllerKey)) {
+        [navigation popViewControllerAnimated:NO];
+    }
+}
+
+static void TTSelectStemStudio(YTPivotBarViewController *pivot) {
+    pivot.selectedPivotIdentifier = TTStemPivotIdentifier;
+    SEL update = NSSelectorFromString(@"updateViewsWithSelectedPivotIdentifier:");
+    if ([pivot respondsToSelector:update]) {
+        ((void (*)(id, SEL, id))objc_msgSend)(pivot, update, TTStemPivotIdentifier);
+    }
+    TTShowStemStudio(pivot);
 }
 
 static NSString *TTLocalizedYTLite(NSString *key) {
@@ -584,6 +667,57 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
         NSMutableArray *filtered = [sectionItems mutableCopy];
         TTPrepareSettingsItems(filtered, self);
         %orig(filtered, category, @"TrapTube Extensions", icon, titleDescription, headerHidden);
+        return;
+    }
+    %orig;
+}
+
+%end
+
+%hook YTPivotBarView
+
+- (void)setRenderer:(YTIPivotBarRenderer *)renderer {
+    if (renderer) {
+        NSMutableArray<YTIPivotBarSupportedRenderers *> *items = [renderer itemsArray];
+        BOOL alreadyPresent = [items indexOfObjectPassingTest:^BOOL(YTIPivotBarSupportedRenderers *entry, NSUInteger index, BOOL *stop) {
+            return [[[entry pivotBarItemRenderer] pivotIdentifier] isEqualToString:TTStemPivotIdentifier];
+        }] != NSNotFound;
+        if (!alreadyPresent) {
+            YTIPivotBarSupportedRenderers *stem = [YTIPivotBarRenderer
+                pivotSupportedRenderersWithBrowseId:@"FEwhat_to_watch"
+                title:@"Stem Studio"
+                iconType:YT_AUDIO];
+            YTIPivotBarItemRenderer *item = [stem pivotBarItemRenderer];
+            item.pivotIdentifier = TTStemPivotIdentifier;
+            item.targetId = TTStemPivotIdentifier;
+            item.navigationEndpoint = nil;
+            [items addObject:stem];
+        }
+    }
+    %orig;
+}
+
+%end
+
+%hook YTPivotBarViewController
+
+- (void)selectItemWithPivotIdentifier:(NSString *)identifier {
+    if ([identifier isEqualToString:TTStemPivotIdentifier]) {
+        TTSelectStemStudio(self);
+        return;
+    }
+    TTHideStemStudio(self);
+    %orig;
+}
+
+%end
+
+%hook YTAppPivotBarController
+
+- (void)pivotBarViewController:(YTPivotBarViewController *)controller
+ didTapItemWithPivotIdentifier:(NSString *)identifier {
+    if ([identifier isEqualToString:TTStemPivotIdentifier]) {
+        TTSelectStemStudio(controller);
         return;
     }
     %orig;
