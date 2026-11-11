@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="23094" targetRuntime="iOS.CocoaTouch" useAutolayout="YES" launchScreen="YES" initialViewController="tt-launch-vc">
+    <device id="retina6_12" orientation="portrait" appearance="dark"/>
+    <dependencies>
+        <deployment identifier="iOS"/>
+        <plugIn identifier="com.apple.InterfaceBuilder.IBCocoaTouchPlugin" version="23084"/>
+        <capability name="Safe area layout guides" minToolsVersion="9.0"/>
+    </dependencies>
+    <scenes>
+        <scene sceneID="tt-launch-scene">
+            <objects>
+                <viewController id="tt-launch-vc" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="tt-launch-view">
+                        <rect key="frame" x="0.0" y="0.0" width="393" height="852"/>
+                        <autoresizingMask key="autoresizingMask" widthSizable="YES" heightSizable="YES"/>
+                        <subviews>
+                            <imageView userInteractionEnabled="NO" contentMode="scaleAspectFit" image="TrapTubeLaunchLogo" translatesAutoresizingMaskIntoConstraints="NO" id="tt-launch-logo">
+                                <rect key="frame" x="119.5" y="273" width="154" height="154"/>
+                            </imageView>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="TrapTube" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="tt-launch-title">
+                                <rect key="frame" x="86.5" y="449" width="220" height="43"/>
+                                <fontDescription key="fontDescription" type="system" weight="black" pointSize="36"/>
+                                <color key="textColor" red="1" green="1" blue="1" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                            </label>
+                            <label opaque="NO" userInteractionEnabled="NO" contentMode="left" text="HOSTILE YOUTUBE TAKEOVER" textAlignment="center" lineBreakMode="tailTruncation" baselineAdjustment="alignBaselines" adjustsFontSizeToFit="NO" translatesAutoresizingMaskIntoConstraints="NO" id="tt-launch-tagline">
+                                <rect key="frame" x="31.5" y="502" width="330" height="20"/>
+                                <fontDescription key="fontDescription" type="system" weight="bold" pointSize="11"/>
+                                <color key="textColor" red="0.91" green="0.035" blue="0.12" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                            </label>
+                        </subviews>
+                        <viewLayoutGuide key="safeArea" id="tt-launch-safe"/>
+                        <color key="backgroundColor" red="0.018" green="0.016" blue="0.023" alpha="1" colorSpace="custom" customColorSpace="sRGB"/>
+                        <constraints>
+                            <constraint firstItem="tt-launch-logo" firstAttribute="centerX" secondItem="tt-launch-view" secondAttribute="centerX" id="tt-c-logo-x"/>
+                            <constraint firstItem="tt-launch-logo" firstAttribute="centerY" secondItem="tt-launch-view" secondAttribute="centerY" constant="-64" id="tt-c-logo-y"/>
+                            <constraint firstItem="tt-launch-logo" firstAttribute="width" constant="154" id="tt-c-logo-w"/>
+                            <constraint firstItem="tt-launch-logo" firstAttribute="height" constant="154" id="tt-c-logo-h"/>
+                            <constraint firstItem="tt-launch-title" firstAttribute="centerX" secondItem="tt-launch-view" secondAttribute="centerX" id="tt-c-title-x"/>
+                            <constraint firstItem="tt-launch-title" firstAttribute="top" secondItem="tt-launch-logo" secondAttribute="bottom" constant="20" id="tt-c-title-y"/>
+                            <constraint firstItem="tt-launch-tagline" firstAttribute="centerX" secondItem="tt-launch-view" secondAttribute="centerX" id="tt-c-tag-x"/>
+                            <constraint firstItem="tt-launch-tagline" firstAttribute="top" secondItem="tt-launch-title" secondAttribute="bottom" constant="7" id="tt-c-tag-y"/>
+                            <constraint firstItem="tt-launch-tagline" firstAttribute="leading" relation="greaterThanOrEqual" secondItem="tt-launch-view" secondAttribute="leading" constant="20" id="tt-c-tag-left"/>
+                            <constraint firstItem="tt-launch-tagline" firstAttribute="trailing" relation="lessThanOrEqual" secondItem="tt-launch-view" secondAttribute="trailing" constant="-20" id="tt-c-tag-right"/>
+                        </constraints>
+                    </view>
+                </viewController>
+                <placeholder placeholderIdentifier="IBFirstResponder" id="tt-launch-first-responder" userLabel="First Responder" sceneMemberID="firstResponder"/>
+            </objects>
+        </scene>
+    </scenes>
+</document>
