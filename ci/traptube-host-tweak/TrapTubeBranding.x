@@ -158,26 +158,35 @@ static BOOL TTStringContainsBrand(NSString *value) {
 }
 
 static BOOL TTShouldHideSettingsSection(NSString *title) {
-    if (![title isKindOfClass:NSString.class]) return NO;
+    if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
     NSString *value = title.lowercaseString;
-    return [value containsString:@"developer"] ||
-           [value containsString:@"credits"] ||
-           [value containsString:@"discord rpc"] ||
-           [value containsString:@"discord rich presence"];
+    NSArray<NSString *> *hiddenSections = @[
+        @"developer", @"credits", @"discord", @"social", @"support",
+        @"github", @"telegram", @"twitter", @"open source", @"contributors",
+        @"feedback"
+    ];
+    for (NSString *label in hiddenSections) {
+        if ([value containsString:label]) return YES;
+    }
+    return NO;
 }
 
 static BOOL TTShouldHideSettingsItem(id item) {
     NSString *title = nil;
+    NSString *detail = nil;
+    NSString *identifier = nil;
     @try {
         if ([item respondsToSelector:@selector(title)]) title = [item title];
+        if ([item respondsToSelector:@selector(titleDescription)]) detail = [item titleDescription];
+        if ([item respondsToSelector:@selector(accessibilityIdentifier)]) identifier = [item accessibilityIdentifier];
     } @catch (__unused NSException *exception) {}
-    if (![title isKindOfClass:NSString.class]) return NO;
-    NSString *value = title.lowercaseString;
+    NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
+    if (value.length == 0) return NO;
     NSArray<NSString *> *hiddenLabels = @[
-        @"subscription status", @"manage account", @"log out", @"logout",
+        @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
-        @"twitter", @"support", @"github", @"telegram",
-        @"developer", @"credits"
+        @"twitter", @"support", @"github", @"telegram", @"social",
+        @"developer", @"credits", @"open source", @"contributors", "feedback"
     ];
     for (NSString *label in hiddenLabels) {
         if ([value containsString:label]) return YES;
@@ -567,7 +576,10 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
     NSString *support = TTLocalizedYTLite(@"SupportDevelopment");
     NSIndexSet *removeIndexes = [items indexesOfObjectsPassingTest:^BOOL(id item, NSUInteger index, BOOL *stop) {
         NSString *title = [item respondsToSelector:@selector(title)] ? [item title] : nil;
-        return [title isEqualToString:contributors] || [title isEqualToString:openSource] || [title isEqualToString:support];
+        return TTShouldHideSettingsItem(item) ||
+               [title isEqualToString:contributors] ||
+               [title isEqualToString:openSource] ||
+               [title isEqualToString:support];
     }];
     if (removeIndexes.count) [items removeObjectsAtIndexes:removeIndexes];
 
@@ -837,28 +849,44 @@ static NSString *TTRebrandedHostText(NSString *text) {
     return text;
 }
 
-static BOOL TTIsYouTubeLogoAssetName(NSString *name) {
+static BOOL TTIsYouTubeWordmarkAssetName(NSString *name) {
     if (![name isKindOfClass:NSString.class] || name.length == 0) return NO;
     NSString *lower = name.lowercaseString;
     BOOL identifiesYouTube = [lower containsString:@"youtube"] ||
                              [lower containsString:@"you_tube"] ||
                              [lower containsString:@"yt_logo"];
-    BOOL identifiesBrandArt = [lower containsString:@"logo"] ||
-                              [lower containsString:@"wordmark"] ||
-                              [lower containsString:@"branding"] ||
-                              [lower containsString:@"brand"] ||
-                              [lower containsString:@"app_icon"];
-    return identifiesYouTube && identifiesBrandArt;
+    // Never replace square app-icon assets with the horizontal header wordmark.
+    BOOL isSquareIcon = [lower containsString:@"app_icon"] ||
+                        [lower containsString:@"icon"] ||
+                        [lower containsString:@"60x60"] ||
+                        [lower containsString:@"76x76"];
+    BOOL identifiesWordmark = [lower containsString:@"wordmark"] ||
+                              [lower containsString:@"logotype"] ||
+                              [lower containsString:@"logo_lockup"] ||
+                              [lower containsString:@"header_logo"] ||
+                              ([lower containsString:@"logo"] && !isSquareIcon);
+    return identifiesYouTube && identifiesWordmark && !isSquareIcon;
 }
 
-static UIImage *TTTrapTubeHouseLogo(void) {
-    static UIImage *logo = nil;
+static UIImage *TTTrapTubeWordmark(void) {
+    static UIImage *wordmark = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        NSString *path = [NSBundle.mainBundle pathForResource:@"TrapTubeLaunchLogo" ofType:@"png"];
-        if (path.length) logo = [UIImage imageWithContentsOfFile:path];
+        NSString *text = @"TrapTube";
+        UIFont *font = [UIFont systemFontOfSize:38 weight:UIFontWeightHeavy];
+        NSDictionary *attributes = @{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: UIColor.whiteColor
+        };
+        CGSize textSize = [text sizeWithAttributes:attributes];
+        CGSize canvas = CGSizeMake(ceil(textSize.width + 8.0), 56.0);
+        UIGraphicsBeginImageContextWithOptions(canvas, NO, 0.0);
+        [text drawAtPoint:CGPointMake(4.0, (canvas.height - textSize.height) * 0.5)
+           withAttributes:attributes];
+        wordmark = UIGraphicsGetImageFromCurrentImageContext();
+        UIGraphicsEndImageContext();
     });
-    return logo;
+    return wordmark;
 }
 
 %hook UILabel
@@ -911,16 +939,16 @@ static UIImage *TTTrapTubeHouseLogo(void) {
 
 %hook UIImage
 + (UIImage *)imageNamed:(NSString *)name {
-    if (TTIsYouTubeLogoAssetName(name)) {
-        UIImage *house = TTTrapTubeHouseLogo();
-        if (house) return house;
+    if (TTIsYouTubeWordmarkAssetName(name)) {
+        UIImage *wordmark = TTTrapTubeWordmark();
+        if (wordmark) return wordmark;
     }
     return %orig;
 }
 + (UIImage *)imageNamed:(NSString *)name inBundle:(NSBundle *)bundle compatibleWithTraitCollection:(UITraitCollection *)traitCollection {
-    if (TTIsYouTubeLogoAssetName(name)) {
-        UIImage *house = TTTrapTubeHouseLogo();
-        if (house) return house;
+    if (TTIsYouTubeWordmarkAssetName(name)) {
+        UIImage *wordmark = TTTrapTubeWordmark();
+        if (wordmark) return wordmark;
     }
     return %orig;
 }
