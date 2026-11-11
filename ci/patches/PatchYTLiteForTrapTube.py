@@ -16,6 +16,16 @@ if not settings.is_file() or not tweak.is_file():
     raise SystemExit("Expected Settings.x and YTLite.x in the YTLite source root.")
 
 s = settings.read_text()
+# Remove the now-unused helper that creates outbound link rows.
+link_helper = re.compile(
+    r'%new\\s+'
+    r'- \\(YTSettingsSectionItem \\*\\)linkWithTitle:.*?\\n}\\n',
+    re.DOTALL,
+)
+s, helper_count = link_helper.subn('', s, count=1)
+if helper_count != 1:
+    raise SystemExit("Could not remove the outbound-link row helper.")
+
 support_start = s.find('    YTSettingsSectionItem *support =')
 version_start = s.find('    YTSettingsSectionItem *version =', support_start)
 if support_start < 0 or version_start < 0:
