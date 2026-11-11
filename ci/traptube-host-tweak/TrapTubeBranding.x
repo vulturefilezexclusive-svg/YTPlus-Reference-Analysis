@@ -551,20 +551,26 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
     if (alreadyAdded) return;
 
     __weak YTSettingsViewController *weakSettings = settings;
-    YTSettingsSectionItem *appearance = [YTSettingsSectionItem
-        itemWithTitle:@"TrapTube Appearance"
-        accessibilityIdentifier:@"TrapTubeAppearance"
-        detailTextBlock:^NSString *{
-            return @"Set the TrapTube accent color";
-        }
-        selectBlock:^BOOL(YTSettingsCell *cell, NSUInteger index) {
-            __strong YTSettingsViewController *strongSettings = weakSettings;
-            if (!strongSettings) return NO;
-            TrapTubeThemeViewController *controller = [[TrapTubeThemeViewController alloc] init];
-            [strongSettings pushViewController:controller];
-            return YES;
-        }];
-    [items insertObject:appearance atIndex:0];
+    Class settingsItemClass = NSClassFromString(@"YTSettingsSectionItem");
+    SEL itemFactory = sel_registerName("itemWithTitle:accessibilityIdentifier:detailTextBlock:selectBlock:");
+    if (!settingsItemClass || ![settingsItemClass respondsToSelector:itemFactory]) {
+        NSLog(@"[TrapTube] YTSettingsSectionItem factory unavailable; skipping custom appearance row");
+        return;
+    }
+    id detailBlock = ^NSString *{
+        return @"Set the TrapTube accent color";
+    };
+    id selectBlock = ^BOOL(id cell, NSUInteger index) {
+        __strong YTSettingsViewController *strongSettings = weakSettings;
+        if (!strongSettings) return NO;
+        TrapTubeThemeViewController *controller = [[TrapTubeThemeViewController alloc] init];
+        [strongSettings pushViewController:controller];
+        return YES;
+    };
+    id appearance = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+        settingsItemClass, itemFactory, @"TrapTube Appearance", @"TrapTubeAppearance", detailBlock, selectBlock
+    );
+    if (appearance) [items insertObject:appearance atIndex:0];
 }
 
 #pragma mark - First-launch cleanup and host hooks
