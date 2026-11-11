@@ -695,9 +695,20 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
                 return;
             }
             id item = [stem pivotBarItemRenderer];
-            item.pivotIdentifier = TTStemPivotIdentifier;
-            item.targetId = TTStemPivotIdentifier;
-            item.navigationEndpoint = nil;
+            // Keep private renderer property access runtime-only so this tweak
+            // does not bind to SDK-specific declarations at compile time.
+            SEL setPivotIdentifier = NSSelectorFromString(@"setPivotIdentifier:");
+            SEL setTargetId = NSSelectorFromString(@"setTargetId:");
+            SEL setNavigationEndpoint = NSSelectorFromString(@"setNavigationEndpoint:");
+            if ([item respondsToSelector:setPivotIdentifier]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(item, setPivotIdentifier, TTStemPivotIdentifier);
+            }
+            if ([item respondsToSelector:setTargetId]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(item, setTargetId, TTStemPivotIdentifier);
+            }
+            if ([item respondsToSelector:setNavigationEndpoint]) {
+                ((void (*)(id, SEL, id))objc_msgSend)(item, setNavigationEndpoint, nil);
+            }
             [items addObject:stem];
         }
     }
