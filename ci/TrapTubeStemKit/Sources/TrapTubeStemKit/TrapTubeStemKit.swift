@@ -65,7 +65,13 @@ private final class TrapTubeStemModel: ObservableObject {
     private var audioPlayer: AVAudioPlayer?
     // One HTDemucs network returns all four stems without loading four separate fine-tuned submodels.
     private let selectedModel: DemucsModel = .fourStem
-    private let engine = DemucsEngine()
+
+    // Configure the native model cache before constructing the Rust-backed engine.
+    // The engine is lazy so no Demucs worker can start before cache setup completes.
+    private lazy var engine: DemucsEngine = {
+        _ = TrapTubeStemStorage.configured
+        return DemucsEngine()
+    }()
 
     init() {
         _ = TrapTubeStemStorage.configured
@@ -174,7 +180,9 @@ private final class TrapTubeStemModel: ObservableObject {
                 }
                 await self.finish(result)
             } catch {
-                await self.fail(error.localizedDescription)
+                let detail = "Demucs processing failed: \\(error.localizedDescription)"
+                NSLog("[TrapTube Stem Studio] %@", detail)
+                await self.fail(detail)
             }
         }
     }
