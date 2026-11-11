@@ -35,7 +35,7 @@ jobs:
           APP="$(find unpack/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -s "$APP/Frameworks/YTLite.dylib"
           git clone --quiet --depth 1 https://github.com/nygard/class-dump.git class-dump-source
-          xcodebuild -project class-dump-source/class-dump.xcodeproj -scheme class-dump -configuration Release -derivedDataPath class-dump-build CODE_SIGNING_ALLOWED=NO build
+          xcodebuild -project class-dump-source/class-dump.xcodeproj -scheme class-dump -configuration Release -derivedDataPath class-dump-build GCC_PREPROCESSOR_DEFINITIONS='PLATFORM_IOSMAC=0' CODE_SIGNING_ALLOWED=NO build
           CLASS_DUMP="$(find class-dump-build/Build/Products/Release -type f -name class-dump -perm -111 -print -quit)"
           test -n "$CLASS_DUMP"
           "$CLASS_DUMP" -C 'WelcomeVC' "$APP/Frameworks/YTLite.dylib" > output/WelcomeVC.h
