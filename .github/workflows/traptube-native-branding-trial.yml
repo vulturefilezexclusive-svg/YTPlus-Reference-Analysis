@@ -76,6 +76,33 @@ jobs:
           git clone --quiet --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$RUNNER_TEMP/theos/include/YouTubeHeader"
           git clone --quiet --depth 1 https://github.com/PoomSmart/PSHeader.git "$RUNNER_TEMP/theos/include/PSHeader"
 
+      - name: Build dynamic HTDemucs Stem Studio framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-output/Frameworks
+          cd ci/TrapTubeStemKit
+          xcodebuild -resolvePackageDependencies
+          xcodebuild \
+            -scheme TrapTubeStemKit \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/stemkit-build" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+          FRAMEWORK="$(find "$RUNNER_TEMP/stemkit-build/Build/Products" -type d -name 'TrapTubeStemKit.framework' -print -quit)"
+          test -n "$FRAMEWORK" && test -s "$FRAMEWORK/TrapTubeStemKit"
+          ditto "$FRAMEWORK" "$GITHUB_WORKSPACE/build-output/Frameworks/TrapTubeStemKit.framework"
+          otool -L "$FRAMEWORK/TrapTubeStemKit" | tee "$GITHUB_WORKSPACE/build-output/stemkit-linkage.txt"
+          if otool -L "$FRAMEWORK/TrapTubeStemKit" | grep -Fq 'DemucsFramework.framework/DemucsFramework'; then
+            XCFRAMEWORK="$(find "$RUNNER_TEMP/stemkit-build/SourcePackages/artifacts" "$GITHUB_WORKSPACE/ci/TrapTubeStemKit" -type d -name 'DemucsFramework.xcframework' -print -quit)"
+            test -n "$XCFRAMEWORK" || { echo "DemucsFramework.xcframework dependency was not found."; exit 5; }
+            DEMUCS_SLICE="$(find "$XCFRAMEWORK" -type d -path '*/ios-arm64/DemucsFramework.framework' -print -quit)"
+            test -n "$DEMUCS_SLICE" || { echo "Device DemucsFramework slice was not found."; exit 5; }
+            ditto "$DEMUCS_SLICE" "$GITHUB_WORKSPACE/build-output/Frameworks/DemucsFramework.framework"
+          fi
+          echo "TRAPTUBE_STEMKIT_FRAMEWORKS=$GITHUB_WORKSPACE/build-output/Frameworks" >> "$GITHUB_ENV"
+
       - name: Compile native TrapTube host branding tweak
         shell: bash
         run: |
@@ -161,8 +188,20 @@ jobs:
           PY
           ibtool --compile "$APP/TrapTubeLaunch.storyboardc" ci/patches/TrapTubeLaunch.storyboard
           mkdir -p "$APP/Frameworks"
+          ditto build-output/Frameworks/TrapTubeStemKit.framework "$APP/Frameworks/TrapTubeStemKit.framework"
+          if [[ -d build-output/Frameworks/DemucsFramework.framework ]]; then
+            ditto build-output/Frameworks/DemucsFramework.framework "$APP/Frameworks/DemucsFramework.framework"
+          fi
           cp build-output/TrapTubeBranding.dylib "$APP/Frameworks/TrapTubeBranding.dylib"
           ./insert_dylib --inplace --all-yes '@rpath/TrapTubeBranding.dylib' "$APP/YouTube"
+          SWIFT_STDLIB_TOOL="$(xcrun --find swift-stdlib-tool)"
+          "$SWIFT_STDLIB_TOOL" --copy --verbose \
+            --scan-executable "$APP/YouTube" \
+            --scan-folder "$APP/Frameworks" \
+            --destination "$APP/Frameworks" \
+            --platform iphoneos
+          cp build-output/branding-linkage.txt output/branding-linkage.txt 2>/dev/null || true
+          cp build-output/stemkit-linkage.txt output/stemkit-linkage.txt
           python3 - "$APP/YTLite.bundle" <<'PY'
           import plistlib, sys
           from pathlib import Path
@@ -202,6 +241,11 @@ jobs:
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
           otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'CydiaSubstrate.framework/CydiaSubstrate'
+          otool -L "$APP/Frameworks/TrapTubeBranding.dylib" | grep -F 'TrapTubeStemKit.framework/TrapTubeStemKit'
+          test -s "$APP/Frameworks/TrapTubeStemKit.framework/TrapTubeStemKit"
+          if [[ -d "$APP/Frameworks/DemucsFramework.framework" ]]; then
+            test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
+          fi
           strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
           grep -q 'TrapTube Extensions' output/branding-binary-strings.txt
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
@@ -219,6 +263,7 @@ jobs:
             output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
             output/ipa-sha256.txt
             output/branding-linkage.txt
+            output/stemkit-linkage.txt
             output/branding-binary-strings.txt
           if-no-files-found: error
           retention-days: 14
