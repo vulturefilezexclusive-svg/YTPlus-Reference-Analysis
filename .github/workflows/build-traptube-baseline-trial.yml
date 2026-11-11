@@ -1,11 +1,6 @@
 name: TrapTube Baseline Trial IPA
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/build-traptube-baseline-trial.yml
   workflow_dispatch:
 
 permissions:
