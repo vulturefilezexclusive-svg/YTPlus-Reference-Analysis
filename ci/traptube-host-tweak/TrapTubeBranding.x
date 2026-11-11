@@ -647,20 +647,6 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 - (void)setSectionItems:(NSMutableArray *)sectionItems
             forCategory:(NSInteger)category
                   title:(NSString *)title
-        titleDescription:(NSString *)titleDescription
-           headerHidden:(BOOL)headerHidden {
-    if (TTIsYTLiteSettingsSection(title, sectionItems)) {
-        NSMutableArray *filtered = [sectionItems mutableCopy];
-        TTPrepareSettingsItems(filtered, self);
-        %orig(filtered, category, @"TrapTube Extensions", titleDescription, headerHidden);
-        return;
-    }
-    %orig;
-}
-
-- (void)setSectionItems:(NSMutableArray *)sectionItems
-            forCategory:(NSInteger)category
-                  title:(NSString *)title
                    icon:(YTIIcon *)icon
         titleDescription:(NSString *)titleDescription
            headerHidden:(BOOL)headerHidden {
