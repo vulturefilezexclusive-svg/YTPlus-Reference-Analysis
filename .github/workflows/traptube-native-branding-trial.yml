@@ -169,7 +169,7 @@ jobs:
               raise SystemExit("Unexpected host bundle identifier; refusing to change it.")
           info["CFBundleDisplayName"] = "TrapTube"
           info["CFBundleName"] = "TrapTube"
-          info["UILaunchStoryboardName"] = "TrapTubeLaunch"
+          info["UILaunchStoryboardName"] = "TrapTubeLaunchV2"
           for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
               icons = info.get(key)
               if not isinstance(icons, dict):
@@ -203,10 +203,10 @@ jobs:
           opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon3.png")
           # A transparent launch logo is placed on the launch screen's near-black canvas.
           icon_launch = icon.resize((512, 512), Image.Resampling.LANCZOS)
-          icon_launch.save(app / "TrapTubeLaunchLogo.png")
+          icon_launch.save(app / "TrapTubeLaunchLogoV2.png")
           print(f"Prepared TrapTube app icon from {source}")
           PY
-          ibtool --compile "$APP/TrapTubeLaunch.storyboardc" ci/patches/TrapTubeLaunch.storyboard
+          ibtool --compile "$APP/TrapTubeLaunchV2.storyboardc" ci/patches/TrapTubeLaunch.storyboard
           mkdir -p "$APP/Frameworks"
           if [[ -d build-output/Frameworks/TrapTubeStemKit.framework ]]; then
             ditto build-output/Frameworks/TrapTubeStemKit.framework "$APP/Frameworks/TrapTubeStemKit.framework"
@@ -301,8 +301,8 @@ jobs:
           APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
           test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunch"
-          test -s "$APP/TrapTubeLaunch.storyboardc/Info.plist"
-          test -s "$APP/TrapTubeLaunchLogo.png"
+          test -s "$APP/TrapTubeLaunchV2.storyboardc/Info.plist"
+          test -s "$APP/TrapTubeLaunchLogoV2.png"
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
@@ -328,7 +328,7 @@ jobs:
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, runtime header/control rebranding hooks, house-logo asset substitution hooks, native launch storyboard, injected settings/branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, filtered settings entries, injected branding tweak, and preserved original YTLite dylib."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
