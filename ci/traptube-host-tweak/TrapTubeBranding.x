@@ -157,6 +157,34 @@ static BOOL TTStringContainsBrand(NSString *value) {
            [lower containsString:@"youtube plus"];
 }
 
+static BOOL TTShouldHideSettingsSection(NSString *title) {
+    if (![title isKindOfClass:NSString.class]) return NO;
+    NSString *value = title.lowercaseString;
+    return [value containsString:@"developer"] ||
+           [value containsString:@"credits"] ||
+           [value containsString:@"discord rpc"] ||
+           [value containsString:@"discord rich presence"];
+}
+
+static BOOL TTShouldHideSettingsItem(id item) {
+    NSString *title = nil;
+    @try {
+        if ([item respondsToSelector:@selector(title)]) title = [item title];
+    } @catch (__unused NSException *exception) {}
+    if (![title isKindOfClass:NSString.class]) return NO;
+    NSString *value = title.lowercaseString;
+    NSArray<NSString *> *hiddenLabels = @[
+        @"subscription status", @"manage account", @"log out", @"logout",
+        @"discord rpc", @"discord rich presence", @"discord",
+        @"twitter", @"support", @"github", @"telegram",
+        @"developer", @"credits"
+    ];
+    for (NSString *label in hiddenLabels) {
+        if ([value containsString:label]) return YES;
+    }
+    return NO;
+}
+
 static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
     if (TTStringContainsBrand(title)) return YES;
     NSSet *markers = [NSSet setWithArray:@[
@@ -653,15 +681,32 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 %hook YTSettingsViewController
 
 - (void)setSectionItems:(NSMutableArray *)sectionItems
-            forCategory:(NSInteger)category
-                  title:(NSString *)title
-                   icon:(YTIIcon *)icon
-        titleDescription:(NSString *)titleDescription
-           headerHidden:(BOOL)headerHidden {
+             forCategory:(NSInteger)category
+                   title:(NSString *)title
+                    icon:(YTIIcon *)icon
+         titleDescription:(NSString *)titleDescription
+            headerHidden:(BOOL)headerHidden {
+    // Remove entire unwanted sections and their rows, while leaving unrelated
+    // YouTube settings categories untouched.
+    if (TTShouldHideSettingsSection(title)) {
+        %orig([NSMutableArray array], category, title, icon, titleDescription, YES);
+        return;
+    }
+
+    NSMutableArray *filtered = [sectionItems mutableCopy] ?: [NSMutableArray array];
+    NSIndexSet *hiddenRows = [filtered indexesOfObjectsPassingTest:^BOOL(id item, NSUInteger index, BOOL *stop) {
+        return TTShouldHideSettingsItem(item);
+    }];
+    if (hiddenRows.count) [filtered removeObjectsAtIndexes:hiddenRows];
+
     if (TTIsYTLiteSettingsSection(title, sectionItems)) {
-        NSMutableArray *filtered = [sectionItems mutableCopy];
         TTPrepareSettingsItems(filtered, self);
-        %orig(filtered, category, @"TrapTube Extensions", icon, titleDescription, headerHidden);
+        %orig(filtered, category, @"TrapTube Branding", icon, titleDescription, headerHidden);
+        return;
+    }
+
+    if (filtered.count != sectionItems.count) {
+        %orig(filtered, category, title, icon, titleDescription, headerHidden);
         return;
     }
     %orig;
@@ -700,6 +745,7 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
             SEL setPivotIdentifier = NSSelectorFromString(@"setPivotIdentifier:");
             SEL setTargetId = NSSelectorFromString(@"setTargetId:");
             SEL setNavigationEndpoint = NSSelectorFromString(@"setNavigationEndpoint:");
+            SEL setIconType = NSSelectorFromString(@"setIconType:");
             if ([item respondsToSelector:setPivotIdentifier]) {
                 ((void (*)(id, SEL, id))objc_msgSend)(item, setPivotIdentifier, TTStemPivotIdentifier);
             }
