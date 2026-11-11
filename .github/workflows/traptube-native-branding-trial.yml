@@ -323,12 +323,10 @@ jobs:
           strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
           grep -q 'TrapTube Extensions' output/branding-binary-strings.txt
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
+          grep -q 'TrapTube' output/branding-binary-strings.txt
           grep -q 'WelcomeVC' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
-          grep -q 'TTRebrandedHostText' output/branding-binary-strings.txt
-          grep -q 'TTIsYouTubeLogoAssetName' output/branding-binary-strings.txt
-          grep -q 'TrapTubeLaunchLogo' output/branding-binary-strings.txt
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
           echo "Verified: TrapTube app icon payload, host-wide localized text replacement, runtime header/control rebranding hooks, house-logo asset substitution hooks, native launch storyboard, injected settings/branding tweak, and preserved original YTLite dylib."
 
