@@ -229,22 +229,48 @@ jobs:
           python3 - "$APP/YTLite.bundle" <<'PY'
           import plistlib, sys
           from pathlib import Path
+
           root = Path(sys.argv[1])
+          replacements = (
+              ("YouTube Plus", "TrapTube"),
+              ("YouTube+", "TrapTube"),
+              ("YTPlus", "TrapTube"),
+              ("YTLite", "TrapTube"),
+          )
+          changed_files = 0
+          changed_values = 0
+
+          def rewrite(value):
+              global changed_values
+              if isinstance(value, str):
+                  updated = value
+                  for old, new in replacements:
+                      updated = updated.replace(old, new)
+                  if updated != value:
+                      changed_values += 1
+                  return updated
+              if isinstance(value, list):
+                  return [rewrite(item) for item in value]
+              if isinstance(value, dict):
+                  return {key: rewrite(item) for key, item in value.items()}
+              return value
+
           if root.is_dir():
-              for path in root.rglob("Localizable.strings"):
+              for path in root.rglob("*"):
+                  if not path.is_file() or path.suffix not in (".strings", ".stringsdict"):
+                      continue
                   try:
-                      with path.open("rb") as f:
-                          values = plistlib.load(f)
+                      with path.open("rb") as stream:
+                          values = plistlib.load(stream)
                   except Exception:
                       continue
-                  if isinstance(values, dict):
-                      for key, value in list(values.items()):
-                          if isinstance(value, str):
-                              values[key] = value.replace("YouTube Plus", "TrapTube").replace("YTPlus", "TrapTube").replace("YTLite", "TrapTube")
-                          if key == "About":
-                              values[key] = "TrapTube"
-                      with path.open("wb") as f:
-                          plistlib.dump(values, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+                  updated = rewrite(values)
+                  if updated != values:
+                      with path.open("wb") as stream:
+                          plistlib.dump(updated, stream, fmt=plistlib.FMT_BINARY, sort_keys=False)
+                      changed_files += 1
+
+          print(f"TrapTube localization: updated {changed_values} string values across {changed_files} files.")
           PY
           cp ci/patches/TrapTube-Third-Party-Notices.md "$APP/TrapTube-Third-Party-Notices.md"
           find "$APP" -type d -name _CodeSignature -prune -exec rm -rf {} +
