@@ -1,0 +1,9 @@
+Package: com.traptube.hostbranding
+Name: TrapTube Host Branding
+Version: 1.0.0
+Architecture: iphoneos-arm
+Description: Native TrapTube branding and YouTube host settings integration.
+Maintainer: TrapTube
+Author: TrapTube
+Section: Tweaks
+Depends: mobilesubstrate
