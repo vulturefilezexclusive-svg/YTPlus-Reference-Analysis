@@ -955,6 +955,108 @@ static UIImage *TTTrapTubeWordmark(void) {
 %end
 
 
+#pragma mark - TrapTube hostile takeover launch overlay
+
+static UIWindow *TTLaunchOverlayWindow = nil;
+static BOOL TTLaunchOverlayPresented = NO;
+
+static void TTShowHostileTakeoverSplash(void) {
+    if (TTLaunchOverlayPresented) return;
+
+    UIWindow *hostWindow = nil;
+    for (UIWindow *candidate in UIApplication.sharedApplication.windows) {
+        if (!candidate.hidden && candidate.windowScene) {
+            hostWindow = candidate;
+            break;
+        }
+    }
+    if (!hostWindow) return;
+
+    TTLaunchOverlayPresented = YES;
+    UIWindow *overlay = [[UIWindow alloc] initWithWindowScene:hostWindow.windowScene];
+    overlay.frame = hostWindow.windowScene.coordinateSpace.bounds;
+    overlay.windowLevel = UIWindowLevelAlert + 2.0;
+    overlay.backgroundColor = [UIColor colorWithRed:0.012 green:0.010 blue:0.016 alpha:1.0];
+    overlay.userInteractionEnabled = NO;
+
+    UIViewController *controller = [[UIViewController alloc] init];
+    controller.view.backgroundColor = overlay.backgroundColor;
+    controller.view.userInteractionEnabled = NO;
+
+    UIImageView *logo = [[UIImageView alloc] init];
+    NSString *logoPath = [[NSBundle mainBundle] pathForResource:@"TrapTubeLaunchLogoV4" ofType:@"png"];
+    if (logoPath.length) logo.image = [UIImage imageWithContentsOfFile:logoPath];
+    logo.contentMode = UIViewContentModeScaleAspectFit;
+    logo.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:logo];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"TrapTube";
+    title.textColor = UIColor.whiteColor;
+    title.textAlignment = NSTextAlignmentCenter;
+    title.font = [UIFont systemFontOfSize:38 weight:UIFontWeightBlack];
+    title.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:title];
+
+    UILabel *tagline = [[UILabel alloc] init];
+    tagline.text = @"HOSTILE YOUTUBE TAKEOVER";
+    tagline.textColor = [UIColor colorWithRed:0.91 green:0.035 blue:0.12 alpha:1.0];
+    tagline.textAlignment = NSTextAlignmentCenter;
+    tagline.font = [UIFont systemFontOfSize:11 weight:UIFontWeightBold];
+    tagline.letterSpacing = 1.4;
+    tagline.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:tagline];
+
+    UIView *accentLine = [[UIView alloc] init];
+    accentLine.backgroundColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:1.0];
+    accentLine.translatesAutoresizingMaskIntoConstraints = NO;
+    [controller.view addSubview:accentLine];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [logo.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+        [logo.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor constant:-82.0],
+        [logo.widthAnchor constraintEqualToConstant:164.0],
+        [logo.heightAnchor constraintEqualToConstant:164.0],
+        [title.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+        [title.topAnchor constraintEqualToAnchor:logo.bottomAnchor constant:20.0],
+        [title.leadingAnchor constraintGreaterThanOrEqualToAnchor:controller.view.leadingAnchor constant:24.0],
+        [title.trailingAnchor constraintLessThanOrEqualToAnchor:controller.view.trailingAnchor constant:-24.0],
+        [tagline.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+        [tagline.topAnchor constraintEqualToAnchor:title.bottomAnchor constant:9.0],
+        [tagline.leadingAnchor constraintGreaterThanOrEqualToAnchor:controller.view.leadingAnchor constant:18.0],
+        [tagline.trailingAnchor constraintLessThanOrEqualToAnchor:controller.view.trailingAnchor constant:-18.0],
+        [accentLine.centerXAnchor constraintEqualToAnchor:controller.view.centerXAnchor],
+        [accentLine.topAnchor constraintEqualToAnchor:tagline.bottomAnchor constant:18.0],
+        [accentLine.widthAnchor constraintEqualToConstant:54.0],
+        [accentLine.heightAnchor constraintEqualToConstant:3.0]
+    ]];
+
+    overlay.rootViewController = controller;
+    TTLaunchOverlayWindow = overlay;
+    overlay.hidden = NO;
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [UIView animateWithDuration:0.28 animations:^{
+            TTLaunchOverlayWindow.alpha = 0.0;
+        } completion:^(__unused BOOL finished) {
+            TTLaunchOverlayWindow.hidden = YES;
+            TTLaunchOverlayWindow.rootViewController = nil;
+            TTLaunchOverlayWindow = nil;
+        }];
+    });
+}
+
+static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(attempt == 0 ? 0.20 : 0.18) * NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        if (TTLaunchOverlayPresented) return;
+        TTShowHostileTakeoverSplash();
+        if (!TTLaunchOverlayPresented && attempt < 20) {
+            TTScheduleHostileTakeoverSplash(attempt + 1);
+        }
+    });
+}
+
 %ctor {
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:@"advancedMode"];
@@ -962,5 +1064,6 @@ static UIImage *TTTrapTubeWordmark(void) {
     [defaults synchronize];
     dispatch_async(dispatch_get_main_queue(), ^{
         TTApplyAccentGlobally();
+        TTScheduleHostileTakeoverSplash(0);
     });
 }
