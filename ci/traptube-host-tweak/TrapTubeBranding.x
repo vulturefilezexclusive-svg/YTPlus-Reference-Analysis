@@ -1046,7 +1046,7 @@ static void TTShowHostileTakeoverSplash(void) {
 }
 
 static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(attempt == 0 ? 0.20 : 0.18) * NSEC_PER_SEC),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((attempt == 0 ? 0.20 : 0.18) * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         if (TTLaunchOverlayPresented) return;
         TTShowHostileTakeoverSplash();
