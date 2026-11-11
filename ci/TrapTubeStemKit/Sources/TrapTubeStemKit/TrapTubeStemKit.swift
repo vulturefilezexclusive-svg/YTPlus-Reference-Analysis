@@ -63,6 +63,9 @@ private final class TrapTubeStemModel: ObservableObject {
     @Published var playingStem: String?
 
     private var audioPlayer: AVAudioPlayer?
+    // One HTDemucs network returns all four stems without loading four separate fine-tuned submodels.
+    private let selectedModel: DemucsModel = .fourStem
+    private let engine = DemucsEngine()
 
     init() {
         _ = TrapTubeStemStorage.configured
@@ -70,9 +73,9 @@ private final class TrapTubeStemModel: ObservableObject {
     }
 
     func refresh() {
-        isModelReady = DemucsEngine.isDownloaded(.fineTunedAll)
+        isModelReady = DemucsEngine.isDownloaded(selectedModel)
         if isModelReady && !isProcessing && !isDownloading {
-            status = "HTDemucs FT is ready · offline capable"
+            status = "HTDemucs is ready · offline capable"
         }
     }
 
@@ -99,10 +102,10 @@ private final class TrapTubeStemModel: ObservableObject {
         isDownloading = true
         downloadProgress = 0
         error = nil
-        status = "Downloading HTDemucs FT · about 333 MB"
+        status = "Downloading HTDemucs · about 84 MB"
         Task {
             do {
-                try await DemucsEngine.download(.fineTunedAll) { update in
+                try await DemucsEngine.download(selectedModel) { update in
                     Task { @MainActor in
                         self.downloadProgress = update.fraction
                         self.status = "Downloading model · \(Int(update.fraction * 100))%"
@@ -131,13 +134,14 @@ private final class TrapTubeStemModel: ObservableObject {
         error = nil
         status = "Preparing stereo audio…"
         let destination = TrapTubeStemStorage.stems.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let engine = self.engine
 
         Task.detached(priority: .userInitiated) {
             do {
                 let pcm = try Self.readStereo(selectedFile)
-                let engine = DemucsEngine()
-                await self.setStatus("Loading HTDemucs FT…", progress: 0.02)
-                try await engine.load(.fineTunedAll)
+                await self.setStatus("Loading HTDemucs…", progress: 0.02)
+                try await engine.load(self.selectedModel)
+                await self.setStatus("Preparing Metal inference…", progress: 0.05)
                 try await engine.warmup()
                 let separated = try await engine.separate(
                     left: pcm.left,
@@ -165,7 +169,7 @@ private final class TrapTubeStemModel: ObservableObject {
                 }
                 guard result.count == 4 else {
                     throw NSError(domain: "TrapTubeStemKit", code: 11,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTDemucs FT did not return all four stems."])
+                                  userInfo: [NSLocalizedDescriptionKey: "HTDemucs did not return all four stems."])
                 }
                 await self.finish(result)
             } catch {
@@ -318,20 +322,20 @@ private struct TrapTubeStemStudioView: View {
                 .tint(accent)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Label(model.isModelReady ? "HTDemucs FT ready" : "Enhanced model required",
+                    Label(model.isModelReady ? "HTDemucs ready" : "Enhanced model required",
                           systemImage: model.isModelReady ? "checkmark.seal.fill" : "cpu")
                         .font(.headline.weight(.bold))
                         .foregroundStyle(model.isModelReady ? Color.green : accent)
                     Text(model.isModelReady
-                         ? "The 333 MB model is stored in Application Support and can be reused offline."
-                         : "Download the 333 MB fine-tuned model once. It stays in persistent app storage for offline use.")
+                         ? "The 84 MB four-stem model is stored in Application Support and can be reused offline."
+                         : "Download the 84 MB four-stem model once. It stays in persistent app storage for offline use.")
                         .font(.caption).foregroundStyle(Color.white.opacity(0.65))
                     if !model.isModelReady {
                         Button { model.downloadModel() } label: {
                             HStack {
                                 if model.isDownloading { ProgressView().tint(.white) }
                                 else { Image(systemName: "arrow.down.circle.fill") }
-                                Text(model.isDownloading ? model.status : "Download HTDemucs FT · 333 MB")
+                                Text(model.isDownloading ? model.status : "Download HTDemucs · 84 MB")
                             }
                             .font(.subheadline.weight(.bold))
                             .frame(maxWidth: .infinity).padding(.vertical, 13)
