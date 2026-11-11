@@ -1,0 +1,83 @@
+name: Analyze YTPlus Reference IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/analyze-ytplus-reference.yml
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-reference:
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - name: Download reference IPA from TrapTube release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p input output
+          curl --fail --location --retry 3 \
+            'https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/Referenceipa/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa' \
+            --output input/reference.ipa
+          shasum -a 256 input/reference.ipa | tee output/sha256.txt
+          ls -lh input/reference.ipa
+
+      - name: Extract and inspect app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          unzip -q input/reference.ipa -d extracted
+          APP="$(find extracted/Payload -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP" ]; then echo "No .app bundle found in Payload" >&2; exit 1; fi
+          EXEC=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Info.plist")
+          BIN="$APP/$EXEC"
+          {
+            echo "# YTPlus reference IPA inspection"
+            echo
+            echo "- App bundle: $(basename "$APP")"
+            echo "- Executable: $EXEC"
+            echo "- IPA SHA-256: $(cat output/sha256.txt)"
+            echo
+            echo "## Bundle metadata"
+            /usr/libexec/PlistBuddy -c 'Print' "$APP/Info.plist" || true
+            echo
+            echo "## Frameworks and dynamic libraries"
+            find "$APP/Frameworks" -maxdepth 2 \( -name '*.framework' -o -name '*.dylib' \) -print 2>/dev/null | sort || true
+            echo
+            echo "## App bundle file inventory"
+            find "$APP" -maxdepth 4 -type f -print | sed "s|$APP/||" | sort
+            echo
+            echo "## Main executable linked libraries"
+            otool -L "$BIN" 2>&1 || true
+            echo
+            echo "## Main executable load commands / build metadata"
+            otool -l "$BIN" 2>&1 | grep -E -A3 'LC_BUILD_VERSION|LC_VERSION_MIN_IPHONEOS|LC_ENCRYPTION_INFO|LC_UUID|LC_RPATH' || true
+          } > output/reference-report.md
+
+          strings -a "$BIN" > output/main-executable-strings.txt
+          nm -gU "$BIN" > output/main-executable-symbols.txt 2>&1 || true
+          find "$APP/Frameworks" -type f \( -perm -111 -o -name '*.dylib' \) -print0 2>/dev/null |
+          while IFS= read -r -d '' f; do
+            echo "===== $f ====="
+            otool -L "$f" 2>&1 || true
+            nm -gU "$f" 2>&1 || true
+          done > output/framework-linkage-and-symbols.txt
+
+          # Capture UI/resource identifiers and likely feature strings for quick triage.
+          grep -Ein 'download|caption|subtitle|codec|avc1|vp9|opus|aac|m4a|mp3|metadata|queue|save in|play in|quality|format|resolution' \
+            output/main-executable-strings.txt > output/feature-string-hits.txt || true
+
+          # Avoid bundling the IPA or extracted proprietary executable in the report artifact.
+          du -sh "$APP" > output/app-bundle-size.txt
+
+      - name: Upload text inspection report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ytplus-reference-inspection
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
