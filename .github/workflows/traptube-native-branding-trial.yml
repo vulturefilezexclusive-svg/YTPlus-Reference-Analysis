@@ -170,7 +170,7 @@ jobs:
               raise SystemExit("Unexpected host bundle identifier; refusing to change it.")
           info["CFBundleDisplayName"] = "TrapTube"
           info["CFBundleName"] = "TrapTube"
-          info["UILaunchStoryboardName"] = "TrapTubeLaunchV3"
+          info["UILaunchStoryboardName"] = "TrapTubeLaunchV4"
           for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
               icons = info.get(key)
               if not isinstance(icons, dict):
@@ -204,10 +204,10 @@ jobs:
           opaque.resize((60, 60), Image.Resampling.LANCZOS).save(app / "icon3.png")
           # A transparent launch logo is placed on the launch screen's near-black canvas.
           icon_launch = icon.resize((512, 512), Image.Resampling.LANCZOS)
-          icon_launch.save(app / "TrapTubeLaunchLogoV3.png")
+          icon_launch.save(app / "TrapTubeLaunchLogoV4.png")
           print(f"Prepared TrapTube app icon from {source}")
           PY
-          ibtool --compile "$APP/TrapTubeLaunchV3.storyboardc" ci/patches/TrapTubeLaunch.storyboard
+          ibtool --compile "$APP/TrapTubeLaunchV4.storyboardc" ci/patches/TrapTubeLaunch.storyboard
           mkdir -p "$APP/Frameworks"
           if [[ -d build-output/Frameworks/TrapTubeStemKit.framework ]]; then
             ditto build-output/Frameworks/TrapTubeStemKit.framework "$APP/Frameworks/TrapTubeStemKit.framework"
@@ -301,9 +301,9 @@ jobs:
           ditto -x -k output/TrapTube-YTPlus-Branding-Theme-Trial.ipa verify
           APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunchV3"
-          test -s "$APP/TrapTubeLaunchV3.storyboardc/Info.plist"
-          test -s "$APP/TrapTubeLaunchLogoV3.png"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunchV4"
+          test -s "$APP/TrapTubeLaunchV4.storyboardc/Info.plist"
+          test -s "$APP/TrapTubeLaunchLogoV4.png"
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
@@ -330,6 +330,7 @@ jobs:
           strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
           grep -q 'TrapTube Branding' output/branding-binary-strings.txt
+          grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
           grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
