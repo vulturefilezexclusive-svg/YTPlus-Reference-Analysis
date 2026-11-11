@@ -1,4 +1,6 @@
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
+#import <objc/runtime.h>
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
@@ -670,11 +672,23 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
             return [[[entry pivotBarItemRenderer] pivotIdentifier] isEqualToString:TTStemPivotIdentifier];
         }] != NSNotFound;
         if (!alreadyPresent) {
-            YTIPivotBarSupportedRenderers *stem = [YTIPivotBarRenderer
-                pivotSupportedRenderersWithBrowseId:@"FEwhat_to_watch"
-                title:@"Stem Studio"
-                iconType:YT_AUDIO];
-            YTIPivotBarItemRenderer *item = [stem pivotBarItemRenderer];
+            // Resolve the private YouTube renderer class dynamically. A direct
+            // Objective-C class reference creates an undefined _OBJC_CLASS_ symbol
+            // in the injected tweak on some host builds and prevents dyld startup.
+            Class rendererClass = NSClassFromString(@"YTIPivotBarRenderer");
+            SEL factory = sel_registerName("pivotSupportedRenderersWithBrowseId:title:iconType:");
+            id stem = nil;
+            if (rendererClass && [rendererClass respondsToSelector:factory]) {
+                stem = ((id (*)(id, SEL, id, id, NSInteger))objc_msgSend)(
+                    rendererClass, factory, @"FEwhat_to_watch", @"Stem Studio", YT_AUDIO
+                );
+            }
+            if (!stem) {
+                NSLog(@"[TrapTube] Pivot renderer factory unavailable; leaving host tabs unchanged");
+                %orig;
+                return;
+            }
+            id item = [stem pivotBarItemRenderer];
             item.pivotIdentifier = TTStemPivotIdentifier;
             item.targetId = TTStemPivotIdentifier;
             item.navigationEndpoint = nil;
