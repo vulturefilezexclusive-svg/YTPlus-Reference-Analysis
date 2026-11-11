@@ -14,16 +14,28 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - name: Download reference IPA from TrapTube release
+      - name: Download and validate reference IPA from TrapTube release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p input output
-          curl --fail --location --retry 3 \
-            'https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/Referenceipa/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa' \
+          curl --fail --location --retry 3 --retry-all-errors \
+            'https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube' \
             --output input/reference.ipa
+          echo "## Download validation" > output/download-validation.txt
+          file input/reference.ipa | tee -a output/download-validation.txt
+          ls -lh input/reference.ipa | tee -a output/download-validation.txt
+          if ! unzip -tq input/reference.ipa >/dev/null; then
+            echo "Downloaded asset is not a valid ZIP/IPA archive." >&2
+            exit 1
+          fi
+          if ! unzip -Z1 input/reference.ipa | grep -q '^Payload/[^/]\+\.app/'; then
+            echo "Archive is valid ZIP but does not contain a top-level Payload/*.app bundle." >&2
+            echo "Archive entries (first 80):"
+            unzip -Z1 input/reference.ipa | head -80
+            exit 1
+          fi
           shasum -a 256 input/reference.ipa | tee output/sha256.txt
-          ls -lh input/reference.ipa
 
       - name: Extract and inspect app bundle
         shell: bash
@@ -67,11 +79,9 @@ jobs:
             nm -gU "$f" 2>&1 || true
           done > output/framework-linkage-and-symbols.txt
 
-          # Capture UI/resource identifiers and likely feature strings for quick triage.
           grep -Ein 'download|caption|subtitle|codec|avc1|vp9|opus|aac|m4a|mp3|metadata|queue|save in|play in|quality|format|resolution' \
             output/main-executable-strings.txt > output/feature-string-hits.txt || true
 
-          # Avoid bundling the IPA or extracted proprietary executable in the report artifact.
           du -sh "$APP" > output/app-bundle-size.txt
 
       - name: Upload text inspection report
