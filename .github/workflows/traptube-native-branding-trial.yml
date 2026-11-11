@@ -301,7 +301,7 @@ jobs:
           ditto -x -k output/TrapTube-YTPlus-Branding-Theme-Trial.ipa verify
           APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunch"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunchV2"
           test -s "$APP/TrapTubeLaunchV2.storyboardc/Info.plist"
           test -s "$APP/TrapTubeLaunchLogoV2.png"
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
