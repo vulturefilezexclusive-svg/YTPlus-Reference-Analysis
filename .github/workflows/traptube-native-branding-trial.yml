@@ -321,10 +321,10 @@ jobs:
             test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
           fi
           strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
-          grep -q 'TrapTube Extensions' output/branding-binary-strings.txt
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
-          grep -q 'TrapTube' output/branding-binary-strings.txt
-          grep -q 'WelcomeVC' output/branding-binary-strings.txt
+          grep -q 'TrapTube Branding' output/branding-binary-strings.txt
+          grep -q 'Stem Studio' output/branding-binary-strings.txt
+          grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
