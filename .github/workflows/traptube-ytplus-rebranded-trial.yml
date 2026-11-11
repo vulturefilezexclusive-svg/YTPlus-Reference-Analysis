@@ -1,0 +1,144 @@
+name: TrapTube YTPlus Rebranded Trial IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Checkout TrapTube integration pipeline
+        uses: actions/checkout@v4
+
+      - name: Download and verify pinned YouTube Plus host
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://github.com/vulturefilezexclusive-svg/TrapTube/releases/download/ytplus-reference/YouTube.21.40.5.YTPlus.6.0b2.@ipavault.ipa'
+          curl --fail --location --retry 3 "$URL" -o reference.ipa
+          echo 'a3b3c51480efa95e3eba6b2389398e7f1de5b1685427973f4769efbb3b2514af  reference.ipa' | shasum -a 256 -c -
+
+      - name: Checkout pinned YTLite v6.0 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --depth 1 --branch v6.0 https://github.com/dayanch96/YTLite.git ytlite-source
+          git -C ytlite-source rev-parse HEAD | tee ytlite-source-commit.txt
+          python3 ci/patches/PatchYTLiteForTrapTube.py ytlite-source
+          test -s ytlite-source/TRAPTUBE-YTLITE-PATCH-REPORT.txt
+          ! grep -Eq 'https?://|openURL:|linkWithTitle:' ytlite-source/Settings.x
+          ! grep -q 'AdvancedModeReminder' <(sed -n '/%ctor/,$p' ytlite-source/YTLite.x)
+          grep -q 'TrapTube Extensions' ytlite-source/Settings.x
+          grep -q 'PACKAGE_VERSION = 6.0.0' ytlite-source/Makefile
+
+      - name: Install Theos build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install make ldid dpkg
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
+          echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
+
+      - name: Install Theos and pinned iOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet --recurse-submodules https://github.com/theos/theos.git "$RUNNER_TEMP/theos"
+          git clone --quiet -n --depth=1 --filter=tree:0 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          cd "$RUNNER_TEMP/theos-sdks"
+          git sparse-checkout set --no-cone iPhoneOS16.5.sdk
+          git checkout
+          mkdir -p "$RUNNER_TEMP/theos/sdks"
+          cp -R iPhoneOS16.5.sdk "$RUNNER_TEMP/theos/sdks/"
+          mkdir -p "$RUNNER_TEMP/theos/include"
+          git clone --quiet --depth 1 https://github.com/PoomSmart/YouTubeHeader.git "$RUNNER_TEMP/theos/include/YouTubeHeader"
+          git clone --quiet --depth 1 https://github.com/PoomSmart/PSHeader.git "$RUNNER_TEMP/theos/include/PSHeader"
+
+      - name: Compile TrapTube-branded YTLite tweak
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd ytlite-source
+          make clean package DEBUG=0 FINALPACKAGE=1
+          DEB="$(find packages -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$DEB" && test -s "$DEB"
+          mkdir -p ../ytlite-package
+          dpkg-deb -R "$DEB" ../ytlite-package
+          DYLIB="$(find ../ytlite-package -type f -name 'YTLite.dylib' -print -quit)"
+          BUNDLE="$(find ../ytlite-package -type d -name 'YTLite.bundle' -print -quit)"
+          test -n "$DYLIB" && test -n "$BUNDLE"
+          mkdir -p ../build-output
+          cp "$DYLIB" ../build-output/YTLite.dylib
+          ditto "$BUNDLE" ../build-output/YTLite.bundle
+          cp TRAPTUBE-YTLITE-PATCH-REPORT.txt ../build-output/
+          cp ../ytlite-source-commit.txt ../build-output/
+          lipo -info ../build-output/YTLite.dylib
+          otool -L ../build-output/YTLite.dylib
+
+      - name: Transplant patched tweak into pinned host IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p host output
+          ditto -x -k reference.ipa host
+          APP="$(find host/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP"
+          python3 - "$APP/Info.plist" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          with path.open("rb") as f:
+              info = plistlib.load(f)
+          if info.get("CFBundleIdentifier") != "com.google.ios.youtube":
+              raise SystemExit("Unexpected host bundle identifier.")
+          info["CFBundleDisplayName"] = "TrapTube"
+          info["CFBundleName"] = "TrapTube"
+          with path.open("wb") as f:
+              plistlib.dump(info, f, fmt=plistlib.FMT_BINARY, sort_keys=False)
+          PY
+          mkdir -p "$APP/Frameworks"
+          cp build-output/YTLite.dylib "$APP/Frameworks/YTLite.dylib"
+          rm -rf "$APP/YTLite.bundle"
+          ditto build-output/YTLite.bundle "$APP/YTLite.bundle"
+          cp ci/patches/TrapTube-Third-Party-Notices.md "$APP/TrapTube-Third-Party-Notices.md"
+          cp build-output/TRAPTUBE-YTLITE-PATCH-REPORT.txt "$APP/TrapTube-YTLite-Patch-Report.txt"
+          cp build-output/ytlite-source-commit.txt "$APP/TrapTube-YTLite-Source-Commit.txt"
+          find "$APP" -type d -name _CodeSignature -prune -exec rm -rf {} +
+          find "$APP" -type f -name CodeResources -delete
+          ditto -c -k --sequesterRsrc --keepParent host/Payload output/TrapTube-YTPlus-Rebranded-Trial.ipa
+          shasum -a 256 output/TrapTube-YTPlus-Rebranded-Trial.ipa | tee output/ipa-sha256.txt
+
+      - name: Verify branded tweak payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          ditto -x -k output/TrapTube-YTPlus-Rebranded-Trial.ipa verify
+          APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
+          test -s "$APP/Frameworks/YTLite.dylib"
+          test -s "$APP/YTLite.bundle/en.lproj/Localizable.strings"
+          test -s "$APP/TrapTube-Third-Party-Notices.md"
+          strings "$APP/Frameworks/YTLite.dylib" > output/ytlite-binary-strings.txt
+          grep -q 'TrapTube Extensions' output/ytlite-binary-strings.txt
+          ! grep -q 'AdvancedModeReminder' output/ytlite-binary-strings.txt
+          ! grep -Eq 'paypal\\.me/dayanch96|github\\.com/sponsors/dayanch96|buymeacoffee\\.com/dayanch96|boosty\\.to/dayanch96' output/ytlite-binary-strings.txt
+          unzip -tq output/TrapTube-YTPlus-Rebranded-Trial.ipa
+          echo "Verified: branded settings section, no first-launch reminder code, and no donor URLs in the rebuilt YTLite binary."
+
+      - name: Upload branded trial IPA and audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: traptube-ytplus-rebranded-trial-v1
+          path: |
+            output/TrapTube-YTPlus-Rebranded-Trial.ipa
+            output/ipa-sha256.txt
+            output/ytlite-binary-strings.txt
+            ytlite-source-commit.txt
+            ytlite-source/TRAPTUBE-YTLITE-PATCH-REPORT.txt
+          if-no-files-found: error
+          retention-days: 14
