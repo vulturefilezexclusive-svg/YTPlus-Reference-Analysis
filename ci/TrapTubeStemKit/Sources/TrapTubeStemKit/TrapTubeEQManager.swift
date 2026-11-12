@@ -125,7 +125,14 @@ public final class TrapTubeEQManager: NSObject {
     }
 
     public var attachmentStatus: String {
-        lock.lock(); defer { lock.unlock() }; return attachmentStatusText
+        lock.lock(); defer { lock.unlock() }
+        // The RemoteIO output path (used for YouTube's own player, which
+        // never vends an AVPlayer) reports through user defaults.
+        if attachmentStatusText == "Not attached yet",
+           let output = UserDefaults.standard.string(forKey: "TrapTube.EQ.OutputStatus") {
+            return output
+        }
+        return attachmentStatusText
     }
 
     private var hookFiredCount = 0
