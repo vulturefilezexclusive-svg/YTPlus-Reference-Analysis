@@ -189,7 +189,9 @@ public final class TrapTubeEQManager: NSObject {
         let isFloatPCM = tapIsFloatPCM
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         if !isFloatPCM { lock.unlock(); return }
-        if tapStates.count != buffers.count {
+        if tapStates.count != buffers.count || buffers.enumerated().contains(where: { index, buffer in
+            tapStates[index].count != max(1, Int(buffer.mNumberChannels)) * 17
+        }) {
             tapStates = buffers.map { buffer in Array(repeating: BiquadState(), count: max(1, Int(buffer.mNumberChannels)) * 17) }
         }
         for (bufferIndex, buffer) in buffers.enumerated() {
