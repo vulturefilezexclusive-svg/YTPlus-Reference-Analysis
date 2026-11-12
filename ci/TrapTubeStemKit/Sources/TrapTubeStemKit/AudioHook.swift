@@ -13,6 +13,18 @@ public final class TrapTubeAudioHook: NSObject {
     private var attachmentTask: Task<Void, Never>?
     private weak var observedItem: AVPlayerItem?
 
+    /// Creator-agnostic entry point: called whenever an AVPlayerItem comes
+    /// into existence or receives an audio mix, whoever created it. The
+    /// manager de-dupes per item, so repeated calls are cheap no-ops.
+    @objc public static func attachInBackground(to item: AVPlayerItem) {
+        Task {
+            let attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
+            if attached {
+                NSLog("[TrapTube EQ] Attached audio processing tap via item-creation path")
+            }
+        }
+    }
+
     @objc public func install(on player: AVPlayer) {
         invalidate()
         self.player = player
