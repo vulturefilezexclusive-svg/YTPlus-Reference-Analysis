@@ -251,6 +251,41 @@ private final class TrapTubeStemModel: ObservableObject {
         return 8 + headerLength + maxEnd == UInt64(size)
     }
 
+    /// Loads a model with automatic recovery: a corrupt cache file is
+    /// deleted and re-downloaded, and if the native loader panics, the
+    /// weights are fetched fresh and the load retried exactly once. A panic
+    /// on a verified clean file is reported as a model-variant failure.
+    nonisolated static func loadWithRecovery(engine: DemucsEngine, model: DemucsModel,
+                                             status: @escaping @Sendable (String) async -> Void) async throws {
+        if DemucsEngine.isDownloaded(model), !weightsFileIsValid(model) {
+            _ = DemucsEngine.deleteDownload(model)
+        }
+        if !DemucsEngine.isDownloaded(model) {
+            await status("Downloading model...")
+            try await DemucsEngine.download(model)
+            guard weightsFileIsValid(model) else {
+                _ = DemucsEngine.deleteDownload(model)
+                throw NSError(domain: "TrapTubeStemKit", code: 14,
+                              userInfo: [NSLocalizedDescriptionKey: "The model download did not produce a valid file. Check your connection and try again."])
+            }
+        }
+        do {
+            try await engine.load(model)
+        } catch {
+            guard error.localizedDescription.contains("panicked") else { throw error }
+            _ = DemucsEngine.deleteDownload(model)
+            await status("The model loader crashed - downloading a fresh copy...")
+            try await DemucsEngine.download(model)
+            guard weightsFileIsValid(model) else { throw error }
+            do {
+                try await engine.load(model)
+            } catch {
+                throw NSError(domain: "TrapTubeStemKit", code: 15,
+                              userInfo: [NSLocalizedDescriptionKey: "This model variant crashes the separation engine even with a verified clean download. Switch to the standard HTDemucs model - the fine-tuned variant is not stable in this build."])
+            }
+        }
+    }
+
     private func runSeparation() {
         guard let selectedFile, !isProcessing else { return }
         isProcessing = true
@@ -273,13 +308,9 @@ private final class TrapTubeStemModel: ObservableObject {
                 }
                 stage = "HTDemucs model loading"
                 await self.setStatus("Loading HTDemucs…", progress: 0.02)
-                if DemucsEngine.isDownloaded(selectedModel),
-                   !Self.weightsFileIsValid(selectedModel) {
-                    _ = DemucsEngine.deleteDownload(selectedModel)
-                    throw NSError(domain: "TrapTubeStemKit", code: 13,
-                                  userInfo: [NSLocalizedDescriptionKey: "The downloaded model file was corrupt (it failed an integrity check) and has been deleted. Tap Separate again to download a clean copy."])
+                try await Self.loadWithRecovery(engine: engine, model: selectedModel) { message in
+                    await self.setStatus(message, progress: 0.02)
                 }
-                try await engine.load(selectedModel)
                 stage = "Metal GPU warmup"
                 await self.setStatus("Preparing Metal inference…", progress: 0.05)
                 try await engine.warmup()
@@ -317,15 +348,7 @@ private final class TrapTubeStemModel: ObservableObject {
             } catch {
                 let detail = "\(stage) failed: \(error.localizedDescription)"
                 NSLog("[TrapTube Stem Studio] %@", detail)
-                if detail.contains("worker panicked") {
-                    // The native loader crashed. Drop the cached weights so
-                    // the next attempt starts from a clean download, and say
-                    // so plainly instead of surfacing the raw panic text.
-                    _ = DemucsEngine.deleteDownload(selectedModel)
-                    await self.fail("The model engine crashed while loading (stage: \(stage)). The cached model was deleted - tap Separate to download a fresh copy. If it crashes again on a fresh download, try the standard HTDemucs model instead of the fine-tuned one.")
-                } else {
-                    await self.fail(detail)
-                }
+                await self.fail(detail)
             }
         }
     }
@@ -344,6 +367,7 @@ private final class TrapTubeStemModel: ObservableObject {
 
     private func fail(_ message: String) {
         isProcessing = false
+        isModelReady = DemucsEngine.isDownloaded(selectedModel)
         error = message
         status = "Separation failed"
     }
@@ -431,6 +455,33 @@ private final class TrapTubeStemModel: ObservableObject {
     }
 }
 
+/// Liquid Glass surface: the real iOS 26 glass effect where the OS offers
+/// it, and a layered material approximation on iOS 17-25, so the design
+/// language is the same on every supported version.
+private struct TTGlassCard: ViewModifier {
+    var cornerRadius: CGFloat = 18
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        } else {
+            content
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(LinearGradient(colors: [Color.white.opacity(0.35), Color.white.opacity(0.08)],
+                                               startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                )
+                .shadow(color: Color.black.opacity(0.28), radius: 14, y: 5)
+        }
+    }
+}
+
+private extension View {
+    func ttGlassCard(cornerRadius: CGFloat = 18) -> some View {
+        modifier(TTGlassCard(cornerRadius: cornerRadius))
+    }
+}
+
 @MainActor
 private struct TrapTubeStemStudioView: View {
     @StateObject private var model = TrapTubeStemModel()
@@ -455,7 +506,7 @@ private struct TrapTubeStemStudioView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
-            .background(Color.white.opacity(0.035))
+            .background(.ultraThinMaterial)
 
             TabView(selection: $selectedPage) {
                 equalizerPage.tag(0)
@@ -463,7 +514,12 @@ private struct TrapTubeStemStudioView: View {
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
-        .background(Color(red: 0.025, green: 0.025, blue: 0.035).ignoresSafeArea())
+        .background {
+            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
+                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+        }
         .preferredColorScheme(.dark)
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
             switch result {
@@ -513,7 +569,7 @@ private struct TrapTubeStemStudioView: View {
                         .font(.subheadline.weight(.bold)).foregroundStyle(accent)
                 }
                 .padding(16)
-                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+                .ttGlassCard(cornerRadius: 18)
 
                 VStack(alignment: .leading, spacing: 16) {
                     TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
@@ -522,7 +578,7 @@ private struct TrapTubeStemStudioView: View {
                                         range: 0...200, suffix: "%") { manager.setMasterGainPercent($0) }
                 }
                 .padding(16)
-                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+                .ttGlassCard(cornerRadius: 18)
 
                 VStack(alignment: .leading, spacing: 14) {
                     Text("16-BAND EQUALIZER").font(.caption.weight(.black))
@@ -540,7 +596,7 @@ private struct TrapTubeStemStudioView: View {
                     }
                 }
                 .padding(16)
-                .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+                .ttGlassCard(cornerRadius: 18)
 
                 Text("EQ applies to TrapTube-owned audio and player items that accept an audio-processing tap. Protected or custom-rendered streams may not expose a processable audio path.")
                     .font(.caption).foregroundStyle(Color.white.opacity(0.45))
@@ -567,7 +623,7 @@ private struct TrapTubeStemStudioView: View {
                           systemImage: "folder.badge.plus")
                         .font(.headline.weight(.bold)).lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                        .ttGlassCard(cornerRadius: 18)
                         .overlay(RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.45), lineWidth: 1))
                 }
                 .tint(accent)
@@ -642,7 +698,7 @@ private struct TrapTubeStemStudioView: View {
                         if model.isDownloading { ProgressView(value: model.downloadProgress).tint(accent) }
                     }
                 }
-                .padding(16).background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+                .padding(16).ttGlassCard(cornerRadius: 18)
 
                 Button { model.separate() } label: {
                     HStack {
@@ -692,7 +748,7 @@ private struct TrapTubeStemStudioView: View {
                         .padding(.vertical, 5)
                     }
                 }
-                .padding(16).background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+                .padding(16).ttGlassCard(cornerRadius: 18)
 
                 Text("Processing runs locally with Metal acceleration. The selected model's initial download requires internet; downloaded models can be reused offline. Files remain on this device.")
                     .font(.caption).foregroundStyle(Color.white.opacity(0.45))
@@ -709,8 +765,16 @@ private struct TrapTubeStemStudioView: View {
                 .font(.system(size: 12, weight: .bold))
                 .frame(maxWidth: .infinity).padding(.vertical, 11)
                 .foregroundStyle(selectedPage == page ? .white : Color.white.opacity(0.58))
-                .background(selectedPage == page ? accent : Color.white.opacity(0.055),
-                            in: Capsule())
+                .background {
+                    if selectedPage == page {
+                        Capsule().fill(accent)
+                    } else if #available(iOS 26.0, *) {
+                        Capsule().glassEffect(.regular, in: Capsule())
+                    } else {
+                        Capsule().fill(.ultraThinMaterial)
+                    }
+                }
+                .overlay(Capsule().stroke(Color.white.opacity(selectedPage == page ? 0.25 : 0.12), lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
