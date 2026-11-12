@@ -1396,6 +1396,19 @@ static void TTShowHostileTakeoverSplash(void) {
     });
 }
 
+// Present the branded overlay synchronously as soon as the app's first
+// scene window becomes visible. The old 200 ms constructor timer allowed the
+// embedded YouTube host's own launch mark to render first.
+%hook UIWindow
+- (void)makeKeyAndVisible {
+    %orig;
+    if (self.windowScene && !TTLaunchOverlayPresented) {
+        TTShowHostileTakeoverSplash();
+        if (!TTLaunchOverlayPresented) TTScheduleHostileTakeoverSplash(0);
+    }
+}
+%end
+
 static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((attempt == 0 ? 0.20 : 0.18) * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
