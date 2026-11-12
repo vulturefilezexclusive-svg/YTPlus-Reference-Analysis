@@ -16,6 +16,7 @@ public final class TrapTubeEQManager: NSObject {
     private var masterPercent: Float = 100
     private var attachedItems = NSHashTable<AVPlayerItem>.weakObjects()
     private var tapSampleRate: Double = 44100
+    private var tapIsFloatPCM = false
     private var tapStates: [[BiquadState]] = []
 
     private let engine = AVAudioEngine()
@@ -89,7 +90,8 @@ public final class TrapTubeEQManager: NSObject {
                 prepare: { tap, _, processingFormat in
                     guard let raw = MTAudioProcessingTapGetStorage(tap) else { return }
                     let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
-                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate)
+                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate,
+                                         isFloatPCM: (processingFormat.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0)
                 },
                 unprepare: { _ in },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
@@ -158,9 +160,10 @@ public final class TrapTubeEQManager: NSObject {
         engine.prepare()
     }
 
-    private func configureTap(sampleRate: Double) {
+    private func configureTap(sampleRate: Double, isFloatPCM: Bool) {
         lock.lock()
         tapSampleRate = max(8000, sampleRate)
+        tapIsFloatPCM = isFloatPCM
         tapStates = []
         lock.unlock()
     }
@@ -172,9 +175,11 @@ public final class TrapTubeEQManager: NSObject {
         let bass = bassBoost
         let master = masterPercent / 100
         let sampleRate = tapSampleRate
+        let isFloatPCM = tapIsFloatPCM
         let buffers = UnsafeMutableAudioBufferListPointer(list)
+        if !isFloatPCM { lock.unlock(); return }
         if tapStates.count != buffers.count {
-            tapStates = buffers.map { _ in Array(repeating: BiquadState(), count: 17) }
+            tapStates = buffers.map { buffer in Array(repeating: BiquadState(), count: max(1, Int(buffer.mNumberChannels)) * 17) }
         }
         for (bufferIndex, buffer) in buffers.enumerated() {
             guard let data = buffer.mData, buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
@@ -187,7 +192,11 @@ public final class TrapTubeEQManager: NSObject {
             coefficients.append(BiquadCoefficients.lowShelf(frequency: 100, gainDB: Double(bass), sampleRate: sampleRate))
             for sample in 0..<samples {
                 var value = pcm[sample] * master
-                for band in 0..<17 { value = tapStates[bufferIndex][band].process(value, coefficients[band]) }
+                let channel = sample % channels
+                for band in 0..<17 {
+                    let stateIndex = channel * 17 + band
+                    value = tapStates[bufferIndex][stateIndex].process(value, coefficients[band])
+                }
                 let peak = abs(value)
                 pcm[sample] = peak > 1 ? value / peak : value
             }
