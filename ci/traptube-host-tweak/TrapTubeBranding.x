@@ -1085,12 +1085,27 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 %hook YTSettingsViewController
 
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    // Apply the section cleanup before the settings panel is first presented.
+    TTPruneRemovedSettingsRows(self.view);
+}
+
 - (void)viewDidLayoutSubviews {
     %orig;
     TTApplyStemStudioSurfaceToView(self.view);
-    // Fallback against settings categories whose rows are assembled outside
-    // setSectionItems:. Prune the rendered cells as well as the model arrays.
+    // Re-apply after each layout because the host lazily rebuilds some settings
+    // rows after the initial section model has been populated.
     TTPruneRemovedSettingsRows(self.view);
+}
+
+- (void)viewDidAppear:(BOOL)animated {
+    %orig;
+    // The host can insert Account/Developer/Credits content during appearance.
+    // Run once more after that insertion pass so the removed groups do not remain.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TTPruneRemovedSettingsRows(self.view);
+    });
 }
 
 - (void)setSectionItems:(NSMutableArray *)sectionItems
