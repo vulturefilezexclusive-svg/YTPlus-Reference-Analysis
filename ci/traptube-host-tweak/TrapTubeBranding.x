@@ -1759,7 +1759,13 @@ static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
 // ---------------------------------------------------------------------------
 
 #import <AudioToolbox/AudioToolbox.h>
-#import <mach-o/dyld-interposing.h>
+// DYLD_INTERPOSE defined locally: mach-o/dyld-interposing.h is not part of
+// the Theos SDK headers. The macro emits a static __DATA,__interpose tuple
+// that dyld uses to rebind other images' imports to our replacements.
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static const struct { void *replacement; void *replacee; } \
+    _tt_interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = \
+    { (void *)_replacement, (void *)_replacee };
 #import <pthread.h>
 
 static const double TTEQFrequencies[16] = {
