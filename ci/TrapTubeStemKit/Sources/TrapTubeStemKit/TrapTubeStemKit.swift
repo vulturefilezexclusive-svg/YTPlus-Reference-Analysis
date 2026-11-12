@@ -286,6 +286,19 @@ private final class TrapTubeStemModel: ObservableObject {
         }
     }
 
+    /// When the fine-tuned model provably crashes the engine on a verified
+    /// clean download, switch the selection to the standard model so the
+    /// next tap just works. Returns true when a switch happened.
+    private func switchToStandardAfterVerifiedCrash() -> Bool {
+        guard selectedModelOption != .balanced else { return false }
+        selectedModelOption = .balanced
+        UserDefaults.standard.set(TrapTubeStemModelOption.balanced.rawValue,
+                                  forKey: "TrapTube.StemStudio.Model")
+        isModelReady = DemucsEngine.isDownloaded(selectedModel)
+        fail("The fine-tuned model crashes this build's engine even with a clean download, so Stem Studio switched to the standard HTDemucs model. Tap Separate again to run with it.")
+        return true
+    }
+
     private func runSeparation() {
         guard let selectedFile, !isProcessing else { return }
         isProcessing = true
@@ -350,11 +363,8 @@ private final class TrapTubeStemModel: ObservableObject {
                 NSLog("[TrapTube Stem Studio] %@", detail)
                 let nsError = error as NSError
                 if nsError.domain == "TrapTubeStemKit", nsError.code == 15,
-                   self.selectedModelOption != .balanced {
-                    self.selectedModelOption = .balanced
-                    UserDefaults.standard.set(TrapTubeStemModelOption.balanced.rawValue,
-                                              forKey: "TrapTube.StemStudio.Model")
-                    await self.fail("The fine-tuned model crashes this build's engine even with a clean download, so Stem Studio switched to the standard HTDemucs model. Tap Separate again to run with it.")
+                   await self.switchToStandardAfterVerifiedCrash() {
+                    // The helper switched the model and set the message.
                 } else {
                     await self.fail(detail)
                 }
