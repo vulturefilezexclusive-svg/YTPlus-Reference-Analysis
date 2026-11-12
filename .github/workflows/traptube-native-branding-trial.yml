@@ -404,6 +404,10 @@ jobs:
           grep -Fq 'loadWithRecovery' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'glassEffect' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'ttGlassCard' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TTReplacementAudioUnitRender' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'TrapTube.EQ.Enabled' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'kAudioFormatFlagIsSignedInteger' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'isAttached' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
