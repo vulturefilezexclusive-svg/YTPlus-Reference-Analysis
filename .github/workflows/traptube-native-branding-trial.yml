@@ -319,10 +319,12 @@ jobs:
           strings "$STEMKIT_BINARY" | grep -F 'TrapTubeStemStudioFactory'
           strings "$STEMKIT_BINARY" | grep -F 'TrapTubeEQFactory'
           strings "$STEMKIT_BINARY" | grep -F 'TrapTubeEQManager'
+          strings "$STEMKIT_BINARY" | grep -F 'TrapTubeAudioHook'
           grep -Fq 'AVAudioUnitEQ(numberOfBands: 17)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'MTAudioProcessingTapCreate' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'setMasterGainPercent' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
-          grep -Fq 'TrapTubeEQFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'TrapTubeEQFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          grep -Fq 'TrapTubeAudioHook' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
           grep -Fq 'TrapTubeEqualizer' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'case .balanced: .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'case .sixStem: .sixStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
