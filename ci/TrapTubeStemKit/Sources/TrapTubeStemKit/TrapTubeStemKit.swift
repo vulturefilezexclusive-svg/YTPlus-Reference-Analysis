@@ -384,6 +384,7 @@ private final class TrapTubeStemModel: ObservableObject {
 private struct TrapTubeStemStudioView: View {
     @StateObject private var model = TrapTubeStemModel()
     @State private var showImporter = false
+    @State private var selectedPage = 1
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
