@@ -217,7 +217,7 @@ private final class TrapTubeStemModel: ObservableObject {
     /// Exact byte sizes of the published weights files. The engine's own
     /// cache check only tests that a file exists, so a damaged download
     /// would otherwise poison every load attempt with a native panic.
-    private static let expectedWeightsBytes: [String: Int64] = [
+    private nonisolated static let expectedWeightsBytes: [String: Int64] = [
         "htdemucs": 84_030_696,
         "htdemucs_6s": 54_890_960,
         "htdemucs_ft": 336_125_008
@@ -225,7 +225,7 @@ private final class TrapTubeStemModel: ObservableObject {
 
     /// Structural validation of a downloaded weights file: exact size plus a
     /// safetensors header whose tensor offsets end exactly at end-of-file.
-    static func weightsFileIsValid(_ model: DemucsModel) -> Bool {
+    nonisolated static func weightsFileIsValid(_ model: DemucsModel) -> Bool {
         guard let url = DemucsEngine.downloadedFileURL(for: model) else { return false }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = (attrs[.size] as? NSNumber)?.int64Value, size > 16 else { return false }
