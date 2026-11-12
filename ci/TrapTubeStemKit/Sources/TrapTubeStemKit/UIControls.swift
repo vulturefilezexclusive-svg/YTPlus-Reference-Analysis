@@ -33,7 +33,11 @@ private final class TrapTubeEQViewController: UIViewController {
         addSlider(title: "Bass boost", range: 0...20, value: manager.bassBoostDecibels, suffix: " dB") { [weak self] in self?.manager.setBassBoost($0) }
         addSlider(title: "Master gain", range: 0...200, value: manager.masterGainPercent, suffix: "%") { [weak self] in self?.manager.setMasterGainPercent($0) }
         for (index, frequency) in TrapTubeEQManager.frequencies.enumerated() {
-            let title = frequency >= 1000 ? "\(Int(frequency / 1000)) kHz" : "\(Int(frequency)) Hz"
+            let title = frequency >= 1000
+                ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
+                    ? "\(Int(frequency / 1000)) kHz"
+                    : String(format: "%.1f kHz", frequency / 1000))
+                : "\(Int(frequency)) Hz"
             addSlider(title: title, range: -12...12, value: manager.bandGain(at: index), suffix: " dB") { [weak self] in self?.manager.setBandGain($0, at: index) }
         }
         let note = UILabel()
