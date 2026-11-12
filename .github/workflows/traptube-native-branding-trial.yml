@@ -325,6 +325,11 @@ jobs:
           grep -Fq 'TrapTube.StemStudio.Model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'availableStemNames' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'expectedStemCount' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'Download model & separate' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'DemucsEngine.download(modelToDownload)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'private func runSeparation()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TTPruneRemovedSettingsRows(self.view)' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTShouldHideRenderedSettingsText' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'private lazy var engine: DemucsEngine = {' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq '_ = TrapTubeStemStorage.configured' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'return DemucsEngine()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
