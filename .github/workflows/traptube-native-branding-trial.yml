@@ -389,6 +389,12 @@ jobs:
           grep -Fq 'traptube plus preferences' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTIsRemovedVersionFooter' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'initWithItems' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'attachInBackgroundTo:' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'playerItemWithAsset' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq '%hook DVNTableModel' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq '%hook DVNSection' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTFilteredDVNSections' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTBrandDisplayFont(24)' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.Enabled' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'kAudioFormatFlagIsSignedInteger' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'isAttached' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
