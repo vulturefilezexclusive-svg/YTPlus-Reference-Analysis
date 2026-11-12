@@ -17,7 +17,8 @@ public final class TrapTubeAudioHook: NSObject {
         self.player = player
         itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] observedPlayer, _ in
             DispatchQueue.main.async { [weak self, weak observedPlayer] in
-                guard let self, let observedPlayer else { return }
+                guard let self, let observedPlayer,
+                      self.player === observedPlayer else { return }
                 self.observeCurrentItem(observedPlayer.currentItem)
             }
         }
