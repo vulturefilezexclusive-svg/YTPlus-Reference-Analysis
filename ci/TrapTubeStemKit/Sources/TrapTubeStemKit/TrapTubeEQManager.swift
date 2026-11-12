@@ -143,7 +143,7 @@ public final class TrapTubeEQManager: NSObject {
     public func play(file url: URL) throws {
         let file = try AVAudioFile(forReading: url)
         try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default,
-                                                        options: [.allowAirPlay, .allowBluetoothA2DP])
+                                                        options: [.allowAirPlay, .allowBluetoothA2DP, .mixWithOthers])
         try AVAudioSession.sharedInstance().setActive(true)
         if !engine.isRunning { try engine.start() }
         playerNode.stop()
