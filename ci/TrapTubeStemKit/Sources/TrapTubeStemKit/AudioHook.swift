@@ -12,7 +12,7 @@ public final class TrapTubeAudioHook: NSObject {
         invalidate()
         self.player = player
         itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] observedPlayer, _ in
-            guard let self, let item = observedPlayer.currentItem else { return }
+            guard self != nil, let item = observedPlayer.currentItem else { return }
             DispatchQueue.main.async {
                 _ = TrapTubeEQManager.shared.attach(to: item)
             }
