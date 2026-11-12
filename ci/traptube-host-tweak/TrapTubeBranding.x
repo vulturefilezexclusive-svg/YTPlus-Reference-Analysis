@@ -145,8 +145,11 @@ static void TTApplyAccentGlobally(void) {
     [UIProgressView appearance].progressTintColor = accent;
     [UIProgressView appearance].trackTintColor = [UIColor.whiteColor colorWithAlphaComponent:0.12];
     [UIActivityIndicatorView appearance].color = accent;
-    [UITextField appearance].keyboardAppearance = UIKeyboardAppearanceDark;
-    [UITextView appearance].keyboardAppearance = UIKeyboardAppearanceDark;
+    // Do not set keyboardAppearance through global appearance proxies. UIKit may
+    // apply these setters while the host creates private text-view subclasses
+    // off the main thread (for example ASTextKitComponentsTextView). TrapTube
+    // leaves keyboard styling to the system unless an owned editor sets it
+    // directly during main-thread view construction.
 
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         TTApplyAccentToWindow(window);
