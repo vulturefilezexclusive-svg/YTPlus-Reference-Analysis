@@ -389,8 +389,8 @@ jobs:
           grep -Fq 'TTIsRemovedVersionFooter' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTApplyStemStudioSurfaceToView' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTStemBackgroundColor' ci/traptube-host-tweak/TrapTubeBranding.x
-          grep -Fq 'VolumeBoostYTEnabled' ci/traptube-host-tweak/TrapTubeBranding.x
-          grep -Fq 'CustomYouTubeVolumeScalar' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'VolumeBoostYTEnabled' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          grep -Fq 'CustomYouTubeVolumeScalar' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
           grep -Fq 'TrapTubeStreamVolumeBoost' ci/traptube-host-tweak/TrapTubeBranding.x
           test -s "$APP/Frameworks/VolumeBoostYT.dylib"
           otool -L "$APP/YouTube" | grep -F '@rpath/VolumeBoostYT.dylib'
