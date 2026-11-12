@@ -1759,7 +1759,7 @@ static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
 // ---------------------------------------------------------------------------
 
 #import <AudioToolbox/AudioToolbox.h>
-#import <substrate.h>
+#import <mach-o/dyld-interposing.h>
 #import <pthread.h>
 
 static const double TTEQFrequencies[16] = {
@@ -1901,29 +1901,25 @@ static void TTEQProcessBufferList(AudioUnit unit, AudioBufferList *ioData) {
     }
 }
 
-static OSStatus (*TTOrigAudioUnitRender)(AudioUnit, AudioUnitRenderActionFlags *,
-                                         const AudioTimeStamp *, UInt32, UInt32,
-                                         AudioBufferList *);
-static OSStatus TTReplacementAudioUnitRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
-                                             const AudioTimeStamp *timestamp, UInt32 busNumber,
-                                             UInt32 frames, AudioBufferList *ioData) {
-    OSStatus status = TTOrigAudioUnitRender(unit, flags, timestamp, busNumber, frames, ioData);
-    if (status != noErr || !ioData) return status;
-    BOOL tracked = NO;
-    for (NSUInteger i = 0; i < TTRemoteIOUnitCount; i++) {
-        if (TTRemoteIOUnits[i] == unit) { tracked = YES; break; }
-    }
-    if (!tracked) return status;
+// Registered on each RemoteIO unit through the public
+// AudioUnitAddRenderNotify API: after the unit renders, its buffers can be
+// processed in place before they reach the hardware. No code patching is
+// involved anywhere in this path - the earlier MSHookFunction build was
+// killed by code-signing enforcement in sideloaded containers.
+static OSStatus TTRemoteIORenderNotify(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags,
+                                       const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber,
+                                       UInt32 inNumberFrames, AudioBufferList *ioData) {
+    if (!ioData || !(*ioActionFlags & kAudioUnitRenderAction_PostRender)) return noErr;
+    AudioUnit unit = (AudioUnit)inRefCon;
     if ((++TTRenderCallCount & 0x7F) == 0) TTEQReloadSettings();
     if (!TTOutputStatusAnnounced) TTAnnounceOutputStatus();
     if (TTEQOutputActive) TTEQProcessBufferList(unit, ioData);
-    return status;
+    return noErr;
 }
 
-static OSStatus (*TTOrigAudioComponentInstanceNew)(AudioComponent, AudioComponentInstance *);
 static OSStatus TTReplacementAudioComponentInstanceNew(AudioComponent component,
                                                        AudioComponentInstance *unitOut) {
-    OSStatus status = TTOrigAudioComponentInstanceNew(component, unitOut);
+    OSStatus status = AudioComponentInstanceNew(component, unitOut);
     if (status == noErr && unitOut && *unitOut) {
         AudioComponentDescription description;
         if (AudioComponentGetDescription(component, &description) == noErr &&
@@ -1938,13 +1934,14 @@ static OSStatus TTReplacementAudioComponentInstanceNew(AudioComponent component,
                 TTRemoteIOUnits[TTRemoteIOUnitCount++] = *unitOut;
             }
             pthread_mutex_unlock(&TTEQLock);
+            AudioUnitAddRenderNotify(*unitOut, TTRemoteIORenderNotify, (void *)*unitOut);
         }
     }
     return status;
 }
 
-static OSStatus (*TTOrigAudioComponentInstanceDispose)(AudioComponentInstance);
 static OSStatus TTReplacementAudioComponentInstanceDispose(AudioComponentInstance unit) {
+    AudioUnitRemoveRenderNotify(unit, TTRemoteIORenderNotify, (void *)unit);
     pthread_mutex_lock(&TTEQLock);
     for (NSUInteger i = 0; i < TTRemoteIOUnitCount; i++) {
         if (TTRemoteIOUnits[i] == unit) {
@@ -1953,17 +1950,14 @@ static OSStatus TTReplacementAudioComponentInstanceDispose(AudioComponentInstanc
         }
     }
     pthread_mutex_unlock(&TTEQLock);
-    return TTOrigAudioComponentInstanceDispose(unit);
+    return AudioComponentInstanceDispose(unit);
 }
+
+DYLD_INTERPOSE(TTReplacementAudioComponentInstanceNew, AudioComponentInstanceNew)
+DYLD_INTERPOSE(TTReplacementAudioComponentInstanceDispose, AudioComponentInstanceDispose)
 
 %ctor {
     TTEQReloadSettings();
-    MSHookFunction((void *)AudioUnitRender, (void *)TTReplacementAudioUnitRender,
-                   (void **)&TTOrigAudioUnitRender);
-    MSHookFunction((void *)AudioComponentInstanceNew, (void *)TTReplacementAudioComponentInstanceNew,
-                   (void **)&TTOrigAudioComponentInstanceNew);
-    MSHookFunction((void *)AudioComponentInstanceDispose, (void *)TTReplacementAudioComponentInstanceDispose,
-                   (void **)&TTOrigAudioComponentInstanceDispose);
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:@"advancedMode"];
     [defaults setBool:YES forKey:@"advancedModeReminder"];
