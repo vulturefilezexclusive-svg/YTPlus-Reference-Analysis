@@ -39,6 +39,7 @@ jobs:
           CLASS_DUMP="$(find class-dump-build/Build/Products/Release -type f -name class-dump -perm -111 -print -quit)"
           test -n "$CLASS_DUMP"
           "$CLASS_DUMP" -C 'WelcomeVC' "$APP/Frameworks/YTLite.dylib" > output/WelcomeVC.h
+          "$CLASS_DUMP" -C 'YTPSettingsBuilder|YTPSettingsPage|YTPSettingsSplitController|YTPSettingsSection|YTPSettingsCell|YTPSettingsItem|YTPPlayerEngine|YTPSystemPlayerVC|YTPPlayerVC|YTPPlayerSettings' "$APP/Frameworks/YTLite.dylib" > output/PlusClasses.h
           "$CLASS_DUMP" -C 'YTPivotBarView|YTPivotBarViewController|YTPivotBarItemView|YTTabViewController|YTTabInsertionCommandHandler|YTTabUpdateCommandHandler' "$APP/YouTube" > output/HostTabClasses.h
           otool -ov "$APP/Frameworks/YTLite.dylib" > output/ytlite-objc-runtime.txt
           otool -ov "$APP/YouTube" > output/youtube-host-objc-runtime.txt
@@ -53,6 +54,8 @@ jobs:
               "WelcomeVC", "YTPivotTabBarController", "YTSettingsViewController",
               "YTSettingsSectionItemManager", "YTPTabHelper", "YTPDownloader",
               "YTPPlayerEngine", "YTPPlayerSettings", "YTPActionButton",
+              "YTPSettingsBuilder", "YTPSettingsPage", "YTPSettingsSplitController",
+              "YTPSettingsSection", "YTPSystemPlayerVC", "YTPPlayerVC",
           ]
           for term in tweak_terms:
               hits = [i for i, line in enumerate(tweak) if term in line]
