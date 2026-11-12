@@ -996,6 +996,8 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 %end
 
+static BOOL TTIsRemovedVersionFooter(NSString *text);
+
 // MARK: - YTPlus (YTLite) settings model filtering
 //
 // The Plus settings screen never uses YTSettingsViewController. It is built
