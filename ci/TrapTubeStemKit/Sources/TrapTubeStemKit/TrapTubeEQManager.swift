@@ -241,7 +241,7 @@ public final class TrapTubeEQManager: NSObject {
 }
 
 
-private struct BiquadCoefficients {
+struct BiquadCoefficients {
     var b0: Double; var b1: Double; var b2: Double
     var a1: Double; var a2: Double
     static func peaking(frequency: Double, gainDB: Double, sampleRate: Double, q: Double) -> Self {
@@ -267,7 +267,7 @@ private struct BiquadCoefficients {
                     a2: ((a + 1) + (a - 1) * cosine - root) / a0)
     }
 }
-private struct BiquadState {
+struct BiquadState {
     var z1 = 0.0
     var z2 = 0.0
     mutating func process(_ input: Float, _ c: BiquadCoefficients) -> Float {
