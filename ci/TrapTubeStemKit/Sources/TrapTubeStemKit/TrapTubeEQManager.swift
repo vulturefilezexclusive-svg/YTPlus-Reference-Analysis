@@ -23,6 +23,7 @@ public final class TrapTubeEQManager: NSObject {
         var sampleRate: Double = 44100
         var isFloatPCM = false
         var states: [[BiquadState]] = []
+        var coefficients = Array(repeating: BiquadCoefficients.identity, count: 17)
         init(manager: TrapTubeEQManager) { self.manager = manager }
     }
     private final class AttachmentRecord {
@@ -162,9 +163,11 @@ public final class TrapTubeEQManager: NSObject {
         var parameters: [AVAudioMixInputParameters] = originalMix?.inputParameters ?? []
         for track in tracks {
             let input = AVMutableAudioMixInputParameters(track: track)
+            let tapContext = EQTapContext(manager: self)
+            let retainedTapContext = Unmanaged.passRetained(tapContext)
             var callbacks = MTAudioProcessingTapCallbacks(
                 version: kMTAudioProcessingTapCallbacksVersion_0,
-                clientInfo: Unmanaged.passRetained(EQTapContext(manager: self)).toOpaque(),
+                clientInfo: retainedTapContext.toOpaque(),
                 init: { _, clientInfo, storageOut in storageOut.pointee = clientInfo },
                 finalize: { tap in
                     let raw = MTAudioProcessingTapGetStorage(tap)
@@ -177,7 +180,18 @@ public final class TrapTubeEQManager: NSObject {
                     context.sampleRate = max(8000, format.mSampleRate)
                     context.isFloatPCM = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
                                          format.mBitsPerChannel == 32
-                    context.states = []
+                    let channelCount = max(1, Int(format.mChannelsPerFrame))
+                    if context.isFloatPCM {
+                        if (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0 {
+                            context.states = (0..<channelCount).map { _ in
+                                Array(repeating: BiquadState(), count: 17)
+                            }
+                        } else {
+                            context.states = [Array(repeating: BiquadState(), count: channelCount * 17)]
+                        }
+                    } else {
+                        context.states.removeAll(keepingCapacity: true)
+                    }
                     if !context.isFloatPCM {
                         NSLog("[TrapTube EQ] Unsupported decoded PCM format (flags=0x%x, bits=%u); EQ tap will pass audio unchanged",
                               format.mFormatFlags, format.mBitsPerChannel)
@@ -199,6 +213,8 @@ public final class TrapTubeEQManager: NSObject {
             let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks,
                                                     kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
             guard status == noErr, let tap else {
+                // Creation did not transfer the retained client context to a tap.
+                retainedTapContext.release()
                 NSLog("[TrapTube EQ] MediaToolbox rejected audio tap creation (status=%d)", status)
                 return false
             }
@@ -276,29 +292,32 @@ public final class TrapTubeEQManager: NSObject {
         lock.unlock()
         let sampleRate = context.sampleRate
         let buffers = UnsafeMutableAudioBufferListPointer(list)
-        if context.states.count != buffers.count ||
-           buffers.enumerated().contains(where: { index, buffer in
-               context.states[index].count != max(1, Int(buffer.mNumberChannels)) * 17
-           }) {
-            context.states = buffers.map { buffer in
-                Array(repeating: BiquadState(), count: max(1, Int(buffer.mNumberChannels)) * 17)
-            }
+        // The state arrays are allocated in prepare(), never on the render callback.
+        // If the host changes the buffer topology unexpectedly, bypass this block safely.
+        guard context.states.count == buffers.count else { return }
+        for (bufferIndex, buffer) in buffers.enumerated() {
+            guard context.states[bufferIndex].count >= max(1, Int(buffer.mNumberChannels)) * 17 else { return }
         }
+        for index in gains.indices {
+            context.coefficients[index] = BiquadCoefficients.peaking(
+                frequency: min(Double(Self.frequencies[index]), sampleRate * 0.45),
+                gainDB: Double(gains[index]), sampleRate: sampleRate, q: 1.0
+            )
+        }
+        context.coefficients[16] = BiquadCoefficients.lowShelf(
+            frequency: min(100, sampleRate * 0.20), gainDB: Double(bass), sampleRate: sampleRate
+        )
         for (bufferIndex, buffer) in buffers.enumerated() {
             guard let data = buffer.mData, buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
             let channels = max(1, Int(buffer.mNumberChannels))
             let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
             let pcm = data.bindMemory(to: Float.self, capacity: samples)
-            var coefficients = gains.enumerated().map { index, gain in
-                BiquadCoefficients.peaking(frequency: min(Double(Self.frequencies[index]), sampleRate * 0.45), gainDB: Double(gain), sampleRate: sampleRate, q: 1.0)
-            }
-            coefficients.append(BiquadCoefficients.lowShelf(frequency: min(100, sampleRate * 0.20), gainDB: Double(bass), sampleRate: sampleRate))
             for sample in 0..<samples {
                 var value = pcm[sample] * master
                 let channel = sample % channels
                 for band in 0..<17 {
                     let stateIndex = channel * 17 + band
-                    value = context.states[bufferIndex][stateIndex].process(value, coefficients[band])
+                    value = context.states[bufferIndex][stateIndex].process(value, context.coefficients[band])
                 }
                 let magnitude = abs(value)
                 if magnitude > 0.85 {
@@ -334,6 +353,7 @@ public final class TrapTubeEQManager: NSObject {
 struct BiquadCoefficients {
     var b0: Double; var b1: Double; var b2: Double
     var a1: Double; var a2: Double
+    static let identity = Self(b0: 1, b1: 0, b2: 0, a1: 0, a2: 0)
     static func peaking(frequency: Double, gainDB: Double, sampleRate: Double, q: Double) -> Self {
         let a = pow(10, gainDB / 40)
         let w = 2 * Double.pi * frequency / sampleRate
