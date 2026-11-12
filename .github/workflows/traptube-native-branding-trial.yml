@@ -315,6 +315,7 @@ jobs:
           test -s "$APP/TrapTubeLaunchLogoV4.png"
           test -s "$APP/TrapTubeGraffiti.ttf"
           test -s "$APP/TrapTubeGraffiti-OFL.txt"
+          /usr/libexec/PlistBuddy -c 'Print :UIAppFonts:0' "$APP/Info.plist" | grep -Fx 'TrapTubeGraffiti.ttf'
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
@@ -376,7 +377,7 @@ jobs:
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
           grep -q 'Stream Volume Boost' output/branding-binary-strings.txt
           grep -q 'TrapTube Settings' output/branding-binary-strings.txt
-          grep -q 'MarkerFelt-Wide' output/branding-binary-strings.txt
+          grep -q 'RubikSprayPaint-Regular' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
           grep -q '16-Band Equalizer' output/branding-binary-strings.txt
