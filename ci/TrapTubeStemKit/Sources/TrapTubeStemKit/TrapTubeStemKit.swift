@@ -395,6 +395,85 @@ private struct TrapTubeStemStudioView: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                pageButton("Equalizer", page: 0, symbol: "slider.horizontal.3")
+                pageButton("Stem Separation", page: 1, symbol: "waveform")
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .background(Color.white.opacity(0.035))
+
+            TabView(selection: $selectedPage) {
+                equalizerPage.tag(0)
+                stemSeparationPage.tag(1)
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+        }
+        .background(Color(red: 0.025, green: 0.025, blue: 0.035).ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first { model.importFile(url) }
+            case .failure(let error):
+                model.error = error.localizedDescription
+            }
+        }
+        .onAppear { model.refresh() }
+    }
+
+    private var equalizerPage: some View {
+        let manager = TrapTubeEQManager.shared
+        return ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("TRAPTUBE EQUALIZER")
+                        .font(.system(size: 12, weight: .black, design: .rounded))
+                        .tracking(2.2).foregroundStyle(accent)
+                    Text("Shape your sound")
+                        .font(.system(size: 28, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("A 16-band graphic equalizer with bass boost and master gain.")
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
+                }
+
+                VStack(alignment: .leading, spacing: 16) {
+                    TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
+                                        range: 0...20, suffix: " dB") { manager.setBassBoost($0) }
+                    TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
+                                        range: 0...200, suffix: "%") { manager.setMasterGainPercent($0) }
+                }
+                .padding(16)
+                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("16-BAND EQUALIZER").font(.caption.weight(.black))
+                        .tracking(1.5).foregroundStyle(accent)
+                    ForEach(Array(TrapTubeEQManager.frequencies.enumerated()), id: \.offset) { index, frequency in
+                        let label = frequency >= 1000
+                            ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
+                               ? "\(Int(frequency / 1000)) kHz"
+                               : String(format: "%.1f kHz", frequency / 1000))
+                            : "\(Int(frequency)) Hz"
+                        TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
+                                            range: -12...12, suffix: " dB") {
+                            manager.setBandGain($0, at: index)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+
+                Text("EQ applies to TrapTube-owned audio and player items that accept an audio-processing tap. Protected or custom-rendered streams may not expose a processable audio path.")
+                    .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(18)
+        }
+    }
+
+    private var stemSeparationPage: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 18) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -409,10 +488,8 @@ private struct TrapTubeStemStudioView: View {
                 Button { showImporter = true } label: {
                     Label(model.selectedFile?.lastPathComponent ?? "Import audio file",
                           systemImage: "folder.badge.plus")
-                        .font(.headline.weight(.bold))
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
+                        .font(.headline.weight(.bold)).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
                         .overlay(RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.45), lineWidth: 1))
                 }
@@ -427,21 +504,17 @@ private struct TrapTubeStemStudioView: View {
                     }
                     ForEach(TrapTubeStemModelOption.allCases) { option in
                         let selected = model.selectedModelOption == option
-                        Button {
-                            model.selectedModelOption = option
-                        } label: {
+                        Button { model.selectedModelOption = option } label: {
                             HStack(alignment: .top, spacing: 12) {
                                 Image(systemName: selected ? "largecircle.fill.circle" : "circle")
                                     .font(.title3).foregroundStyle(selected ? accent : Color.white.opacity(0.35))
                                     .padding(.top, 2)
                                 VStack(alignment: .leading, spacing: 5) {
                                     HStack(alignment: .firstTextBaseline) {
-                                        Text(option.displayName)
-                                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                                        Text(option.displayName).font(.subheadline.weight(.bold)).foregroundStyle(.white)
                                         Spacer(minLength: 4)
                                         Text("\(option.qualityTier)/5")
-                                            .font(.caption.weight(.black).monospacedDigit())
-                                            .foregroundStyle(accent)
+                                            .font(.caption.weight(.black).monospacedDigit()).foregroundStyle(accent)
                                     }
                                     HStack(spacing: 3) {
                                         ForEach(1...5, id: \.self) { index in
@@ -450,25 +523,22 @@ private struct TrapTubeStemStudioView: View {
                                                 .foregroundStyle(index <= option.qualityTier ? accent : Color.white.opacity(0.2))
                                         }
                                     }
-                                    Text(option.detail)
-                                        .font(.caption).foregroundStyle(Color.white.opacity(0.62))
+                                    Text(option.detail).font(.caption).foregroundStyle(Color.white.opacity(0.62))
                                         .fixedSize(horizontal: false, vertical: true)
                                     Text("\(DemucsEngine.info(for: option.model).sizeMB) MB · \(DemucsEngine.isDownloaded(option.model) ? "Downloaded" : "Not downloaded")")
                                         .font(.system(size: 10, weight: .semibold))
                                         .foregroundStyle(DemucsEngine.isDownloaded(option.model) ? Color.green : Color.white.opacity(0.42))
                                 }
                             }
-                            .padding(12)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                             .background(selected ? accent.opacity(0.12) : Color.white.opacity(0.035),
                                         in: RoundedRectangle(cornerRadius: 13))
                             .overlay(RoundedRectangle(cornerRadius: 13)
                                 .stroke(selected ? accent.opacity(0.65) : Color.white.opacity(0.07), lineWidth: 1))
                         }
-                        .buttonStyle(.plain)
-                        .disabled(model.isProcessing || model.isDownloading)
+                        .buttonStyle(.plain).disabled(model.isProcessing || model.isDownloading)
                     }
-                    Text("Ratings show relative model tiers based on the model descriptions, not independent benchmark scores. The fine-tuned option is larger and slower; the 6-stem model adds guitar and piano rather than promising better separation.")
+                    Text("Ratings show relative model tiers based on model descriptions, not independent benchmark scores. The fine-tuned option is larger and slower; the 6-stem model adds guitar and piano rather than promising better separation.")
                         .font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.42))
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -476,8 +546,7 @@ private struct TrapTubeStemStudioView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Label(model.isModelReady ? "\(model.selectedModelInfo.label) ready" : "Selected model not downloaded",
                           systemImage: model.isModelReady ? "checkmark.seal.fill" : "cpu")
-                        .font(.headline.weight(.bold))
-                        .foregroundStyle(model.isModelReady ? Color.green : accent)
+                        .font(.headline.weight(.bold)).foregroundStyle(model.isModelReady ? Color.green : accent)
                     Text(model.isModelReady
                          ? "This model is stored in app support and can be reused offline."
                          : "Download the selected model once. It stays in persistent app storage for offline use.")
@@ -489,27 +558,23 @@ private struct TrapTubeStemStudioView: View {
                                 else { Image(systemName: "arrow.down.circle.fill") }
                                 Text(model.isDownloading ? model.status : "Download \(model.selectedModelInfo.label) · \(model.selectedModelInfo.sizeMB) MB")
                             }
-                            .font(.subheadline.weight(.bold))
-                            .frame(maxWidth: .infinity).padding(.vertical, 13)
+                            .font(.subheadline.weight(.bold)).frame(maxWidth: .infinity).padding(.vertical, 13)
                             .background(accent, in: Capsule())
                         }
                         .disabled(model.isDownloading)
-                        if model.isDownloading {
-                            ProgressView(value: model.downloadProgress).tint(accent)
-                        }
+                        if model.isDownloading { ProgressView(value: model.downloadProgress).tint(accent) }
                     }
                 }
-                .padding(16)
-                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+                .padding(16).background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
 
                 Button { model.separate() } label: {
                     HStack {
                         if model.isProcessing { ProgressView().tint(.white) }
                         else { Image(systemName: "waveform.badge.mic") }
-                        Text(model.isProcessing || model.isDownloading ? model.status : (model.isModelReady ? "Separate into \(model.availableStemNames.count) stems" : "Download model & separate"))
+                        Text(model.isProcessing || model.isDownloading ? model.status :
+                             (model.isModelReady ? "Separate into \(model.availableStemNames.count) stems" : "Download model & separate"))
                     }
-                    .font(.headline.weight(.bold))
-                    .frame(maxWidth: .infinity).padding(.vertical, 15)
+                    .font(.headline.weight(.bold)).frame(maxWidth: .infinity).padding(.vertical, 15)
                     .background(accent, in: Capsule())
                 }
                 .disabled(model.selectedFile == nil || model.isProcessing || model.isDownloading)
@@ -519,7 +584,6 @@ private struct TrapTubeStemStudioView: View {
                     ProgressView(value: model.processingProgress).tint(accent)
                     Text(model.status).font(.caption).foregroundStyle(Color.white.opacity(0.65))
                 }
-
                 if let error = model.error {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(Color.red).fixedSize(horizontal: false, vertical: true)
@@ -551,25 +615,27 @@ private struct TrapTubeStemStudioView: View {
                         .padding(.vertical, 5)
                     }
                 }
-                .padding(16)
-                .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
+                .padding(16).background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
 
                 Text("Processing runs locally with Metal acceleration. The selected model's initial download requires internet; downloaded models can be reused offline. Files remain on this device.")
                     .font(.caption).foregroundStyle(Color.white.opacity(0.45))
             }
             .padding(18)
         }
-        .background(Color(red: 0.025, green: 0.025, blue: 0.035).ignoresSafeArea())
-        .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first { model.importFile(url) }
-            case .failure(let error):
-                model.error = error.localizedDescription
-            }
+    }
+
+    private func pageButton(_ title: String, page: Int, symbol: String) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) { selectedPage = page }
+        } label: {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 12, weight: .bold))
+                .frame(maxWidth: .infinity).padding(.vertical, 11)
+                .foregroundStyle(selectedPage == page ? .white : Color.white.opacity(0.58))
+                .background(selectedPage == page ? accent : Color.white.opacity(0.055),
+                            in: Capsule())
         }
-        .onAppear { model.refresh() }
+        .buttonStyle(.plain)
     }
 
     private func icon(for stem: String) -> String {
@@ -578,6 +644,39 @@ private struct TrapTubeStemStudioView: View {
         case "drums": return "drum.fill"
         case "bass": return "guitars.fill"
         default: return "waveform"
+        }
+    }
+}
+
+
+private struct TrapTubeEQSliderRow: View {
+    let title: String
+    let range: ClosedRange<Float>
+    let suffix: String
+    let onChange: (Float) -> Void
+    @State private var value: Float
+
+    init(title: String, value: Float, range: ClosedRange<Float>, suffix: String,
+         onChange: @escaping (Float) -> Void) {
+        self.title = title
+        self.range = range
+        self.suffix = suffix
+        self.onChange = onChange
+        _value = State(initialValue: value)
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text(title).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                Spacer()
+                Text(String(format: "%.1f%@", value, suffix))
+                    .font(.system(.caption, design: .monospaced).weight(.bold))
+                    .foregroundStyle(Color(red: 0.82, green: 0.035, blue: 0.12))
+            }
+            Slider(value: $value, in: range)
+                .tint(Color(red: 0.82, green: 0.035, blue: 0.12))
+                .onChange(of: value) { newValue in onChange(newValue) }
         }
     }
 }
