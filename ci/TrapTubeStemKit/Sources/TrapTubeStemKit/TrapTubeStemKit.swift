@@ -385,6 +385,7 @@ private struct TrapTubeStemStudioView: View {
     @StateObject private var model = TrapTubeStemModel()
     @State private var showImporter = false
     @State private var selectedPage = 1
+    @State private var streamStatus = "Not attached yet"
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -449,8 +450,13 @@ private struct TrapTubeStemStudioView: View {
                     HStack {
                         Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
                         Spacer()
-                        Text(manager.attachmentStatus)
+                        Text(streamStatus)
                             .font(.caption.weight(.bold)).foregroundStyle(accent)
+                    }
+                    .onAppear { streamStatus = manager.attachmentStatus }
+                    .onReceive(NotificationCenter.default.publisher(
+                        for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
+                        if let status = note.userInfo?["status"] as? String { streamStatus = status }
                     }
                     Button("Reset EQ to flat") { manager.resetAll() }
                         .font(.subheadline.weight(.bold)).foregroundStyle(accent)
