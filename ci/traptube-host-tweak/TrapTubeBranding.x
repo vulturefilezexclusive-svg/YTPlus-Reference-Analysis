@@ -63,7 +63,7 @@ static UIColor *TTAccentColor(void) {
 }
 
 static UIColor *TTStemBackgroundColor(void) {
-    return TTColorFromHex(@"080809");
+    return [UIColor colorWithRed:0.025 green:0.025 blue:0.035 alpha:1.0];
 }
 
 static UIColor *TTStemMutedColor(void) {
@@ -79,7 +79,7 @@ static void TTApplyAccentToWindow(UIWindow *window) {
 static void TTApplyAccentGlobally(void) {
     UIColor *accent = TTAccentColor();
     UIColor *background = TTStemBackgroundColor();
-    UIColor *surface = TTColorFromHex(@"121216");
+    UIColor *surface = TTColorFromHex(@"141417");
     UIColor *muted = TTStemMutedColor();
 
     UINavigationBar *navigation = [UINavigationBar appearance];
@@ -119,7 +119,7 @@ static void TTApplyAccentGlobally(void) {
 static void TTApplyStemStudioSurfaceToView(UIView *view) {
     if (!view) return;
     UIColor *background = TTStemBackgroundColor();
-    UIColor *surface = TTColorFromHex(@"121216");
+    UIColor *surface = TTColorFromHex(@"141417");
     UIColor *accent = TTAccentColor();
 
     if ([view isKindOfClass:UITableView.class]) {
