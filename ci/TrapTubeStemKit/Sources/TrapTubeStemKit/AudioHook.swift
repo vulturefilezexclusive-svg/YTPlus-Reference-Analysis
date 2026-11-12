@@ -15,7 +15,7 @@ public final class TrapTubeAudioHook: NSObject {
     @objc public func install(on player: AVPlayer) {
         invalidate()
         self.player = player
-        itemObservation = player.observe(\\.currentItem, options: [.initial, .new]) { [weak self] observedPlayer, _ in
+        itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] observedPlayer, _ in
             DispatchQueue.main.async { [weak self, weak observedPlayer] in
                 guard let self, let observedPlayer else { return }
                 self.observeCurrentItem(observedPlayer.currentItem)
@@ -38,7 +38,7 @@ public final class TrapTubeAudioHook: NSObject {
 
         // Track loading is asynchronous. Reading asset.tracks synchronously at
         // item replacement can return an empty array and permanently miss EQ.
-        statusObservation = item.observe(\\.status, options: [.initial, .new]) { [weak self, weak item] _, _ in
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self, weak item] _, _ in
             guard let self, let item else { return }
             if item.status == .failed {
                 NSLog("[TrapTube EQ] Player item failed before EQ attachment: %@", item.error?.localizedDescription ?? "unknown error")
@@ -50,13 +50,13 @@ public final class TrapTubeAudioHook: NSObject {
     private func attachWhenTracksAreReady(_ item: AVPlayerItem) {
         attachmentTask?.cancel()
         attachmentTask = Task { [weak self, weak item] in
-            guard let self, let item else { return }
+            guard let item else { return }
             let attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
             guard !Task.isCancelled else {
                 TrapTubeEQManager.shared.detach(from: item)
                 return
             }
-            guard self.player?.currentItem === item else {
+            guard let self, self.player?.currentItem === item else {
                 TrapTubeEQManager.shared.detach(from: item)
                 return
             }
