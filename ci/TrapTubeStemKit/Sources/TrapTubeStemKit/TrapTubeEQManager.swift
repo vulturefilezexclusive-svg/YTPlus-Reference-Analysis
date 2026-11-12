@@ -18,6 +18,13 @@ public final class TrapTubeEQManager: NSObject {
     // The lock covers the entire install/restore transaction so async callers cannot
     // race and install duplicate taps on the same AVPlayerItem.
     private let attachmentLock = NSRecursiveLock()
+    private final class EQTapContext {
+        weak var manager: TrapTubeEQManager?
+        var sampleRate: Double = 44100
+        var isFloatPCM = false
+        var states: [[BiquadState]] = []
+        init(manager: TrapTubeEQManager) { self.manager = manager }
+    }
     private final class AttachmentRecord {
         weak var item: AVPlayerItem?
         let originalMix: AVAudioMix?
@@ -157,27 +164,36 @@ public final class TrapTubeEQManager: NSObject {
             let input = AVMutableAudioMixInputParameters(track: track)
             var callbacks = MTAudioProcessingTapCallbacks(
                 version: kMTAudioProcessingTapCallbacksVersion_0,
-                clientInfo: Unmanaged.passUnretained(self).toOpaque(),
+                clientInfo: Unmanaged.passRetained(EQTapContext(manager: self)).toOpaque(),
                 init: { _, clientInfo, storageOut in storageOut.pointee = clientInfo },
-                finalize: { _ in },
+                finalize: { tap in
+                    let raw = MTAudioProcessingTapGetStorage(tap)
+                    Unmanaged<EQTapContext>.fromOpaque(raw).release()
+                },
                 prepare: { tap, _, processingFormat in
                     let raw = MTAudioProcessingTapGetStorage(tap)
-                    let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
-                    let flags = processingFormat.pointee.mFormatFlags
-                    let isFloat = (flags & kAudioFormatFlagIsFloat) != 0
-                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate, isFloatPCM: isFloat)
-                    if !isFloat {
+                    let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
+                    let format = processingFormat.pointee
+                    context.sampleRate = max(8000, format.mSampleRate)
+                    context.isFloatPCM = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
+                                         format.mBitsPerChannel == 32
+                    context.states = []
+                    if !context.isFloatPCM {
                         NSLog("[TrapTube EQ] Unsupported decoded PCM format (flags=0x%x, bits=%u); EQ tap will pass audio unchanged",
-                              flags, processingFormat.pointee.mBitsPerChannel)
+                              format.mFormatFlags, format.mBitsPerChannel)
                     }
                 },
-                unprepare: { _ in },
+                unprepare: { tap in
+                    let raw = MTAudioProcessingTapGetStorage(tap)
+                    let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
+                    context.states.removeAll(keepingCapacity: true)
+                },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
                     let status = MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut)
                     guard status == noErr else { return }
                     let raw = MTAudioProcessingTapGetStorage(tap)
-                    let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
-                    manager.processTapBuffers(bufferList, frameCount: Int(framesOut.pointee))
+                    let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
+                    context.manager?.processTapBuffers(bufferList, frameCount: Int(framesOut.pointee), context: context)
                 })
             var tap: MTAudioProcessingTap?
             let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks,
@@ -249,28 +265,24 @@ public final class TrapTubeEQManager: NSObject {
         engine.prepare()
     }
 
-    private func configureTap(sampleRate: Double, isFloatPCM: Bool) {
-        lock.lock()
-        tapSampleRate = max(8000, sampleRate)
-        tapIsFloatPCM = isFloatPCM
-        tapStates = []
-        lock.unlock()
-    }
-
-    private func processTapBuffers(_ list: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) {
-        guard frameCount > 0 else { return }
+    private func processTapBuffers(_ list: UnsafeMutablePointer<AudioBufferList>,
+                                   frameCount: Int,
+                                   context: EQTapContext) {
+        guard frameCount > 0, context.isFloatPCM else { return }
         lock.lock()
         let gains = bandGains
         let bass = bassBoost
         let master = masterPercent / 100
-        let sampleRate = tapSampleRate
-        let isFloatPCM = tapIsFloatPCM
+        lock.unlock()
+        let sampleRate = context.sampleRate
         let buffers = UnsafeMutableAudioBufferListPointer(list)
-        if !isFloatPCM { lock.unlock(); return }
-        if tapStates.count != buffers.count || buffers.enumerated().contains(where: { index, buffer in
-            tapStates[index].count != max(1, Int(buffer.mNumberChannels)) * 17
-        }) {
-            tapStates = buffers.map { buffer in Array(repeating: BiquadState(), count: max(1, Int(buffer.mNumberChannels)) * 17) }
+        if context.states.count != buffers.count ||
+           buffers.enumerated().contains(where: { index, buffer in
+               context.states[index].count != max(1, Int(buffer.mNumberChannels)) * 17
+           }) {
+            context.states = buffers.map { buffer in
+                Array(repeating: BiquadState(), count: max(1, Int(buffer.mNumberChannels)) * 17)
+            }
         }
         for (bufferIndex, buffer) in buffers.enumerated() {
             guard let data = buffer.mData, buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
@@ -278,15 +290,15 @@ public final class TrapTubeEQManager: NSObject {
             let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
             let pcm = data.bindMemory(to: Float.self, capacity: samples)
             var coefficients = gains.enumerated().map { index, gain in
-                BiquadCoefficients.peaking(frequency: Double(Self.frequencies[index]), gainDB: Double(gain), sampleRate: sampleRate, q: 1.0)
+                BiquadCoefficients.peaking(frequency: min(Double(Self.frequencies[index]), sampleRate * 0.45), gainDB: Double(gain), sampleRate: sampleRate, q: 1.0)
             }
-            coefficients.append(BiquadCoefficients.lowShelf(frequency: 100, gainDB: Double(bass), sampleRate: sampleRate))
+            coefficients.append(BiquadCoefficients.lowShelf(frequency: min(100, sampleRate * 0.20), gainDB: Double(bass), sampleRate: sampleRate))
             for sample in 0..<samples {
                 var value = pcm[sample] * master
                 let channel = sample % channels
                 for band in 0..<17 {
                     let stateIndex = channel * 17 + band
-                    value = tapStates[bufferIndex][stateIndex].process(value, coefficients[band])
+                    value = context.states[bufferIndex][stateIndex].process(value, coefficients[band])
                 }
                 let magnitude = abs(value)
                 if magnitude > 0.85 {
@@ -297,7 +309,6 @@ public final class TrapTubeEQManager: NSObject {
                 }
             }
         }
-        lock.unlock()
     }
 
     @objc private func handleInterruption(_ note: Notification) {
