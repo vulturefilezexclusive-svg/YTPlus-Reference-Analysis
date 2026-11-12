@@ -348,7 +348,16 @@ private final class TrapTubeStemModel: ObservableObject {
             } catch {
                 let detail = "\(stage) failed: \(error.localizedDescription)"
                 NSLog("[TrapTube Stem Studio] %@", detail)
-                await self.fail(detail)
+                let nsError = error as NSError
+                if nsError.domain == "TrapTubeStemKit", nsError.code == 15,
+                   self.selectedModelOption != .balanced {
+                    self.selectedModelOption = .balanced
+                    UserDefaults.standard.set(TrapTubeStemModelOption.balanced.rawValue,
+                                              forKey: "TrapTube.StemStudio.Model")
+                    await self.fail("The fine-tuned model crashes this build's engine even with a clean download, so Stem Studio switched to the standard HTDemucs model. Tap Separate again to run with it.")
+                } else {
+                    await self.fail(detail)
+                }
             }
         }
     }
