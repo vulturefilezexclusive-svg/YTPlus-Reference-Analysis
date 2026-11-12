@@ -39,6 +39,20 @@
 static NSString * const TTStemPivotIdentifier = @"TRAPTUBE_STEM_STUDIO";
 static char TTStemStudioControllerKey;
 
+static char TTPlayerEQHookAssociationKey;
+
+static void TTInstallPlayerEQHook(id player) {
+    if (!player || objc_getAssociatedObject(player, &TTPlayerEQHookAssociationKey)) return;
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL initSelector = NSSelectorFromString(@"new");
+    SEL installSelector = NSSelectorFromString(@"installOn:");
+    if (!hookClass || ![hookClass respondsToSelector:initSelector]) return;
+    id hook = ((id (*)(id, SEL))objc_msgSend)(hookClass, initSelector);
+    if (![hook respondsToSelector:installSelector]) return;
+    objc_setAssociatedObject(player, &TTPlayerEQHookAssociationKey, hook, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    ((void (*)(id, SEL, id))objc_msgSend)(hook, installSelector, player);
+}
+
 #pragma mark - TrapTube accent
 
 static UIColor *TTColorFromHex(NSString *hex) {
@@ -951,6 +965,22 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
         if (appearance) [items insertObject:appearance atIndex:0];
     }
 }
+
+
+%hook AVPlayer
+
+- (instancetype)initWithPlayerItem:(AVPlayerItem *)item {
+    id result = %orig;
+    TTInstallPlayerEQHook(result);
+    return result;
+}
+
+- (void)replaceCurrentItemWithPlayerItem:(AVPlayerItem *)item {
+    %orig;
+    TTInstallPlayerEQHook(self);
+}
+
+%end
 
 #pragma mark - First-launch cleanup and host hooks
 
