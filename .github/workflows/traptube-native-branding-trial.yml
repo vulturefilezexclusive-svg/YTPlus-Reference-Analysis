@@ -309,13 +309,25 @@ jobs:
           mkdir -p verify
           ditto -x -k output/TrapTube-YTPlus-Branding-Theme-Trial.ipa verify
           APP="$(find verify/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")" = "TrapTube"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunchV4"
-          test -s "$APP/TrapTubeLaunchV4.storyboardc/Info.plist"
-          test -s "$APP/TrapTubeLaunchLogoV4.png"
-          test -s "$APP/TrapTubeGraffiti.ttf"
-          test -s "$APP/TrapTubeGraffiti-OFL.txt"
-          /usr/libexec/PlistBuddy -c 'Print :UIAppFonts:0' "$APP/Info.plist" | grep -Fx 'TrapTubeGraffiti.ttf'
+          test -n "$APP" || { echo "VERIFY FAIL: no .app bundle found under verify/Payload"; find verify -maxdepth 3 -print; exit 21; }
+          echo "Verifying app bundle: $APP"
+          DISPLAY_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Info.plist")"
+          LAUNCH_NAME="$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")"
+          echo "Bundle display name: $DISPLAY_NAME"
+          echo "Launch storyboard: $LAUNCH_NAME"
+          [[ "$DISPLAY_NAME" == "TrapTube" ]] || { echo "VERIFY FAIL: expected CFBundleDisplayName=TrapTube, got '$DISPLAY_NAME'"; exit 22; }
+          [[ "$LAUNCH_NAME" == "TrapTubeLaunchV4" ]] || { echo "VERIFY FAIL: expected UILaunchStoryboardName=TrapTubeLaunchV4, got '$LAUNCH_NAME'"; exit 23; }
+          for required in \
+            "$APP/TrapTubeLaunchV4.storyboardc/Info.plist" \
+            "$APP/TrapTubeLaunchLogoV4.png" \
+            "$APP/TrapTubeGraffiti.ttf" \
+            "$APP/TrapTubeGraffiti-OFL.txt"; do
+            [[ -s "$required" ]] || { echo "VERIFY FAIL: required app resource missing or empty: $required"; find "$APP" -maxdepth 3 -iname '*TrapTube*' -print; exit 24; }
+            echo "Verified resource: ${required#$APP/}"
+          done
+          FONT_ENTRY="$(/usr/libexec/PlistBuddy -c 'Print :UIAppFonts:0' "$APP/Info.plist")"
+          echo "Registered app font: $FONT_ENTRY"
+          [[ "$FONT_ENTRY" == "TrapTubeGraffiti.ttf" ]] || { echo "VERIFY FAIL: TrapTubeGraffiti.ttf is not registered as UIAppFonts:0"; exit 25; }
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
