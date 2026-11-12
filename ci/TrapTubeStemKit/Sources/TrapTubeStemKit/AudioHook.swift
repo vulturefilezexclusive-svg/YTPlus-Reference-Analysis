@@ -9,6 +9,7 @@ public final class TrapTubeAudioHook: NSObject {
     private weak var player: AVPlayer?
     private var itemObservation: NSKeyValueObservation?
     private var statusObservation: NSKeyValueObservation?
+    private var audioMixObservation: NSKeyValueObservation?
     private var attachmentTask: Task<Void, Never>?
     private weak var observedItem: AVPlayerItem?
 
@@ -30,6 +31,8 @@ public final class TrapTubeAudioHook: NSObject {
         attachmentTask = nil
         statusObservation?.invalidate()
         statusObservation = nil
+        audioMixObservation?.invalidate()
+        audioMixObservation = nil
 
         if let previous = observedItem {
             TrapTubeEQManager.shared.detach(from: previous)
@@ -39,12 +42,21 @@ public final class TrapTubeAudioHook: NSObject {
 
         // Track loading is asynchronous. Reading asset.tracks synchronously at
         // item replacement can return an empty array and permanently miss EQ.
-        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self, weak item] _, _ in
+        statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self, weak item] _, change in
             guard let self, let item else { return }
             if item.status == .failed {
+                TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
                 NSLog("[TrapTube EQ] Player item failed before EQ attachment: %@", item.error?.localizedDescription ?? "unknown error")
+            } else if item.status == .readyToPlay,
+                      change.newValue != change.oldValue,
+                      !TrapTubeEQManager.shared.isAttached(to: item) {
+                // Retry once the item is actually ready to play: an earlier
+                // attempt may have failed on transient track state and would
+                // otherwise never be retried for this item.
+                self.attachWhenTracksAreReady(item)
             }
         }
+        observeAudioMixChanges(item)
         attachWhenTracksAreReady(item)
     }
 
@@ -69,6 +81,21 @@ public final class TrapTubeAudioHook: NSObject {
         }
     }
 
+    private func observeAudioMixChanges(_ item: AVPlayerItem) {
+        audioMixObservation?.invalidate()
+        audioMixObservation = item.observe(\.audioMix, options: [.new]) { [weak self, weak item] _, _ in
+            guard let self, let item, self.observedItem === item else { return }
+            guard !TrapTubeEQManager.shared.isAttached(to: item) else { return }
+            // The host assigned or replaced this item's audio mix. If our tap
+            // is not part of the current mix, try to attach again so a host
+            // mix change cannot silently displace the EQ for the whole item.
+            DispatchQueue.main.async { [weak self, weak item] in
+                guard let self, let item, self.observedItem === item else { return }
+                self.attachWhenTracksAreReady(item)
+            }
+        }
+    }
+
     @objc public func invalidate() {
         attachmentTask?.cancel()
         attachmentTask = nil
@@ -76,6 +103,8 @@ public final class TrapTubeAudioHook: NSObject {
         itemObservation = nil
         statusObservation?.invalidate()
         statusObservation = nil
+        audioMixObservation?.invalidate()
+        audioMixObservation = nil
         if let item = observedItem {
             TrapTubeEQManager.shared.detach(from: item)
         }

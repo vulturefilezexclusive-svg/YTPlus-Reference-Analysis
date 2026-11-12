@@ -14,6 +14,8 @@ public final class TrapTubeEQManager: NSObject {
     private var bandGains = Array(repeating: Float(0), count: 16)
     private var bassBoost: Float = 0
     private var masterPercent: Float = 100
+    private var eqEnabled = true
+    private var attachmentStatusText = "Not attached yet"
     // Attachment bookkeeping is separate from the audio callback's parameter lock.
     // The lock covers the entire install/restore transaction so async callers cannot
     // race and install duplicate taps on the same AVPlayerItem.
@@ -22,6 +24,7 @@ public final class TrapTubeEQManager: NSObject {
         unowned let manager: TrapTubeEQManager
         var sampleRate: Double = 44100
         var isFloatPCM = false
+        var isInt16PCM = false
         var states: [[BiquadState]] = []
         var coefficients = Array(repeating: BiquadCoefficients.identity, count: 17)
         init(manager: TrapTubeEQManager) { self.manager = manager }
@@ -62,6 +65,7 @@ public final class TrapTubeEQManager: NSObject {
         }
         if defaults.object(forKey: "TrapTube.EQ.Bass") != nil { setBassBoost(defaults.float(forKey: "TrapTube.EQ.Bass")) }
         if defaults.object(forKey: "TrapTube.EQ.Master") != nil { setMasterGainPercent(defaults.float(forKey: "TrapTube.EQ.Master")) }
+        if defaults.object(forKey: "TrapTube.EQ.Enabled") != nil { eqEnabled = defaults.bool(forKey: "TrapTube.EQ.Enabled") }
         NotificationCenter.default.addObserver(self, selector: #selector(handleInterruption(_:)),
                                                name: AVAudioSession.interruptionNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange(_:)),
@@ -106,6 +110,34 @@ public final class TrapTubeEQManager: NSObject {
         lock.lock(); defer { lock.unlock() }; return masterPercent
     }
 
+    public var isEQEnabled: Bool {
+        lock.lock(); defer { lock.unlock() }; return eqEnabled
+    }
+
+    public func setEQEnabled(_ enabled: Bool) {
+        lock.lock(); eqEnabled = enabled; lock.unlock()
+        UserDefaults.standard.set(enabled, forKey: "TrapTube.EQ.Enabled")
+    }
+
+    public func isAttached(to item: AVPlayerItem) -> Bool {
+        attachmentLock.lock(); defer { attachmentLock.unlock() }
+        return attachmentRecords[ObjectIdentifier(item)]?.item === item
+    }
+
+    public var attachmentStatus: String {
+        lock.lock(); defer { lock.unlock() }; return attachmentStatusText
+    }
+
+    public func setAttachmentStatus(_ text: String) {
+        lock.lock(); attachmentStatusText = text; lock.unlock()
+    }
+
+    public func resetAll() {
+        for index in Self.frequencies.indices { setBandGain(0, at: index) }
+        setBassBoost(0)
+        setMasterGainPercent(100)
+    }
+
     /// Attach after AVAsset has finished loading its audio-track metadata.
     /// This avoids the synchronous empty-track race when YouTube replaces items.
     public func attachWhenReady(to item: AVPlayerItem) async -> Bool {
@@ -119,6 +151,7 @@ public final class TrapTubeEQManager: NSObject {
             guard !Task.isCancelled else { return false }
             return attach(to: item, tracks: tracks.filter { $0.mediaType == .audio })
         } catch {
+            setAttachmentStatus("Could not load this stream's audio tracks")
             NSLog("[TrapTube EQ] Unable to load player audio tracks: %@", error.localizedDescription)
             return false
         }
@@ -139,6 +172,7 @@ public final class TrapTubeEQManager: NSObject {
     @discardableResult
     private func attach(to item: AVPlayerItem, tracks: [AVAssetTrack]) -> Bool {
         guard !tracks.isEmpty else {
+            setAttachmentStatus("No audio tracks exposed by this stream")
             NSLog("[TrapTube EQ] Player item has no loaded audio tracks")
             return false
         }
@@ -148,21 +182,37 @@ public final class TrapTubeEQManager: NSObject {
         if attachmentRecords[itemID]?.item === item { return true }
 
         let originalMix = item.audioMix
-        // A second processing tap on a track, or replacing existing per-track
-        // mix parameters, can silently disable host processing. Fail closed rather
-        // than altering an audio mix we do not own.
-        if let originalMix,
-           originalMix.inputParameters.contains(where: { existing in
-               tracks.contains(where: { $0.trackID == existing.trackID })
-           }) {
-            NSLog("[TrapTube EQ] Existing host audio-mix parameters found; leaving host mix untouched")
-            return false
+        // Host parameters that carry no processing tap of their own can be
+        // reused: copy them, keep their settings, and add our tap. Only a
+        // foreign tap already occupying one of this item's audio tracks is a
+        // real conflict; previously ANY host parameter blocked attachment
+        // for the whole item.
+        var parameters: [AVAudioMixInputParameters] = []
+        if let originalMix {
+            for existing in originalMix.inputParameters {
+                guard tracks.contains(where: { $0.trackID == existing.trackID }) else {
+                    parameters.append(existing)
+                    continue
+                }
+                if existing.audioTapProcessor != nil {
+                    setAttachmentStatus("Another audio tap already controls this stream")
+                    NSLog("[TrapTube EQ] A foreign audio tap already occupies track %d; leaving host mix untouched", existing.trackID)
+                    return false
+                }
+                if let mutableCopy = existing.mutableCopy() as? AVMutableAudioMixInputParameters {
+                    parameters.append(mutableCopy)
+                } else {
+                    parameters.append(existing)
+                }
+            }
         }
 
         let mix = AVMutableAudioMix()
-        var parameters: [AVAudioMixInputParameters] = originalMix?.inputParameters ?? []
         for track in tracks {
-            let input = AVMutableAudioMixInputParameters(track: track)
+            // Attach to the reused host parameter copy for this track when one
+            // exists, instead of adding a second parameter entry for it.
+            let input = (parameters.first(where: { $0.trackID == track.trackID }) as? AVMutableAudioMixInputParameters)
+                ?? AVMutableAudioMixInputParameters(track: track)
             let tapContext = EQTapContext(manager: self)
             let retainedTapContext = Unmanaged.passRetained(tapContext)
             var callbacks = MTAudioProcessingTapCallbacks(
@@ -183,8 +233,13 @@ public final class TrapTubeEQManager: NSObject {
                                          (format.mFormatFlags & kAudioFormatFlagIsBigEndian) == 0 &&
                                          format.mBitsPerChannel == 32 &&
                                          format.mBytesPerFrame >= UInt32(MemoryLayout<Float>.size)
+                    context.isInt16PCM = format.mFormatID == kAudioFormatLinearPCM &&
+                                         (format.mFormatFlags & kAudioFormatFlagIsSignedInteger) != 0 &&
+                                         (format.mFormatFlags & kAudioFormatFlagIsBigEndian) == 0 &&
+                                         format.mBitsPerChannel == 16 &&
+                                         format.mBytesPerFrame >= UInt32(MemoryLayout<Int16>.size)
                     let channelCount = max(1, Int(format.mChannelsPerFrame))
-                    if context.isFloatPCM {
+                    if context.isFloatPCM || context.isInt16PCM {
                         if (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0 {
                             context.states = (0..<channelCount).map { _ in
                                 Array(repeating: BiquadState(), count: 17)
@@ -195,7 +250,7 @@ public final class TrapTubeEQManager: NSObject {
                     } else {
                         context.states.removeAll(keepingCapacity: true)
                     }
-                    if !context.isFloatPCM {
+                    if !context.isFloatPCM && !context.isInt16PCM {
                         NSLog("[TrapTube EQ] Unsupported decoded PCM format (flags=0x%x, bits=%u); EQ tap will pass audio unchanged",
                               format.mFormatFlags, format.mBitsPerChannel)
                     }
@@ -222,11 +277,12 @@ public final class TrapTubeEQManager: NSObject {
                 return false
             }
             input.audioTapProcessor = tap
-            parameters.append(input)
+            if !parameters.contains(where: { $0 === input }) { parameters.append(input) }
         }
         mix.inputParameters = parameters
         item.audioMix = mix
         attachmentRecords[itemID] = AttachmentRecord(item: item, originalMix: originalMix, installedMix: mix)
+        setAttachmentStatus("Attached to the playing stream")
         NSLog("[TrapTube EQ] Installed audio tap on %lu audio track(s)", UInt(tracks.count))
         return true
     }
@@ -245,6 +301,7 @@ public final class TrapTubeEQManager: NSObject {
             item.audioMix = record.originalMix
         }
         attachmentRecords.removeValue(forKey: itemID)
+        setAttachmentStatus("Not attached")
     }
 
     /// Use this engine path for audio files/stems owned and decoded by TrapTube.
@@ -287,12 +344,15 @@ public final class TrapTubeEQManager: NSObject {
     private func processTapBuffers(_ list: UnsafeMutablePointer<AudioBufferList>,
                                    frameCount: Int,
                                    context: EQTapContext) {
-        guard frameCount > 0, context.isFloatPCM else { return }
+        guard frameCount > 0, context.isFloatPCM || context.isInt16PCM else { return }
         lock.lock()
         let gains = bandGains
         let bass = bassBoost
         let master = masterPercent / 100
+        let enabled = eqEnabled
         lock.unlock()
+        // Bypass: samples pass bit-transparent, including no saturation stage.
+        guard enabled else { return }
         let sampleRate = context.sampleRate
         let buffers = UnsafeMutableAudioBufferListPointer(list)
         // The state arrays are allocated in prepare(), never on the render callback.
@@ -311,26 +371,43 @@ public final class TrapTubeEQManager: NSObject {
             frequency: min(100, sampleRate * 0.20), gainDB: Double(bass), sampleRate: sampleRate
         )
         for (bufferIndex, buffer) in buffers.enumerated() {
-            guard let data = buffer.mData, buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
+            guard let data = buffer.mData else { continue }
             let channels = max(1, Int(buffer.mNumberChannels))
-            let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
-            let pcm = data.bindMemory(to: Float.self, capacity: samples)
-            for sample in 0..<samples {
-                var value = pcm[sample] * master
-                let channel = sample % channels
-                for band in 0..<17 {
-                    let stateIndex = channel * 17 + band
-                    value = context.states[bufferIndex][stateIndex].process(value, context.coefficients[band])
+            if context.isFloatPCM {
+                guard buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
+                let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
+                let pcm = data.bindMemory(to: Float.self, capacity: samples)
+                for sample in 0..<samples {
+                    pcm[sample] = processSample(pcm[sample], master: master, channel: sample % channels,
+                                                bufferIndex: bufferIndex, context: context)
                 }
-                let magnitude = abs(value)
-                if magnitude > 0.85 {
-                    let compressed = 0.85 + 0.15 * tanhf((magnitude - 0.85) / 0.15)
-                    pcm[sample] = value < 0 ? -compressed : compressed
-                } else {
-                    pcm[sample] = value
+            } else if context.isInt16PCM {
+                guard buffer.mDataByteSize >= UInt32(MemoryLayout<Int16>.size) else { continue }
+                let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size, frameCount * channels)
+                let pcm = data.bindMemory(to: Int16.self, capacity: samples)
+                for sample in 0..<samples {
+                    let input = Float(pcm[sample]) / 32768.0
+                    let output = processSample(input, master: master, channel: sample % channels,
+                                               bufferIndex: bufferIndex, context: context)
+                    pcm[sample] = Int16(min(1, max(-1, output)) * 32767.0)
                 }
             }
         }
+    }
+
+    private func processSample(_ input: Float, master: Float, channel: Int,
+                               bufferIndex: Int, context: EQTapContext) -> Float {
+        var value = input * master
+        for band in 0..<17 {
+            let stateIndex = channel * 17 + band
+            value = context.states[bufferIndex][stateIndex].process(value, context.coefficients[band])
+        }
+        let magnitude = abs(value)
+        if magnitude > 0.85 {
+            let compressed = 0.85 + 0.15 * tanhf((magnitude - 0.85) / 0.15)
+            return value < 0 ? -compressed : compressed
+        }
+        return value
     }
 
     @objc private func handleInterruption(_ note: Notification) {

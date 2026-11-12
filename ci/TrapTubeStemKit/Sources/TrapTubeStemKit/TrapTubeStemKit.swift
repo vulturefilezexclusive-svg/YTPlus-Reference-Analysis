@@ -439,6 +439,25 @@ private struct TrapTubeStemStudioView: View {
                         .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
                 }
 
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle("Equalizer enabled", isOn: Binding(
+                        get: { manager.isEQEnabled },
+                        set: { manager.setEQEnabled($0) }
+                    ))
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                    .tint(accent)
+                    HStack {
+                        Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                        Spacer()
+                        Text(manager.attachmentStatus)
+                            .font(.caption.weight(.bold)).foregroundStyle(accent)
+                    }
+                    Button("Reset EQ to flat") { manager.resetAll() }
+                        .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                }
+                .padding(16)
+                .background(Color.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 18))
+
                 VStack(alignment: .leading, spacing: 16) {
                     TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
                                         range: 0...20, suffix: " dB") { manager.setBassBoost($0) }
