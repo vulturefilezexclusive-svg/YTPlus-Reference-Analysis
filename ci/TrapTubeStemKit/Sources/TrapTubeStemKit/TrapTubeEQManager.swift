@@ -177,7 +177,9 @@ public final class TrapTubeEQManager: NSObject {
 
     public func detach(from item: AVPlayerItem) {
         item.audioMix = nil
+        lock.lock()
         attachedItems.remove(item)
+        lock.unlock()
     }
 
     /// Use this engine path for audio files/stems owned and decoded by TrapTube.
