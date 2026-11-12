@@ -232,7 +232,7 @@ static BOOL TTShouldHideSettingsSection(NSString *title) {
     if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
     NSString *value = title.lowercaseString;
     NSArray<NSString *> *hiddenSections = @[
-        @"developer", @"dayanch96", @"credits", @"discord", @"social", @"support",
+        @"account", @"developer", @"dayanch96", @"credits", @"special thanks", @"discord", @"social", @"support",
         @"github", @"telegram", @"twitter", @"open source", @"contributors",
         @"feedback", @"traptube plus 6.0 b2"
     ];
@@ -259,7 +259,7 @@ static BOOL TTShouldHideSettingsItem(id item) {
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
         @"twitter", @"support", @"github", @"telegram", @"social",
-        @"developer", @"dayanch96", @"credits", @"open source", @"contributors", @"feedback"
+        @"account", @"developer", @"dayanch96", @"credits", @"special thanks", @"open source", @"contributors", @"feedback"
     ];
     for (NSString *label in hiddenLabels) {
         if ([value containsString:label]) return YES;
