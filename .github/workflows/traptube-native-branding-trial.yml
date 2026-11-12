@@ -336,6 +336,7 @@ jobs:
           grep -Fq 'Download model & separate' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'DemucsEngine.download(modelToDownload)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'private func runSeparation()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TrapTubeEQManager.shared.play(file: url)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'TTPruneRemovedSettingsRows(self.view)' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTShouldHideRenderedSettingsText' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'private lazy var engine: DemucsEngine = {' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
