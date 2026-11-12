@@ -47,9 +47,15 @@ static void TTInstallPlayerEQHook(id player) {
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
     SEL initSelector = NSSelectorFromString(@"new");
     SEL installSelector = NSSelectorFromString(@"installOn:");
-    if (!hookClass || ![hookClass respondsToSelector:initSelector]) return;
+    if (!hookClass || ![hookClass respondsToSelector:initSelector]) {
+        NSLog(@"[TrapTube EQ] TrapTubeAudioHook class unavailable; stream EQ not installed");
+        return;
+    }
     id hook = ((id (*)(id, SEL))objc_msgSend)(hookClass, initSelector);
-    if (![hook respondsToSelector:installSelector]) return;
+    if (![hook respondsToSelector:installSelector]) {
+        NSLog(@"[TrapTube EQ] TrapTubeAudioHook does not respond to installOn:; stream EQ not installed");
+        return;
+    }
     objc_setAssociatedObject(player, &TTPlayerEQHookAssociationKey, hook, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     ((void (*)(id, SEL, id))objc_msgSend)(hook, installSelector, player);
 }
@@ -272,9 +278,9 @@ static BOOL TTShouldHideSettingsSection(NSString *title) {
     if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
     NSString *value = title.lowercaseString;
     NSArray<NSString *> *hiddenSections = @[
-        @"developer", @"dayanch96", @"credits", @"special thanks", @"discord", @"social", @"support",
+        @"account", @"developer", @"dayanch96", @"credits", @"special thanks", @"discord", @"social", @"support",
         @"github", @"telegram", @"twitter", @"open source", @"contributors",
-        @"feedback", @"traptube plus 6.0 b2"
+        @"feedback", @"traptube plus preferences", @"traptube plus: 6.0~b2", @"6.0~b2"
     ];
     for (NSString *label in hiddenSections) {
         if ([value containsString:label]) return YES;
@@ -297,8 +303,8 @@ static BOOL TTShouldHideSettingsItem(id item) {
     } @catch (__unused NSException *exception) {}
     NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
     if (value.length == 0) return NO;
-    if ([value containsString:@"traptube plus 6.0 b2"] ||
-        ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"]) ||
+    if ([value containsString:@"traptube plus: 6.0~b2"] ||
+        ([value containsString:@"traptube"] && [value containsString:@"6.0~b2"]) ||
         [value containsString:@"ytplus"] ||
         [value containsString:@"ytlite"] ||
         [value containsString:@"youtube plus"]) return YES;
@@ -307,6 +313,7 @@ static BOOL TTShouldHideSettingsItem(id item) {
         @"discord rpc", @"discord rich presence", @"discord",
         @"twitter", @"support", @"github", @"telegram", @"social",
         @"developer", @"dayanch96", @"credits", @"special thanks", @"open source", @"contributors", @"feedback",
+        @"traptube plus preferences", @"youtube plus preferences", @"ytplus preferences",
         @"volumeboostyt", @"enable volumeboostyt", @"remember volume"
     ];
     for (NSString *label in hiddenLabels) {
@@ -317,14 +324,16 @@ static BOOL TTShouldHideSettingsItem(id item) {
 
 static BOOL TTShouldHideRenderedSettingsText(NSString *text) {
     if (![text isKindOfClass:NSString.class] || text.length == 0) return NO;
-    NSString *value = text.lowercaseString;
+    // Trim first: the prune path aggregates label text with a leading space,
+    // which otherwise defeats the exact header matches below.
+    NSString *value = [text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString;
     NSArray<NSString *> *removed = @[
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord", @"dayanch96",
         @"support development", @"support", @"github repository", @"github", @"my telegram channel", @"telegram",
         @"contributors", @"open source libraries", @"open source", @"special thanks", @"twitter", @"social",
         @"feedback", @"developer", @"credits", @"ytplus", @"ytlite", @"youtube plus",
-        @"traptube plus 6.0 b2"
+        @"traptube plus preferences", @"traptube plus: 6.0~b2", @"6.0~b2"
     ];
     for (NSString *needle in removed) {
         if ([value containsString:needle]) return YES;
@@ -841,6 +850,22 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
     TTInstallPlayerEQHook(self);
 }
 
+- (instancetype)initWithURL:(NSURL *)url {
+    id result = %orig;
+    TTInstallPlayerEQHook(result);
+    return result;
+}
+
+%end
+
+%hook AVQueuePlayer
+
+- (instancetype)initWithItems:(NSArray<AVPlayerItem *> *)items {
+    id result = %orig;
+    TTInstallPlayerEQHook(result);
+    return result;
+}
+
 %end
 
 #pragma mark - First-launch cleanup and host hooks
@@ -972,7 +997,10 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
     }
 
     if (filtered.count != sectionItems.count) {
-        %orig(filtered, category, title, icon, titleDescription, headerHidden);
+        // If filtering emptied the section, hide its header too so no orphan
+        // section title (e.g. an empty "Account") remains above nothing.
+        %orig(filtered, category, title, icon, titleDescription,
+              filtered.count == 0 ? YES : headerHidden);
         return;
     }
     %orig;
@@ -1153,8 +1181,9 @@ static UIImage *TTTrapTubeWordmark(void) {
 static BOOL TTIsRemovedVersionFooter(NSString *text) {
     if (![text isKindOfClass:NSString.class] || text.length == 0) return NO;
     NSString *value = [[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-    return [value containsString:@"traptube plus 6.0 b2"] ||
-           ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"]);
+    // Match the footer as it is actually rendered: "TrapTube Plus: 6.0~b2 ...".
+    return [value containsString:@"traptube plus: 6.0~b2"] ||
+           ([value containsString:@"traptube"] && [value containsString:@"6.0~b2"]);
 }
 
 %hook UILabel
