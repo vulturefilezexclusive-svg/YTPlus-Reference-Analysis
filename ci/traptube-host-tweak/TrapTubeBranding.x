@@ -1060,12 +1060,23 @@ static BOOL TTShouldHideDVNCellText(NSString *title) {
     return NO;
 }
 
+static BOOL TTIsVolumeBoostModel(id model) {
+    if (!model) return NO;
+    NSString *title = nil;
+    @try {
+        if ([model respondsToSelector:@selector(title)]) title = [model valueForKey:@"title"];
+    } @catch (NSException *exception) {}
+    return [title isKindOfClass:NSString.class] &&
+           [title.lowercaseString containsString:@"volumeboost"];
+}
+
 static BOOL TTIsRemovedDVNCell(id cell) {
     if (!cell) return NO;
     NSString *cellTitle = nil;
     @try {
         if ([cell respondsToSelector:@selector(title)]) cellTitle = [cell valueForKey:@"title"];
     } @catch (NSException *exception) {}
+    if ([cellTitle.lowercaseString containsString:@"volumeboost"]) return NO;
     if (TTShouldHideDVNCellText(cellTitle)) return YES;
     NSString *key = nil;
     NSString *identifier = nil;
@@ -1138,16 +1149,19 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 %hook DVNTableModel
 
 - (void)addSection:(id)section {
+    if (TTIsVolumeBoostModel(self)) { %orig; return; }
     if (TTIsRemovedDVNSection(section)) return;
     TTFilterDVNSectionCells(section);
     %orig;
 }
 
 - (void)addSections:(NSArray *)sections {
+    if (TTIsVolumeBoostModel(self)) { %orig; return; }
     %orig(TTFilteredDVNSections(sections));
 }
 
 - (void)setSections:(NSArray *)sections {
+    if (TTIsVolumeBoostModel(self)) { %orig; return; }
     %orig(TTFilteredDVNSections(sections));
 }
 
@@ -1260,6 +1274,14 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
                     icon:(YTIIcon *)icon
          titleDescription:(NSString *)titleDescription
             headerHidden:(BOOL)headerHidden {
+    // The VolumeBoostYT feature's own settings section must pass through
+    // untouched: its rows are titled after the feature, and the generic
+    // removal list matches those titles, which emptied the whole page.
+    if (title && [title.lowercaseString containsString:@"volumeboost"]) {
+        %orig;
+        return;
+    }
+
     // Remove entire unwanted sections and their rows, while leaving unrelated
     // YouTube settings categories untouched.
     if (TTShouldHideSettingsSection(title)) {
