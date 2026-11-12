@@ -249,6 +249,10 @@ static BOOL TTShouldHideSettingsItem(id item) {
     @try {
         if ([item respondsToSelector:@selector(title)]) title = [item title];
         if ([item respondsToSelector:NSSelectorFromString(@"titleDescription")]) detail = ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"titleDescription"));
+        if ([item respondsToSelector:NSSelectorFromString(@"formattedSettingSummary")]) {
+            id summary = ((id (*)(id, SEL))objc_msgSend)(item, NSSelectorFromString(@"formattedSettingSummary"));
+            if (summary) detail = [NSString stringWithFormat:@"%@ %@", detail ?: @"", summary];
+        }
         if ([item respondsToSelector:@selector(accessibilityIdentifier)]) identifier = [item accessibilityIdentifier];
     } @catch (__unused NSException *exception) {}
     NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
@@ -266,6 +270,65 @@ static BOOL TTShouldHideSettingsItem(id item) {
         if ([value containsString:label]) return YES;
     }
     return NO;
+}
+
+static BOOL TTShouldHideRenderedSettingsText(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || text.length == 0) return NO;
+    NSString *value = text.lowercaseString;
+    NSArray<NSString *> *removed = @[
+        @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
+        @"discord rpc", @"discord rich presence", @"dayanch96",
+        @"support development", @"github repository", @"my telegram channel",
+        @"contributors", @"open source libraries", @"special thanks",
+        @"traptube plus 6.0 b2"
+    ];
+    for (NSString *needle in removed) {
+        if ([value containsString:needle]) return YES;
+    }
+    // These are section headings, not generic words to suppress throughout YouTube.
+    if ([value isEqualToString:@"account"] || [value isEqualToString:@"developer"] ||
+        [value isEqualToString:@"credits"]) return YES;
+    return NO;
+}
+
+static void TTAppendVisibleSettingsText(UIView *view, NSMutableString *buffer, NSUInteger depth) {
+    if (!view || depth > 7) return;
+    if ([view isKindOfClass:UILabel.class]) {
+        NSString *text = ((UILabel *)view).text;
+        if (text.length) [buffer appendFormat:@" %@", text];
+    } else if ([view isKindOfClass:UIButton.class]) {
+        NSString *text = ((UIButton *)view).currentTitle;
+        if (text.length) [buffer appendFormat:@" %@", text];
+    } else if ([view isKindOfClass:UITextField.class]) {
+        NSString *text = ((UITextField *)view).text;
+        if (text.length) [buffer appendFormat:@" %@", text];
+    } else if ([view isKindOfClass:UITextView.class]) {
+        NSString *text = ((UITextView *)view).text;
+        if (text.length) [buffer appendFormat:@" %@", text];
+    }
+    if (view.accessibilityLabel.length) [buffer appendFormat:@" %@", view.accessibilityLabel];
+    for (UIView *child in view.subviews) {
+        TTAppendVisibleSettingsText(child, buffer, depth + 1);
+    }
+}
+
+static void TTPruneRemovedSettingsRows(UIView *root) {
+    for (UIView *view in [root.subviews copy]) {
+        BOOL isRow = [view isKindOfClass:UITableViewCell.class] ||
+                     [view isKindOfClass:UICollectionViewCell.class] ||
+                     [NSStringFromClass(view.class) containsString:@"HeaderFooterView"];
+        if (isRow) {
+            NSMutableString *text = [NSMutableString string];
+            TTAppendVisibleSettingsText(view, text, 0);
+            if (TTShouldHideRenderedSettingsText(text)) {
+                view.hidden = YES;
+                view.accessibilityElementsHidden = YES;
+                view.frame = CGRectZero;
+                continue;
+            }
+        }
+        TTPruneRemovedSettingsRows(view);
+    }
 }
 
 static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
@@ -947,6 +1010,9 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 - (void)viewDidLayoutSubviews {
     %orig;
     TTApplyStemStudioSurfaceToView(self.view);
+    // Fallback against settings categories whose rows are assembled outside
+    // setSectionItems:. Prune the rendered cells as well as the model arrays.
+    TTPruneRemovedSettingsRows(self.view);
 }
 
 - (void)setSectionItems:(NSMutableArray *)sectionItems
