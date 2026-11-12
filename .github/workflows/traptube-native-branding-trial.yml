@@ -324,6 +324,8 @@ jobs:
           grep -Fq 'MTAudioProcessingTapCreate' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'setMasterGainPercent' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'TrapTubeEQFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          grep -Fq 'struct BiquadState' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'struct BiquadCoefficients' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'TrapTubeAudioHook' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
           grep -Fq 'TrapTubeEqualizer' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'case .balanced: .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
@@ -362,7 +364,8 @@ jobs:
           otool -L "$APP/YouTube" | grep -F '@rpath/VolumeBoostYT.dylib'
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
           grep -q 'Stream Volume Boost' output/branding-binary-strings.txt
-          grep -q 'TrapTube Branding' output/branding-binary-strings.txt
+          grep -q 'TrapTube Settings' output/branding-binary-strings.txt
+          grep -q 'MarkerFelt-Wide' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
           grep -q '16-Band Equalizer' output/branding-binary-strings.txt
@@ -370,7 +373,7 @@ jobs:
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
