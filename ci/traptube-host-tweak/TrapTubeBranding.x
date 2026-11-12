@@ -56,6 +56,27 @@ static void TTInstallPlayerEQHook(id player) {
 
 #pragma mark - TrapTube accent
 
+static UIFont *TTBrandDisplayFont(CGFloat size) {
+    UIFont *font = [UIFont fontWithName:@"MarkerFelt-Wide" size:size];
+    if (!font) font = [UIFont fontWithName:@"AvenirNextCondensed-HeavyItalic" size:size];
+    if (!font) font = [UIFont systemFontOfSize:size weight:UIFontWeightBlack];
+    return font;
+}
+
+static BOOL TTIsTrapTubeBrandText(NSString *text) {
+    return [text isKindOfClass:NSString.class] &&
+           [text rangeOfString:@"TrapTube" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
+static void TTStyleTrapTubeBrandLabel(UILabel *label) {
+    if (!label || !TTIsTrapTubeBrandText(label.text)) return;
+    label.font = TTBrandDisplayFont(label.font.pointSize > 0 ? label.font.pointSize : 18);
+    label.layer.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.9].CGColor;
+    label.layer.shadowOffset = CGSizeMake(0, 1);
+    label.layer.shadowRadius = 2.0;
+    label.layer.shadowOpacity = 0.65;
+}
+
 static UIColor *TTColorFromHex(NSString *hex) {
     NSString *value = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] uppercaseString];
     if (value.length != 6) return [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:1.0];
@@ -101,8 +122,8 @@ static void TTApplyAccentGlobally(void) {
     navigation.tintColor = accent;
     navigation.barTintColor = background;
     navigation.barStyle = UIBarStyleBlack;
-    navigation.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
-    navigation.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
+    navigation.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: TTBrandDisplayFont(20) };
+    navigation.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: TTBrandDisplayFont(32) };
 
     UITabBar *tabs = [UITabBar appearance];
     tabs.tintColor = accent;
@@ -1092,7 +1113,7 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
     if (TTIsYTLiteSettingsSection(title, sectionItems)) {
         TTPrepareSettingsItems(filtered, self);
-        %orig(filtered, category, @"TrapTube Branding", icon, titleDescription, headerHidden);
+        %orig(filtered, category, @"TrapTube Settings", icon, titleDescription, headerHidden);
         return;
     }
 
@@ -1252,10 +1273,17 @@ static UIImage *TTTrapTubeWordmark(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSString *text = @"TrapTube";
-        UIFont *font = [UIFont systemFontOfSize:38 weight:UIFontWeightHeavy];
+        UIFont *font = TTBrandDisplayFont(42);
+        NSShadow *shadow = [[NSShadow alloc] init];
+        shadow.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.95];
+        shadow.shadowOffset = CGSizeMake(1.5, 1.5);
+        shadow.shadowBlurRadius = 1.5;
         NSDictionary *attributes = @{
             NSFontAttributeName: font,
-            NSForegroundColorAttributeName: UIColor.whiteColor
+            NSForegroundColorAttributeName: UIColor.whiteColor,
+            NSStrokeColorAttributeName: [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:1.0],
+            NSStrokeWidthAttributeName: @(-1.2),
+            NSShadowAttributeName: shadow
         };
         CGSize textSize = [text sizeWithAttributes:attributes];
         CGSize canvas = CGSizeMake(ceil(textSize.width + 8.0), 56.0);
@@ -1284,6 +1312,7 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
         return;
     }
     %orig(TTRebrandedHostText(text));
+    TTStyleTrapTubeBrandLabel(self);
 }
 - (void)setAttributedText:(NSAttributedString *)text {
     if (TTIsRemovedVersionFooter(text.string)) {
@@ -1292,7 +1321,18 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
         %orig(nil);
         return;
     }
-    %orig(text);
+    if (TTIsTrapTubeBrandText(text.string)) {
+        NSMutableAttributedString *styled = [text mutableCopy];
+        [styled addAttribute:NSFontAttributeName value:TTBrandDisplayFont(self.font.pointSize > 0 ? self.font.pointSize : 18)
+                       range:NSMakeRange(0, styled.length)];
+        %orig(styled);
+        TTStyleTrapTubeBrandLabel(self);
+    } else {
+        %orig(text);
+    }
+}
+- (void)setFont:(UIFont *)font {
+    %orig(TTIsTrapTubeBrandText(self.text) ? TTBrandDisplayFont(font.pointSize) : font);
 }
 %end
 
@@ -1305,12 +1345,19 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
         return;
     }
     %orig(TTRebrandedHostText(title), state);
+    if (TTIsTrapTubeBrandText(title)) self.titleLabel.font = TTBrandDisplayFont(self.titleLabel.font.pointSize > 0 ? self.titleLabel.font.pointSize : 16);
 }
 %end
 
 %hook UINavigationItem
 - (void)setTitle:(NSString *)title {
     %orig(TTRebrandedHostText(title));
+    if (TTIsTrapTubeBrandText(title)) {
+        NSDictionary *attributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor,
+                                       NSFontAttributeName: TTBrandDisplayFont(20) };
+        self.navigationBar.standardAppearance.titleTextAttributes = attributes;
+        self.navigationBar.scrollEdgeAppearance.titleTextAttributes = attributes;
+    }
 }
 %end
 
@@ -1401,7 +1448,11 @@ static void TTShowHostileTakeoverSplash(void) {
     title.text = @"TrapTube";
     title.textColor = UIColor.whiteColor;
     title.textAlignment = NSTextAlignmentCenter;
-    title.font = [UIFont systemFontOfSize:38 weight:UIFontWeightBlack];
+    title.font = TTBrandDisplayFont(44);
+    title.layer.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.95].CGColor;
+    title.layer.shadowOffset = CGSizeMake(1.5, 1.5);
+    title.layer.shadowRadius = 2.0;
+    title.layer.shadowOpacity = 0.8;
     title.translatesAutoresizingMaskIntoConstraints = NO;
     [controller.view addSubview:title];
 
