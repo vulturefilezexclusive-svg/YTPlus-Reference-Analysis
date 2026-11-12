@@ -164,6 +164,8 @@ jobs:
           ditto -x -k reference.ipa host
           APP="$(find host/Payload -maxdepth 1 -type d -name '*.app' -print -quit)"
           test -n "$APP"
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/google/fonts/main/ofl/rubikspraypaint/RubikSprayPaint-Regular.ttf' -o "$APP/TrapTubeGraffiti.ttf"
+          curl --fail --location --retry 3 'https://raw.githubusercontent.com/google/fonts/main/ofl/rubikspraypaint/OFL.txt' -o "$APP/TrapTubeGraffiti-OFL.txt"
           python3 - "$APP/Info.plist" <<'PY'
           import plistlib, sys
           from pathlib import Path
@@ -174,6 +176,9 @@ jobs:
               raise SystemExit("Unexpected host bundle identifier; refusing to change it.")
           info["CFBundleDisplayName"] = "TrapTube"
           info["CFBundleName"] = "TrapTube"
+          fonts = info.setdefault("UIAppFonts", [])
+          if "TrapTubeGraffiti.ttf" not in fonts:
+              fonts.append("TrapTubeGraffiti.ttf")
           info["UILaunchStoryboardName"] = "TrapTubeLaunchV4"
           for key in ("CFBundleIcons", "CFBundleIcons~ipad"):
               icons = info.get(key)
@@ -308,6 +313,8 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :UILaunchStoryboardName' "$APP/Info.plist")" = "TrapTubeLaunchV4"
           test -s "$APP/TrapTubeLaunchV4.storyboardc/Info.plist"
           test -s "$APP/TrapTubeLaunchLogoV4.png"
+          test -s "$APP/TrapTubeGraffiti.ttf"
+          test -s "$APP/TrapTubeGraffiti-OFL.txt"
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
