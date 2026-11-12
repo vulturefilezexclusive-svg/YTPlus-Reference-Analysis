@@ -27,6 +27,13 @@ public final class TrapTubeEQManager: NSObject {
     private override init() {
         super.init()
         configureEngineGraph()
+        let defaults = UserDefaults.standard
+        for index in Self.frequencies.indices {
+            let key = "TrapTube.EQ.Band.\(index)"
+            if defaults.object(forKey: key) != nil { setBandGain(defaults.float(forKey: key), at: index) }
+        }
+        if defaults.object(forKey: "TrapTube.EQ.Bass") != nil { setBassBoost(defaults.float(forKey: "TrapTube.EQ.Bass")) }
+        if defaults.object(forKey: "TrapTube.EQ.Master") != nil { setMasterGainPercent(defaults.float(forKey: "TrapTube.EQ.Master")) }
         NotificationCenter.default.addObserver(self, selector: #selector(handleInterruption(_:)),
                                                name: AVAudioSession.interruptionNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange(_:)),
@@ -37,8 +44,10 @@ public final class TrapTubeEQManager: NSObject {
 
     public func setBandGain(_ gain: Float, at index: Int) {
         guard frequencies.indices.contains(index) else { return }
-        lock.lock(); bandGains[index] = min(12, max(-12, gain)); lock.unlock()
-        engineEQ.bands[index].gain = min(12, max(-12, gain))
+        let value = min(12, max(-12, gain))
+        lock.lock(); bandGains[index] = value; lock.unlock()
+        UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Band.\(index)")
+        engineEQ.bands[index].gain = value
     }
 
     public func bandGain(at index: Int) -> Float {
@@ -49,6 +58,7 @@ public final class TrapTubeEQManager: NSObject {
     public func setBassBoost(_ decibels: Float) {
         let value = min(20, max(0, decibels))
         lock.lock(); bassBoost = value; lock.unlock()
+        UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Bass")
         engineEQ.bands[16].gain = value
     }
 
@@ -60,6 +70,7 @@ public final class TrapTubeEQManager: NSObject {
         let value = min(200, max(0, percent))
         lock.lock(); masterPercent = value; lock.unlock()
         // AVAudioUnitGain uses dB; 0% is silence and 200% is +6.02 dB.
+        UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Master")
         engineEQ.globalGain = value == 0 ? -96 : 20 * log10(value / 100)
     }
 
@@ -197,8 +208,7 @@ public final class TrapTubeEQManager: NSObject {
                     let stateIndex = channel * 17 + band
                     value = tapStates[bufferIndex][stateIndex].process(value, coefficients[band])
                 }
-                let peak = abs(value)
-                pcm[sample] = peak > 1 ? value / peak : value
+                pcm[sample] = abs(value) > 0.85 ? tanhf(value) : value
             }
         }
         lock.unlock()
