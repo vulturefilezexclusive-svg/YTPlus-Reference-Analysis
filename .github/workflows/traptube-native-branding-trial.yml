@@ -12,6 +12,10 @@ on:
       - ci/patches/TrapTubeLaunch.storyboard
   workflow_dispatch:
 
+concurrency:
+  group: traptube-native-branding-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
