@@ -106,7 +106,6 @@ private final class TrapTubeStemModel: ObservableObject {
         }
     }
 
-    private var audioPlayer: AVAudioPlayer?
     private var selectedModel: DemucsModel { selectedModelOption.model }
     var selectedModelInfo: DemucsModelInfo { DemucsEngine.info(for: selectedModel) }
     var selectedModelIsDownloaded: Bool { DemucsEngine.isDownloaded(selectedModel) }
@@ -302,10 +301,7 @@ private final class TrapTubeStemModel: ObservableObject {
         stopPlayback()
         guard let url = outputs[name] else { return }
         do {
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try AVAudioSession.sharedInstance().setActive(true)
-            audioPlayer = try AVAudioPlayer(contentsOf: url)
-            audioPlayer?.play()
+            try TrapTubeEQManager.shared.play(file: url)
             playingStem = name
         } catch {
             self.error = "Couldn't play \(name): \(error.localizedDescription)"
@@ -313,8 +309,7 @@ private final class TrapTubeStemModel: ObservableObject {
     }
 
     func stopPlayback() {
-        audioPlayer?.stop()
-        audioPlayer = nil
+        TrapTubeEQManager.shared.stopOwnedAudio()
         playingStem = nil
     }
 
