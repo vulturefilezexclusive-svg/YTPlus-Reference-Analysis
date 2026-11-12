@@ -240,3 +240,42 @@ public final class TrapTubeEQManager: NSObject {
     }
 }
 
+
+private struct BiquadCoefficients {
+    var b0: Double; var b1: Double; var b2: Double
+    var a1: Double; var a2: Double
+    static func peaking(frequency: Double, gainDB: Double, sampleRate: Double, q: Double) -> Self {
+        let a = pow(10, gainDB / 40)
+        let w = 2 * Double.pi * frequency / sampleRate
+        let alpha = sin(w) / (2 * q)
+        let cosine = cos(w)
+        let a0 = 1 + alpha / a
+        return Self(b0: (1 + alpha * a) / a0, b1: (-2 * cosine) / a0,
+                    b2: (1 - alpha * a) / a0, a1: (-2 * cosine) / a0,
+                    a2: (1 - alpha / a) / a0)
+    }
+    static func lowShelf(frequency: Double, gainDB: Double, sampleRate: Double) -> Self {
+        let a = pow(10, gainDB / 40)
+        let w = 2 * Double.pi * frequency / sampleRate
+        let cosine = cos(w), sine = sin(w), alpha = sine / sqrt(2)
+        let root = 2 * sqrt(a) * alpha
+        let a0 = (a + 1) + (a - 1) * cosine + root
+        return Self(b0: a * ((a + 1) - (a - 1) * cosine + root) / a0,
+                    b1: 2 * a * ((a - 1) - (a + 1) * cosine) / a0,
+                    b2: a * ((a + 1) - (a - 1) * cosine - root) / a0,
+                    a1: -2 * ((a - 1) + (a + 1) * cosine) / a0,
+                    a2: ((a + 1) + (a - 1) * cosine - root) / a0)
+    }
+}
+private struct BiquadState {
+    var z1 = 0.0
+    var z2 = 0.0
+    mutating func process(_ input: Float, _ c: BiquadCoefficients) -> Float {
+        let x = Double(input)
+        let output = c.b0 * x + z1
+        z1 = c.b1 * x - c.a1 * output + z2
+        z2 = c.b2 * x - c.a2 * output
+        return Float(output)
+    }
+}
+
