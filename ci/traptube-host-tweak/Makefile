@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = TrapTubeBranding
 TrapTubeBranding_FILES = TrapTubeBranding.x
 TrapTubeBranding_CFLAGS = -fobjc-arc -I$(THEOS)/include/YouTubeHeader
-TrapTubeBranding_FRAMEWORKS = UIKit Foundation QuartzCore
+TrapTubeBranding_FRAMEWORKS = UIKit Foundation QuartzCore AVFoundation
 TrapTubeBranding_LDFLAGS = -undefined dynamic_lookup
 
 ifeq ($(TRAPTUBE_STEMKIT_KIND),framework)
