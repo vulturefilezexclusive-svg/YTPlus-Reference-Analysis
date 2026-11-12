@@ -178,12 +178,45 @@ private final class TrapTubeStemModel: ObservableObject {
         }
     }
 
+    // A single Split action is sufficient: if the selected model is missing,
+    // download it first and then continue into separation automatically.
     func separate() {
-        guard let selectedFile, !isProcessing else { return }
-        guard isModelReady else {
-            error = "Download \(selectedModelInfo.label) before separating audio."
+        guard selectedFile != nil, !isProcessing, !isDownloading else { return }
+        error = nil
+        if !isModelReady {
+            isDownloading = true
+            downloadProgress = 0
+            status = "Downloading \(selectedModelInfo.label)…"
+            let modelToDownload = selectedModel
+            Task { @MainActor in
+                do {
+                    try await DemucsEngine.download(modelToDownload) { update in
+                        Task { @MainActor in
+                            self.downloadProgress = update.fraction
+                            self.status = "Downloading model · \(Int(update.fraction * 100))%"
+                        }
+                    }
+                    self.isDownloading = false
+                    self.refresh()
+                    guard self.isModelReady else {
+                        self.error = "The model download finished but the model is not available. Try downloading it again."
+                        self.status = "Model unavailable"
+                        return
+                    }
+                    self.runSeparation()
+                } catch {
+                    self.isDownloading = false
+                    self.error = "Model download failed: \(error.localizedDescription)"
+                    self.status = "Model download failed"
+                }
+            }
             return
         }
+        runSeparation()
+    }
+
+    private func runSeparation() {
+        guard let selectedFile, !isProcessing else { return }
         isProcessing = true
         processingProgress = 0
         outputs = [:]
@@ -198,6 +231,10 @@ private final class TrapTubeStemModel: ObservableObject {
             var stage = "Audio decoding"
             do {
                 let pcm = try Self.readStereo(selectedFile)
+                guard !pcm.left.isEmpty, pcm.left.count == pcm.right.count else {
+                    throw NSError(domain: "TrapTubeStemKit", code: 12,
+                                  userInfo: [NSLocalizedDescriptionKey: "The imported file contains no usable audio samples."])
+                }
                 stage = "HTDemucs model loading"
                 await self.setStatus("Loading HTDemucs…", progress: 0.02)
                 try await engine.load(selectedModel)
@@ -252,7 +289,7 @@ private final class TrapTubeStemModel: ObservableObject {
         outputs = result
         isProcessing = false
         processingProgress = 1
-        status = "Four stems separated successfully"
+        status = "\(result.count) stems separated successfully"
     }
 
     private func fail(_ message: String) {
@@ -474,14 +511,14 @@ private struct TrapTubeStemStudioView: View {
                     HStack {
                         if model.isProcessing { ProgressView().tint(.white) }
                         else { Image(systemName: "waveform.badge.mic") }
-                        Text(model.isProcessing ? model.status : "Separate into four stems")
+                        Text(model.isProcessing || model.isDownloading ? model.status : (model.isModelReady ? "Separate into \(model.availableStemNames.count) stems" : "Download model & separate"))
                     }
                     .font(.headline.weight(.bold))
                     .frame(maxWidth: .infinity).padding(.vertical, 15)
                     .background(accent, in: Capsule())
                 }
-                .disabled(model.selectedFile == nil || !model.isModelReady || model.isProcessing)
-                .opacity(model.selectedFile == nil || !model.isModelReady || model.isProcessing ? 0.45 : 1)
+                .disabled(model.selectedFile == nil || model.isProcessing || model.isDownloading)
+                .opacity(model.selectedFile == nil || model.isProcessing || model.isDownloading ? 0.45 : 1)
 
                 if model.isProcessing {
                     ProgressView(value: model.processingProgress).tint(accent)
