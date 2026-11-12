@@ -298,7 +298,10 @@ static BOOL TTShouldHideSettingsItem(id item) {
     NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
     if (value.length == 0) return NO;
     if ([value containsString:@"traptube plus 6.0 b2"] ||
-        ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"])) return YES;
+        ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"]) ||
+        [value containsString:@"ytplus"] ||
+        [value containsString:@"ytlite"] ||
+        [value containsString:@"youtube plus"]) return YES;
     NSArray<NSString *> *hiddenLabels = @[
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
@@ -318,9 +321,10 @@ static BOOL TTShouldHideRenderedSettingsText(NSString *text) {
     NSArray<NSString *> *removed = @[
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord", @"dayanch96",
-        @"support development", @"github repository", @"my telegram channel", @"telegram",
-        @"contributors", @"open source libraries", @"special thanks", @"twitter", @"social",
-        @"feedback", @"traptube plus 6.0 b2"
+        @"support development", @"support", @"github repository", @"github", @"my telegram channel", @"telegram",
+        @"contributors", @"open source libraries", @"open source", @"special thanks", @"twitter", @"social",
+        @"feedback", @"developer", @"credits", @"ytplus", @"ytlite", @"youtube plus",
+        @"traptube plus 6.0 b2"
     ];
     for (NSString *needle in removed) {
         if ([value containsString:needle]) return YES;
