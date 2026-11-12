@@ -215,7 +215,13 @@ public final class TrapTubeEQManager: NSObject {
                     let stateIndex = channel * 17 + band
                     value = tapStates[bufferIndex][stateIndex].process(value, coefficients[band])
                 }
-                pcm[sample] = abs(value) > 0.85 ? tanhf(value) : value
+                let magnitude = abs(value)
+                if magnitude > 0.85 {
+                    let compressed = 0.85 + 0.15 * tanhf((magnitude - 0.85) / 0.15)
+                    pcm[sample] = value < 0 ? -compressed : compressed
+                } else {
+                    pcm[sample] = value
+                }
             }
         }
         lock.unlock()
