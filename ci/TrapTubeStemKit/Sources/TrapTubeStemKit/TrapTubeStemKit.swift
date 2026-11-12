@@ -100,6 +100,8 @@ private final class TrapTubeStemModel: ObservableObject {
     @Published var selectedModelOption: TrapTubeStemModelOption = .balanced {
         didSet {
             UserDefaults.standard.set(selectedModelOption.rawValue, forKey: "TrapTube.StemStudio.Model")
+            stopPlayback()
+            outputs = [:]
             refresh()
         }
     }
