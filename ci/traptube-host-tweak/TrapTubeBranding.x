@@ -996,6 +996,158 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 %end
 
+// MARK: - YTPlus (YTLite) settings model filtering
+//
+// The Plus settings screen never uses YTSettingsViewController. It is built
+// from DVNTableModel / DVNSection / DVNCell objects (signatures confirmed from
+// the host binary) assembled by YTPSettingsBuilder and rendered by
+// DVNTableViewController. Filtering at the model chokepoints below removes
+// the Account / Developer / Credits sections, the Discord RPC row and the
+// version footer before anything is rendered.
+
+static BOOL TTIsRemovedDVNCell(id cell) {
+    if (!cell) return NO;
+    NSString *title = nil;
+    NSString *key = nil;
+    NSString *identifier = nil;
+    @try {
+        if ([cell respondsToSelector:@selector(title)]) title = [cell valueForKey:@"title"];
+        if ([cell respondsToSelector:@selector(key)]) key = [cell valueForKey:@"key"];
+        if ([cell respondsToSelector:@selector(identifier)]) identifier = [cell valueForKey:@"identifier"];
+    } @catch (NSException *exception) {}
+    if ([title isKindOfClass:NSString.class] && title.length && TTShouldRemoveSettingsItem(title)) return YES;
+    NSString *identity = TTNormalizedSettingsKey([NSString stringWithFormat:@"%@ %@",
+                                                  [key isKindOfClass:NSString.class] ? key : @"",
+                                                  [identifier isKindOfClass:NSString.class] ? identifier : @""]);
+    if ([identity containsString:@"discord"]) return YES;
+    if ([identity containsString:@"patreon"]) return YES;
+    return NO;
+}
+
+static BOOL TTIsRemovedDVNSection(id section) {
+    if (!section) return NO;
+    NSString *header = nil;
+    NSString *identifier = nil;
+    @try {
+        if ([section respondsToSelector:@selector(header)]) header = [section valueForKey:@"header"];
+        if ([section respondsToSelector:@selector(identifier)]) identifier = [section valueForKey:@"identifier"];
+    } @catch (NSException *exception) {}
+    if ([header isKindOfClass:NSString.class] && header.length && TTShouldHideSettingsSection(header)) return YES;
+    if ([identifier isKindOfClass:NSString.class] && identifier.length && TTShouldHideSettingsSection(identifier)) return YES;
+    return NO;
+}
+
+static NSArray *TTFilteredDVNCells(NSArray *cells) {
+    if (![cells isKindOfClass:NSArray.class]) return cells;
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:cells.count];
+    for (id cell in cells) {
+        if (!TTIsRemovedDVNCell(cell)) [kept addObject:cell];
+    }
+    return kept.count == cells.count ? cells : [kept copy];
+}
+
+static void TTFilterDVNSectionCells(id section) {
+    if (!section || ![section respondsToSelector:@selector(cells)] ||
+        ![section respondsToSelector:@selector(setCells:)]) return;
+    NSArray *cells = nil;
+    @try { cells = [section valueForKey:@"cells"]; } @catch (NSException *exception) {}
+    if ([cells isKindOfClass:NSArray.class] && cells.count) {
+        NSArray *filtered = TTFilteredDVNCells(cells);
+        if (filtered != cells) {
+            @try { [section setValue:filtered forKey:@"cells"]; } @catch (NSException *exception) {}
+        }
+    }
+}
+
+static NSArray *TTFilteredDVNSections(NSArray *sections) {
+    if (![sections isKindOfClass:NSArray.class]) return sections;
+    NSMutableArray *kept = [NSMutableArray arrayWithCapacity:sections.count];
+    for (id section in sections) {
+        if (TTIsRemovedDVNSection(section)) continue;
+        TTFilterDVNSectionCells(section);
+        [kept addObject:section];
+    }
+    return [kept copy];
+}
+
+%hook DVNTableModel
+
+- (void)addSection:(id)section {
+    if (TTIsRemovedDVNSection(section)) return;
+    TTFilterDVNSectionCells(section);
+    %orig;
+}
+
+- (void)addSections:(NSArray *)sections {
+    %orig(TTFilteredDVNSections(sections));
+}
+
+- (void)setSections:(NSArray *)sections {
+    %orig(TTFilteredDVNSections(sections));
+}
+
+- (void)setFooter:(NSString *)footer {
+    if (footer.length && TTIsRemovedVersionFooter(footer)) {
+        %orig(nil);
+        return;
+    }
+    %orig;
+}
+
++ (id)modelWithTitle:(NSString *)title sections:(NSArray *)sections {
+    return %orig(title, TTFilteredDVNSections(sections));
+}
+
++ (id)modelWithTitle:(NSString *)title header:(NSString *)header footer:(NSString *)footer sections:(NSArray *)sections {
+    if (footer.length && TTIsRemovedVersionFooter(footer)) footer = nil;
+    return %orig(title, header, footer, TTFilteredDVNSections(sections));
+}
+
+%end
+
+%hook DVNSection
+
+- (void)setCells:(NSArray *)cells {
+    %orig(TTFilteredDVNCells(cells));
+}
+
+- (void)addCell:(id)cell {
+    if (TTIsRemovedDVNCell(cell)) return;
+    %orig;
+}
+
+- (void)addCells:(NSArray *)cells {
+    %orig(TTFilteredDVNCells(cells));
+}
+
+- (void)_appendCells:(NSArray *)cells {
+    %orig(TTFilteredDVNCells(cells));
+}
+
+- (void)setFooter:(NSString *)footer {
+    if (footer.length && TTIsRemovedVersionFooter(footer)) {
+        %orig(nil);
+        return;
+    }
+    %orig;
+}
+
+%end
+
+%hook DVNTableViewController
+
+- (void)viewWillAppear:(BOOL)animated {
+    %orig;
+    UIViewController *controller = (UIViewController *)self;
+    // Backstop for content populated lazily (e.g. cellsProvider sections):
+    // run the rendered-row pruning pass once the Plus table is on screen.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TTPruneRemovedSettingsRows(controller.view);
+    });
+}
+
+%end
+
 %hook WelcomeVC
 
 - (void)viewDidAppear:(BOOL)animated {
