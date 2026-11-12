@@ -332,6 +332,11 @@ jobs:
             test -s "$APP/Frameworks/DemucsFramework.framework/DemucsFramework"
           fi
           strings "$APP/Frameworks/TrapTubeBranding.dylib" > output/branding-binary-strings.txt
+          grep -Fq 'dayanch96' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'traptube plus 6.0 b2' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTIsRemovedVersionFooter' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTApplyStemStudioSurfaceToView' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTStemBackgroundColor' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
           grep -q 'TrapTube Branding' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
@@ -340,7 +345,7 @@ jobs:
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, filtered settings entries, injected branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
