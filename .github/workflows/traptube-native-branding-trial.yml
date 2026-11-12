@@ -352,7 +352,14 @@ jobs:
           grep -Fq 'struct BiquadState' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'struct BiquadCoefficients' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'TrapTubeAudioHook' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
-          grep -Fq 'TrapTubeEQFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          # EQ is intentionally hosted inside Stem Studio now; do not require
+          # the removed standalone YTPlus settings row identifier.
+          grep -Fq 'private var equalizerPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'private var stemSeparationPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'pageButton("Equalizer"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq '.tabViewStyle(.page(indexDisplayMode: .never))' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TrapTubeAudioBoostFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          grep -Fq 'TrapTubeAudioBoostFactory' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'case .balanced: .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'case .sixStem: .sixStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'case .fineTuned: .fineTunedAll' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
@@ -393,7 +400,7 @@ jobs:
           grep -q 'RubikSprayPaint-Regular' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
-          grep -q '16-Band Equalizer' output/branding-binary-strings.txt
+          grep -Fq 'A 16-band graphic equalizer' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
