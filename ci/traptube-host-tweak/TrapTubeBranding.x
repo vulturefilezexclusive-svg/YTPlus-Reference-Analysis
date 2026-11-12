@@ -1742,7 +1742,228 @@ static void TTScheduleHostileTakeoverSplash(NSUInteger attempt) {
     });
 }
 
+
+// ---------------------------------------------------------------------------
+// System-output EQ (RemoteIO).
+//
+// YouTube's watch playback is rendered by its own HAM pipeline into an
+// AVSampleBufferDisplayLayer; it never vends an AVPlayer/AVPlayerItem for
+// the EQ tap to attach to (verified against the host binary and the built
+// tweak: the AVPlayer hooks are present but never fire for watch playback).
+// Every app sound, however, is finally rendered through the process's
+// RemoteIO output unit. Hooking AudioUnitRender for that unit and
+// processing the rendered buffers in place applies the same 17-band DSP to
+// ALL app audio, whatever player produced it. Settings are the same
+// persisted keys the SwiftUI controls write (TrapTube.EQ.*), so the Stem
+// Studio sliders drive this path live.
+// ---------------------------------------------------------------------------
+
+#import <AudioToolbox/AudioToolbox.h>
+#import <substrate.h>
+#import <pthread.h>
+
+static const double TTEQFrequencies[16] = {
+    31, 62, 125, 250, 500, 1000, 2000, 4000, 6000, 8000,
+    10000, 12000, 14000, 16000, 18000, 19500
+};
+
+typedef struct { double b0, b1, b2, a1, a2; } TTEQCoefficients;
+typedef struct { float z1, z2; } TTEQState;
+
+static pthread_mutex_t TTEQLock = PTHREAD_MUTEX_INITIALIZER;
+static AudioUnit TTRemoteIOUnits[16];
+static NSUInteger TTRemoteIOUnitCount = 0;
+static Float64 TTRemoteIOSampleRate = 48000;
+static TTEQState TTEQStates[8][2][17];
+static TTEQCoefficients TTEQCoeffs[17];
+static float TTEQMasterGain = 1.0f;
+static BOOL TTEQOutputActive = NO;
+static unsigned long TTRenderCallCount = 0;
+static BOOL TTOutputStatusAnnounced = NO;
+
+static TTEQCoefficients TTEQPeaking(double frequency, double gainDB, double sampleRate, double q) {
+    double a = pow(10.0, gainDB / 40.0);
+    double w = 2.0 * M_PI * frequency / sampleRate;
+    double alpha = sin(w) / (2.0 * q);
+    double cosine = cos(w);
+    double a0 = 1.0 + alpha / a;
+    TTEQCoefficients c = { (1.0 + alpha * a) / a0, (-2.0 * cosine) / a0,
+                           (1.0 - alpha * a) / a0, (-2.0 * cosine) / a0,
+                           (1.0 - alpha / a) / a0 };
+    return c;
+}
+
+static TTEQCoefficients TTEQLowShelf(double frequency, double gainDB, double sampleRate) {
+    double a = pow(10.0, gainDB / 40.0);
+    double w = 2.0 * M_PI * frequency / sampleRate;
+    double cosine = cos(w), sine = sin(w), alpha = sine / sqrt(2.0);
+    double root = 2.0 * sqrt(a) * alpha;
+    double a0 = (a + 1.0) + (a - 1.0) * cosine + root;
+    TTEQCoefficients c = {
+        a * ((a + 1.0) - (a - 1.0) * cosine + root) / a0,
+        2.0 * a * ((a - 1.0) - (a + 1.0) * cosine) / a0,
+        a * ((a + 1.0) - (a - 1.0) * cosine - root) / a0,
+        -2.0 * ((a - 1.0) + (a + 1.0) * cosine) / a0,
+        ((a + 1.0) + (a - 1.0) * cosine - root) / a0 };
+    return c;
+}
+
+static void TTEQReloadSettings(void) {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+    BOOL enabled = [defaults objectForKey:@"TrapTube.EQ.Enabled"]
+        ? [defaults boolForKey:@"TrapTube.EQ.Enabled"] : YES;
+    float gains[16];
+    BOOL anyNonZero = NO;
+    for (int i = 0; i < 16; i++) {
+        gains[i] = [defaults floatForKey:[NSString stringWithFormat:@"TrapTube.EQ.Band.%d", i]];
+        if (gains[i] != 0) anyNonZero = YES;
+    }
+    float bass = [defaults floatForKey:@"TrapTube.EQ.Bass"];
+    float masterPercent = [defaults floatForKey:@"TrapTube.EQ.Master"];
+    if (masterPercent <= 0) masterPercent = 100;
+    TTEQMasterGain = masterPercent / 100.0f;
+    TTEQOutputActive = enabled && (anyNonZero || bass != 0 || TTEQMasterGain != 1.0f);
+    for (int i = 0; i < 16; i++) {
+        double frequency = TTEQFrequencies[i];
+        double maxFreq = TTRemoteIOSampleRate * 0.45;
+        if (frequency > maxFreq) frequency = maxFreq;
+        TTEQCoeffs[i] = TTEQPeaking(frequency, gains[i], TTRemoteIOSampleRate, 1.0);
+    }
+    double shelfFreq = 100.0, maxShelf = TTRemoteIOSampleRate * 0.20;
+    if (shelfFreq > maxShelf) shelfFreq = maxShelf;
+    TTEQCoeffs[16] = TTEQLowShelf(shelfFreq, bass, TTRemoteIOSampleRate);
+}
+
+static float TTEQProcessSample(float input, int channel, int bufferIndex) {
+    float value = input * TTEQMasterGain;
+    for (int band = 0; band < 17; band++) {
+        TTEQState *state = &TTEQStates[bufferIndex][channel][band];
+        TTEQCoefficients c = TTEQCoeffs[band];
+        double x = value;
+        double output = c.b0 * x + state->z1;
+        state->z1 = (float)(c.b1 * x - c.a1 * output + state->z2);
+        state->z2 = (float)(c.b2 * x - c.a2 * output);
+        value = (float)output;
+    }
+    float magnitude = fabsf(value);
+    if (magnitude > 0.85f) {
+        float compressed = 0.85f + 0.15f * tanhf((magnitude - 0.85f) / 0.15f);
+        return value < 0 ? -compressed : compressed;
+    }
+    return value;
+}
+
+static void TTAnnounceOutputStatus(void) {
+    TTOutputStatusAnnounced = YES;
+    NSString *status = @"Attached - processing this app's audio output";
+    [[NSUserDefaults standardUserDefaults] setObject:status forKey:@"TrapTube.EQ.OutputStatus"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter]
+            postNotificationName:@"TrapTubeEQAttachmentStatusChanged"
+                          object:nil
+                        userInfo:@{ @"status": status }];
+    });
+}
+
+static void TTEQProcessBufferList(AudioUnit unit, AudioBufferList *ioData) {
+    AudioStreamBasicDescription asbd;
+    UInt32 size = sizeof(asbd);
+    BOOL isFloat = YES;
+    if (AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat,
+                             kAudioUnitScope_Input, 0, &asbd, &size) == noErr) {
+        isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0;
+        if (asbd.mSampleRate > 0 && asbd.mSampleRate != TTRemoteIOSampleRate) {
+            TTRemoteIOSampleRate = asbd.mSampleRate;
+            TTEQReloadSettings();
+        }
+    }
+    for (UInt32 b = 0; b < ioData->mNumberBuffers && b < 8; b++) {
+        AudioBuffer *buffer = &ioData->mBuffers[b];
+        if (!buffer->mData) continue;
+        int channels = buffer->mNumberChannels > 0 ? (int)buffer->mNumberChannels : 1;
+        if (channels > 2) channels = 2;
+        if (isFloat) {
+            int samples = (int)(buffer->mDataByteSize / sizeof(float));
+            float *pcm = (float *)buffer->mData;
+            for (int s = 0; s < samples; s++) {
+                pcm[s] = TTEQProcessSample(pcm[s], s % channels, (int)b);
+            }
+        } else {
+            int samples = (int)(buffer->mDataByteSize / sizeof(int16_t));
+            int16_t *pcm = (int16_t *)buffer->mData;
+            for (int s = 0; s < samples; s++) {
+                float input = pcm[s] / 32768.0f;
+                float output = TTEQProcessSample(input, s % channels, (int)b);
+                long quantized = lrintf(fmaxf(-1.0f, fminf(1.0f, output)) * 32767.0f);
+                pcm[s] = (int16_t)quantized;
+            }
+        }
+    }
+}
+
+static OSStatus (*TTOrigAudioUnitRender)(AudioUnit, AudioUnitRenderActionFlags *,
+                                         const AudioTimeStamp *, UInt32, UInt32,
+                                         AudioBufferList *);
+static OSStatus TTReplacementAudioUnitRender(AudioUnit unit, AudioUnitRenderActionFlags *flags,
+                                             const AudioTimeStamp *timestamp, UInt32 busNumber,
+                                             UInt32 frames, AudioBufferList *ioData) {
+    OSStatus status = TTOrigAudioUnitRender(unit, flags, timestamp, busNumber, frames, ioData);
+    if (status != noErr || !ioData) return status;
+    BOOL tracked = NO;
+    for (NSUInteger i = 0; i < TTRemoteIOUnitCount; i++) {
+        if (TTRemoteIOUnits[i] == unit) { tracked = YES; break; }
+    }
+    if (!tracked) return status;
+    if ((++TTRenderCallCount & 0x7F) == 0) TTEQReloadSettings();
+    if (!TTOutputStatusAnnounced) TTAnnounceOutputStatus();
+    if (TTEQOutputActive) TTEQProcessBufferList(unit, ioData);
+    return status;
+}
+
+static OSStatus (*TTOrigAudioComponentInstanceNew)(AudioComponent, AudioComponentInstance *);
+static OSStatus TTReplacementAudioComponentInstanceNew(AudioComponent component,
+                                                       AudioComponentInstance *unitOut) {
+    OSStatus status = TTOrigAudioComponentInstanceNew(component, unitOut);
+    if (status == noErr && unitOut && *unitOut) {
+        AudioComponentDescription description;
+        if (AudioComponentGetDescription(component, &description) == noErr &&
+            description.componentType == kAudioUnitType_Output &&
+            description.componentSubType == kAudioUnitSubType_RemoteIO) {
+            pthread_mutex_lock(&TTEQLock);
+            BOOL known = NO;
+            for (NSUInteger i = 0; i < TTRemoteIOUnitCount; i++) {
+                if (TTRemoteIOUnits[i] == *unitOut) known = YES;
+            }
+            if (!known && TTRemoteIOUnitCount < 16) {
+                TTRemoteIOUnits[TTRemoteIOUnitCount++] = *unitOut;
+            }
+            pthread_mutex_unlock(&TTEQLock);
+        }
+    }
+    return status;
+}
+
+static OSStatus (*TTOrigAudioComponentInstanceDispose)(AudioComponentInstance);
+static OSStatus TTReplacementAudioComponentInstanceDispose(AudioComponentInstance unit) {
+    pthread_mutex_lock(&TTEQLock);
+    for (NSUInteger i = 0; i < TTRemoteIOUnitCount; i++) {
+        if (TTRemoteIOUnits[i] == unit) {
+            TTRemoteIOUnits[i] = TTRemoteIOUnits[--TTRemoteIOUnitCount];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&TTEQLock);
+    return TTOrigAudioComponentInstanceDispose(unit);
+}
+
 %ctor {
+    TTEQReloadSettings();
+    MSHookFunction((void *)AudioUnitRender, (void *)TTReplacementAudioUnitRender,
+                   (void **)&TTOrigAudioUnitRender);
+    MSHookFunction((void *)AudioComponentInstanceNew, (void *)TTReplacementAudioComponentInstanceNew,
+                   (void **)&TTOrigAudioComponentInstanceNew);
+    MSHookFunction((void *)AudioComponentInstanceDispose, (void *)TTReplacementAudioComponentInstanceDispose,
+                   (void **)&TTOrigAudioComponentInstanceDispose);
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:@"advancedMode"];
     [defaults setBool:YES forKey:@"advancedModeReminder"];
