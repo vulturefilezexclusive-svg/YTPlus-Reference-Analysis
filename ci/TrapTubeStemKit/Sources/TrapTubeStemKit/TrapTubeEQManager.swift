@@ -22,7 +22,16 @@ public final class TrapTubeEQManager: NSObject {
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let engineEQ = AVAudioUnitEQ(numberOfBands: 17)
-    private let limiter = AVAudioUnitDynamicsProcessor()
+    private let limiter: AVAudioUnitEffect = {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_PeakLimiter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+        return AVAudioUnitEffect(audioComponentDescription: description)
+    }()
 
     private override init() {
         super.init()
@@ -43,7 +52,7 @@ public final class TrapTubeEQManager: NSObject {
     deinit { NotificationCenter.default.removeObserver(self) }
 
     public func setBandGain(_ gain: Float, at index: Int) {
-        guard frequencies.indices.contains(index) else { return }
+        guard Self.frequencies.indices.contains(index) else { return }
         let value = min(12, max(-12, gain))
         lock.lock(); bandGains[index] = value; lock.unlock()
         UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Band.\(index)")
@@ -99,7 +108,7 @@ public final class TrapTubeEQManager: NSObject {
                 init: { _, clientInfo, storageOut in storageOut.pointee = clientInfo },
                 finalize: { _ in },
                 prepare: { tap, _, processingFormat in
-                    guard let raw = MTAudioProcessingTapGetStorage(tap) else { return }
+                    let raw = MTAudioProcessingTapGetStorage(tap)
                     let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
                     manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate,
                                          isFloatPCM: (processingFormat.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0)
