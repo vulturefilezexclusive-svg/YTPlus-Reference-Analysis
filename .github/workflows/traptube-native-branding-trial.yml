@@ -318,11 +318,13 @@ jobs:
           fi
           strings "$STEMKIT_BINARY" | grep -F 'TrapTubeStemStudioFactory'
           strings "$STEMKIT_BINARY" | grep -F 'Separate into four stems'
-          grep -Fq 'private let selectedModel: DemucsModel = .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
-          if grep -Fq '.fineTunedAll' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then
-            echo "Unsafe four-submodel fine-tuned load path reintroduced in TrapTube StemKit." >&2
-            exit 6
-          fi
+          grep -Fq 'case .balanced: .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'case .sixStem: .sixStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'case .fineTuned: .fineTunedAll' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'qualityTier' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TrapTube.StemStudio.Model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'availableStemNames' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'expectedStemCount' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'private lazy var engine: DemucsEngine = {' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq '_ = TrapTubeStemStorage.configured' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'return DemucsEngine()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
@@ -339,7 +341,13 @@ jobs:
           grep -Fq 'TTIsRemovedVersionFooter' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTApplyStemStudioSurfaceToView' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTStemBackgroundColor' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'VolumeBoostYTEnabled' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'CustomYouTubeVolumeScalar' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TrapTubeStreamVolumeBoost' ci/traptube-host-tweak/TrapTubeBranding.x
+          test -s "$APP/Frameworks/VolumeBoostYT.dylib"
+          otool -L "$APP/YouTube" | grep -F '@rpath/VolumeBoostYT.dylib'
           grep -q 'TrapTube Appearance' output/branding-binary-strings.txt
+          grep -q 'Stream Volume Boost' output/branding-binary-strings.txt
           grep -q 'TrapTube Branding' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
@@ -347,7 +355,7 @@ jobs:
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
