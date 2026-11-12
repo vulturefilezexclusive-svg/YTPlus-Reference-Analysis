@@ -49,6 +49,42 @@ private enum TrapTubeStemStorage {
     }()
 }
 
+private enum TrapTubeStemModelOption: String, CaseIterable, Identifiable {
+    case balanced
+    case sixStem
+    case fineTuned
+
+    var id: String { rawValue }
+
+    var model: DemucsModel {
+        switch self {
+        case .balanced: .fourStem
+        case .sixStem: .sixStem
+        case .fineTuned: .fineTunedAll
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .balanced: "HTDemucs · 4 stems"
+        case .sixStem: "HTDemucs · 6 stems"
+        case .fineTuned: "HTDemucs FT · Fine-tuned"
+        }
+    }
+
+    // Relative model tier from the upstream model descriptions, not a published
+    // head-to-head benchmark or a guarantee for every song.
+    var qualityTier: Int { self == .fineTuned ? 5 : 3 }
+
+    var detail: String {
+        switch self {
+        case .balanced: "Balanced speed and quality · vocals, drums, bass, other"
+        case .sixStem: "Adds guitar and piano · same general quality tier"
+        case .fineTuned: "Highest-quality variant · separate fine-tuned stem models"
+        }
+    }
+}
+
 @MainActor
 private final class TrapTubeStemModel: ObservableObject {
     @Published var selectedFile: URL?
@@ -61,10 +97,18 @@ private final class TrapTubeStemModel: ObservableObject {
     @Published var status = "Import an audio file to get started"
     @Published var error: String?
     @Published var playingStem: String?
+    @Published var selectedModelOption: TrapTubeStemModelOption = .balanced {
+        didSet {
+            UserDefaults.standard.set(selectedModelOption.rawValue, forKey: "TrapTube.StemStudio.Model")
+            refresh()
+        }
+    }
 
     private var audioPlayer: AVAudioPlayer?
-    // One HTDemucs network returns all four stems without loading four separate fine-tuned submodels.
-    private let selectedModel: DemucsModel = .fourStem
+    private var selectedModel: DemucsModel { selectedModelOption.model }
+    var selectedModelInfo: DemucsModelInfo { DemucsEngine.info(for: selectedModel) }
+    var selectedModelIsDownloaded: Bool { DemucsEngine.isDownloaded(selectedModel) }
+    var availableStemNames: [String] { selectedModelInfo.stems.map(\.rawValue) }
 
     // Configure the native model cache before constructing the Rust-backed engine.
     // The engine is lazy so no Demucs worker can start before cache setup completes.
@@ -75,6 +119,10 @@ private final class TrapTubeStemModel: ObservableObject {
 
     init() {
         _ = TrapTubeStemStorage.configured
+        if let saved = UserDefaults.standard.string(forKey: "TrapTube.StemStudio.Model"),
+           let option = TrapTubeStemModelOption(rawValue: saved) {
+            selectedModelOption = option
+        }
         refresh()
     }
 
@@ -108,7 +156,7 @@ private final class TrapTubeStemModel: ObservableObject {
         isDownloading = true
         downloadProgress = 0
         error = nil
-        status = "Downloading HTDemucs · about 84 MB"
+        status = "Downloading \(selectedModelInfo.label) · about \(selectedModelInfo.sizeMB) MB"
         Task {
             do {
                 try await DemucsEngine.download(selectedModel) { update in
@@ -131,7 +179,7 @@ private final class TrapTubeStemModel: ObservableObject {
     func separate() {
         guard let selectedFile, !isProcessing else { return }
         guard isModelReady else {
-            error = "Download the enhanced model before separating audio."
+            error = "Download \(selectedModelInfo.label) before separating audio."
             return
         }
         isProcessing = true
@@ -142,6 +190,7 @@ private final class TrapTubeStemModel: ObservableObject {
         let destination = TrapTubeStemStorage.stems.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let engine = self.engine
         let selectedModel = self.selectedModel
+        let expectedStemCount = self.selectedModelInfo.stems.count
 
         Task.detached(priority: .userInitiated) {
             var stage = "Audio decoding"
@@ -179,9 +228,9 @@ private final class TrapTubeStemModel: ObservableObject {
                                       sampleRate: Double(pcm.sampleRate), url: output)
                     result[key] = output
                 }
-                guard result.count == 4 else {
+                guard result.count == expectedStemCount else {
                     throw NSError(domain: "TrapTubeStemKit", code: 11,
-                                  userInfo: [NSLocalizedDescriptionKey: "HTDemucs did not return all four stems."])
+                                  userInfo: [NSLocalizedDescriptionKey: "The selected model returned \(result.count) stems; expected \(expectedStemCount)."])
                 }
                 await self.finish(result)
             } catch {
@@ -335,21 +384,76 @@ private struct TrapTubeStemStudioView: View {
                 }
                 .tint(accent)
 
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Text("Separation model").font(.headline.weight(.bold))
+                        Spacer()
+                        Text("QUALITY TIER").font(.system(size: 9, weight: .black)).tracking(1.1)
+                            .foregroundStyle(Color.white.opacity(0.42))
+                    }
+                    ForEach(TrapTubeStemModelOption.allCases) { option in
+                        let selected = model.selectedModelOption == option
+                        Button {
+                            model.selectedModelOption = option
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                                    .font(.title3).foregroundStyle(selected ? accent : Color.white.opacity(0.35))
+                                    .padding(.top, 2)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(option.displayName)
+                                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                                        Spacer(minLength: 4)
+                                        Text("\(option.qualityTier)/5")
+                                            .font(.caption.weight(.black).monospacedDigit())
+                                            .foregroundStyle(accent)
+                                    }
+                                    HStack(spacing: 3) {
+                                        ForEach(1...5, id: \.self) { index in
+                                            Image(systemName: index <= option.qualityTier ? "star.fill" : "star")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundStyle(index <= option.qualityTier ? accent : Color.white.opacity(0.2))
+                                        }
+                                    }
+                                    Text(option.detail)
+                                        .font(.caption).foregroundStyle(Color.white.opacity(0.62))
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text("\(DemucsEngine.info(for: option.model).sizeMB) MB · \(DemucsEngine.isDownloaded(option.model) ? "Downloaded" : "Not downloaded")")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .foregroundStyle(DemucsEngine.isDownloaded(option.model) ? Color.green : Color.white.opacity(0.42))
+                                }
+                            }
+                            .padding(12)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(selected ? accent.opacity(0.12) : Color.white.opacity(0.035),
+                                        in: RoundedRectangle(cornerRadius: 13))
+                            .overlay(RoundedRectangle(cornerRadius: 13)
+                                .stroke(selected ? accent.opacity(0.65) : Color.white.opacity(0.07), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(model.isProcessing || model.isDownloading)
+                    }
+                    Text("Ratings show relative model tiers based on the model descriptions, not independent benchmark scores. The fine-tuned option is larger and slower; the 6-stem model adds guitar and piano rather than promising better separation.")
+                        .font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.42))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 VStack(alignment: .leading, spacing: 10) {
-                    Label(model.isModelReady ? "HTDemucs ready" : "Enhanced model required",
+                    Label(model.isModelReady ? "\(model.selectedModelInfo.label) ready" : "Selected model not downloaded",
                           systemImage: model.isModelReady ? "checkmark.seal.fill" : "cpu")
                         .font(.headline.weight(.bold))
                         .foregroundStyle(model.isModelReady ? Color.green : accent)
                     Text(model.isModelReady
-                         ? "The 84 MB four-stem model is stored in Application Support and can be reused offline."
-                         : "Download the 84 MB four-stem model once. It stays in persistent app storage for offline use.")
+                         ? "This model is stored in app support and can be reused offline."
+                         : "Download the selected model once. It stays in persistent app storage for offline use.")
                         .font(.caption).foregroundStyle(Color.white.opacity(0.65))
                     if !model.isModelReady {
                         Button { model.downloadModel() } label: {
                             HStack {
                                 if model.isDownloading { ProgressView().tint(.white) }
                                 else { Image(systemName: "arrow.down.circle.fill") }
-                                Text(model.isDownloading ? model.status : "Download HTDemucs · 84 MB")
+                                Text(model.isDownloading ? model.status : "Download \(model.selectedModelInfo.label) · \(model.selectedModelInfo.sizeMB) MB")
                             }
                             .font(.subheadline.weight(.bold))
                             .frame(maxWidth: .infinity).padding(.vertical, 13)
@@ -389,7 +493,7 @@ private struct TrapTubeStemStudioView: View {
 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Separated stems").font(.headline.weight(.bold)).foregroundStyle(.white)
-                    ForEach(["vocals", "drums", "bass", "other"], id: \.self) { name in
+                    ForEach(model.availableStemNames, id: \.self) { name in
                         HStack(spacing: 12) {
                             Image(systemName: icon(for: name)).foregroundStyle(accent).frame(width: 24)
                             Text(name.capitalized).font(.subheadline.weight(.bold)).foregroundStyle(.white)
@@ -416,7 +520,7 @@ private struct TrapTubeStemStudioView: View {
                 .padding(16)
                 .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 18))
 
-                Text("Processing runs locally with Metal acceleration. The initial model download requires internet; subsequent separations can run offline. Files remain on this device.")
+                Text("Processing runs locally with Metal acceleration. The selected model's initial download requires internet; downloaded models can be reused offline. Files remain on this device.")
                     .font(.caption).foregroundStyle(Color.white.opacity(0.45))
             }
             .padding(18)
