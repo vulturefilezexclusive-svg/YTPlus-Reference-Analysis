@@ -62,20 +62,93 @@ static UIColor *TTAccentColor(void) {
     return TTColorFromHex(TTAccentHex());
 }
 
+static UIColor *TTStemBackgroundColor(void) {
+    return TTColorFromHex(@"080809");
+}
+
+static UIColor *TTStemSurfaceColor(void) {
+    return [UIColor colorWithWhite:1.0 alpha:0.055];
+}
+
+static UIColor *TTStemMutedColor(void) {
+    return TTColorFromHex(@"A6A4A6");
+}
+
 static void TTApplyAccentToWindow(UIWindow *window) {
     if (!window) return;
-    UIColor *accent = TTAccentColor();
-    window.tintColor = accent;
+    window.tintColor = TTAccentColor();
     window.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
 }
 
 static void TTApplyAccentGlobally(void) {
     UIColor *accent = TTAccentColor();
-    [UINavigationBar appearance].tintColor = accent;
-    [UITabBar appearance].tintColor = accent;
+    UIColor *background = TTStemBackgroundColor();
+    UIColor *surface = TTColorFromHex(@"121216");
+    UIColor *muted = TTStemMutedColor();
+
+    UINavigationBar *navigation = [UINavigationBar appearance];
+    navigation.tintColor = accent;
+    navigation.barTintColor = background;
+    navigation.barStyle = UIBarStyleBlack;
+    navigation.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
+    navigation.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor };
+
+    UITabBar *tabs = [UITabBar appearance];
+    tabs.tintColor = accent;
+    tabs.unselectedItemTintColor = muted;
+    tabs.barTintColor = background;
+    tabs.backgroundColor = background;
+    tabs.barStyle = UIBarStyleBlack;
+
+    UITableView *tables = [UITableView appearance];
+    tables.backgroundColor = background;
+    tables.separatorColor = [UIColor.whiteColor colorWithAlphaComponent:0.08];
+    [UITableViewCell appearance].backgroundColor = surface;
+
     [UISwitch appearance].onTintColor = accent;
+    [UISlider appearance].minimumTrackTintColor = accent;
+    [UISlider appearance].maximumTrackTintColor = [UIColor.whiteColor colorWithAlphaComponent:0.18];
+    [UISegmentedControl appearance].selectedSegmentTintColor = accent;
+    [UIProgressView appearance].progressTintColor = accent;
+    [UIProgressView appearance].trackTintColor = [UIColor.whiteColor colorWithAlphaComponent:0.12];
+    [UIActivityIndicatorView appearance].color = accent;
+    [UITextField appearance].keyboardAppearance = UIKeyboardAppearanceDark;
+    [UITextView appearance].keyboardAppearance = UIKeyboardAppearanceDark;
+
     for (UIWindow *window in UIApplication.sharedApplication.windows) {
         TTApplyAccentToWindow(window);
+    }
+}
+
+static void TTApplyStemStudioSurfaceToView(UIView *view) {
+    if (!view) return;
+    UIColor *background = TTStemBackgroundColor();
+    UIColor *surface = TTColorFromHex(@"121216");
+    UIColor *accent = TTAccentColor();
+
+    if ([view isKindOfClass:UITableView.class]) {
+        UITableView *table = (UITableView *)view;
+        table.backgroundColor = background;
+        table.separatorColor = [UIColor.whiteColor colorWithAlphaComponent:0.08];
+    } else if ([view isKindOfClass:UITableViewCell.class]) {
+        UITableViewCell *cell = (UITableViewCell *)view;
+        cell.backgroundColor = surface;
+        cell.contentView.backgroundColor = surface;
+        UIView *selected = [[UIView alloc] initWithFrame:cell.bounds];
+        selected.backgroundColor = [UIColor.whiteColor colorWithAlphaComponent:0.075];
+        cell.selectedBackgroundView = selected;
+    } else if ([view isKindOfClass:UISwitch.class]) {
+        ((UISwitch *)view).onTintColor = accent;
+    } else if ([view isKindOfClass:UISlider.class]) {
+        ((UISlider *)view).minimumTrackTintColor = accent;
+    } else if ([view isKindOfClass:UISegmentedControl.class]) {
+        ((UISegmentedControl *)view).selectedSegmentTintColor = accent;
+    } else if ([view isKindOfClass:UIProgressView.class]) {
+        ((UIProgressView *)view).progressTintColor = accent;
+    }
+
+    for (UIView *child in view.subviews) {
+        TTApplyStemStudioSurfaceToView(child);
     }
 }
 
@@ -161,9 +234,9 @@ static BOOL TTShouldHideSettingsSection(NSString *title) {
     if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
     NSString *value = title.lowercaseString;
     NSArray<NSString *> *hiddenSections = @[
-        @"developer", @"credits", @"discord", @"social", @"support",
+        @"developer", @"dayanch96", @"credits", @"discord", @"social", @"support",
         @"github", @"telegram", @"twitter", @"open source", @"contributors",
-        @"feedback"
+        @"feedback", @"traptube plus 6.0 b2"
     ];
     for (NSString *label in hiddenSections) {
         if ([value containsString:label]) return YES;
@@ -182,11 +255,13 @@ static BOOL TTShouldHideSettingsItem(id item) {
     } @catch (__unused NSException *exception) {}
     NSString *value = [NSString stringWithFormat:@"%@ %@ %@", title ?: @"", detail ?: @"", identifier ?: @""].lowercaseString;
     if (value.length == 0) return NO;
+    if ([value containsString:@"traptube plus 6.0 b2"] ||
+        ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"])) return YES;
     NSArray<NSString *> *hiddenLabels = @[
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
         @"twitter", @"support", @"github", @"telegram", @"social",
-        @"developer", @"credits", @"open source", @"contributors", @"feedback"
+        @"developer", @"dayanch96", @"credits", @"open source", @"contributors", @"feedback"
     ];
     for (NSString *label in hiddenLabels) {
         if ([value containsString:label]) return YES;
@@ -692,6 +767,11 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 %hook YTSettingsViewController
 
+- (void)viewDidLayoutSubviews {
+    %orig;
+    TTApplyStemStudioSurfaceToView(self.view);
+}
+
 - (void)setSectionItems:(NSMutableArray *)sectionItems
              forCategory:(NSInteger)category
                    title:(NSString *)title
@@ -889,14 +969,33 @@ static UIImage *TTTrapTubeWordmark(void) {
     return wordmark;
 }
 
+static BOOL TTIsRemovedVersionFooter(NSString *text) {
+    if (![text isKindOfClass:NSString.class] || text.length == 0) return NO;
+    NSString *value = [[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
+    return [value containsString:@"traptube plus 6.0 b2"] ||
+           ([value containsString:@"traptube"] && [value containsString:@"6.0 b2"]);
+}
+
 %hook UILabel
 - (void)setText:(NSString *)text {
+    if (TTIsRemovedVersionFooter(text)) {
+        self.hidden = YES;
+        self.userInteractionEnabled = NO;
+        %orig(@"");
+        return;
+    }
     %orig(TTRebrandedHostText(text));
 }
 %end
 
 %hook UIButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
+    if (TTIsRemovedVersionFooter(title)) {
+        self.hidden = YES;
+        self.userInteractionEnabled = NO;
+        %orig(@"", state);
+        return;
+    }
     %orig(TTRebrandedHostText(title), state);
 }
 %end
