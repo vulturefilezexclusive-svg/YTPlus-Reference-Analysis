@@ -15,13 +15,12 @@ public final class TrapTubeEQManager: NSObject {
     private var bassBoost: Float = 0
     private var masterPercent: Float = 100
     private var attachedItems = NSHashTable<AVPlayerItem>.weakObjects()
+    private var tapSampleRate: Double = 44100
+    private var tapStates: [[BiquadState]] = []
 
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let engineEQ = AVAudioUnitEQ(numberOfBands: 17)
-    private let engineGain = AVAudioUnit( audioComponentDescription: AudioComponentDescription(
-        componentType: kAudioUnitType_Effect, componentSubType: kAudioUnitSubType_PeakLimiter,
-        componentManufacturer: kAudioUnitManufacturer_Apple, componentFlags: 0, componentFlagsMask: 0))
     private let limiter = AVAudioUnitDynamicsProcessor()
 
     private override init() {
@@ -60,8 +59,7 @@ public final class TrapTubeEQManager: NSObject {
         let value = min(200, max(0, percent))
         lock.lock(); masterPercent = value; lock.unlock()
         // AVAudioUnitGain uses dB; 0% is silence and 200% is +6.02 dB.
-        engineGain.auAudioUnit.parameterTree?.parameter(withAddress: 0)?.value =
-            value == 0 ? -96 : 20 * log10(value / 100)
+        engineEQ.globalGain = value == 0 ? -96 : 20 * log10(value / 100)
     }
 
     public var masterGainPercent: Float {
@@ -88,7 +86,11 @@ public final class TrapTubeEQManager: NSObject {
                 clientInfo: Unmanaged.passUnretained(self).toOpaque(),
                 init: { _, clientInfo, storageOut in storageOut.pointee = clientInfo },
                 finalize: { _ in },
-                prepare: { _, _, _ in },
+                prepare: { tap, _, processingFormat in
+                    guard let raw = MTAudioProcessingTapGetStorage(tap) else { return }
+                    let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
+                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate)
+                },
                 unprepare: { _ in },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
                     let status = MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut)
@@ -131,7 +133,6 @@ public final class TrapTubeEQManager: NSObject {
     private func configureEngineGraph() {
         engine.attach(playerNode)
         engine.attach(engineEQ)
-        engine.attach(engineGain)
         engine.attach(limiter)
         for index in 0..<16 {
             let band = engineEQ.bands[index]
@@ -152,45 +153,46 @@ public final class TrapTubeEQManager: NSObject {
         limiter.releaseTime = 0.08
         limiter.masterGain = 0
         engine.connect(playerNode, to: engineEQ, format: nil)
-        engine.connect(engineEQ, to: engineGain, format: nil)
-        engine.connect(engineGain, to: limiter, format: nil)
+        engine.connect(engineEQ, to: limiter, format: nil)
         engine.connect(limiter, to: engine.mainMixerNode, format: nil)
         engine.prepare()
     }
 
+    private func configureTap(sampleRate: Double) {
+        lock.lock()
+        tapSampleRate = max(8000, sampleRate)
+        tapStates = []
+        lock.unlock()
+    }
+
     private func processTapBuffers(_ list: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) {
         guard frameCount > 0 else { return }
-        let snapshot: ([Float], Float, Float) = {
-            lock.lock(); defer { lock.unlock() }; return (bandGains, bassBoost, masterPercent)
-        }()
+        lock.lock()
+        let gains = bandGains
+        let bass = bassBoost
+        let master = masterPercent / 100
+        let sampleRate = tapSampleRate
         let buffers = UnsafeMutableAudioBufferListPointer(list)
-        let gain = snapshot.2 / 100
-        for buffer in buffers {
-            guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
+        if tapStates.count != buffers.count {
+            tapStates = buffers.map { _ in Array(repeating: BiquadState(), count: 17) }
+        }
+        for (bufferIndex, buffer) in buffers.enumerated() {
+            guard let data = buffer.mData, buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
             let channels = max(1, Int(buffer.mNumberChannels))
-            let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size,
-                              frameCount * channels)
+            let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
             let pcm = data.bindMemory(to: Float.self, capacity: samples)
-            for i in 0..<samples {
-                let frame = i / channels
-                var value = pcm[i] * gain
-                // Lightweight low-shelf emphasis for the post-decode tap. The
-                // full 17-filter AVAudioUnitEQ graph is used by TrapTube-owned audio.
-                if frame < frameCount {
-                    let bass = min(2.0, 1.0 + snapshot.1 / 20.0)
-                    value *= bass
-                }
-                // Peaking-band contribution with a bounded, smooth response curve.
-                let frequencyPosition = Float(i % channels) // channel-stable, no buffer allocation
-                _ = frequencyPosition
-                let eqScale = snapshot.0.reduce(Float(1)) { partial, db in
-                    partial * pow(10, max(-12, min(12, db)) / 2000)
-                }
-                value *= eqScale
-                // Soft saturation keeps boosted PCM bounded without abrupt hard clipping.
-                pcm[i] = value / (1 + abs(value))
+            var coefficients = gains.enumerated().map { index, gain in
+                BiquadCoefficients.peaking(frequency: Double(Self.frequencies[index]), gainDB: Double(gain), sampleRate: sampleRate, q: 1.0)
+            }
+            coefficients.append(BiquadCoefficients.lowShelf(frequency: 100, gainDB: Double(bass), sampleRate: sampleRate))
+            for sample in 0..<samples {
+                var value = pcm[sample] * master
+                for band in 0..<17 { value = tapStates[bufferIndex][band].process(value, coefficients[band]) }
+                let peak = abs(value)
+                pcm[sample] = peak > 1 ? value / peak : value
             }
         }
+        lock.unlock()
     }
 
     @objc private func handleInterruption(_ note: Notification) {
@@ -267,5 +269,43 @@ private final class TrapTubeEQViewController: UIViewController {
         }
         slider.addAction(UIAction { _ in update(slider.value) }, for: .valueChanged)
         update(value); stack.addArrangedSubview(container)
+    }
+}
+
+private struct BiquadCoefficients {
+    var b0: Double; var b1: Double; var b2: Double
+    var a1: Double; var a2: Double
+    static func peaking(frequency: Double, gainDB: Double, sampleRate: Double, q: Double) -> Self {
+        let a = pow(10, gainDB / 40)
+        let w = 2 * Double.pi * frequency / sampleRate
+        let alpha = sin(w) / (2 * q)
+        let cosine = cos(w)
+        let a0 = 1 + alpha / a
+        return Self(b0: (1 + alpha * a) / a0, b1: (-2 * cosine) / a0,
+                    b2: (1 - alpha * a) / a0, a1: (-2 * cosine) / a0,
+                    a2: (1 - alpha / a) / a0)
+    }
+    static func lowShelf(frequency: Double, gainDB: Double, sampleRate: Double) -> Self {
+        let a = pow(10, gainDB / 40)
+        let w = 2 * Double.pi * frequency / sampleRate
+        let cosine = cos(w), sine = sin(w), alpha = sine / sqrt(2)
+        let root = 2 * sqrt(a) * alpha
+        let a0 = (a + 1) + (a - 1) * cosine + root
+        return Self(b0: a * ((a + 1) - (a - 1) * cosine + root) / a0,
+                    b1: 2 * a * ((a - 1) - (a + 1) * cosine) / a0,
+                    b2: a * ((a + 1) - (a - 1) * cosine - root) / a0,
+                    a1: -2 * ((a - 1) + (a + 1) * cosine) / a0,
+                    a2: ((a + 1) + (a - 1) * cosine - root) / a0)
+    }
+}
+private struct BiquadState {
+    var z1 = 0.0
+    var z2 = 0.0
+    mutating func process(_ input: Float, _ c: BiquadCoefficients) -> Float {
+        let x = Double(input)
+        let output = c.b0 * x + z1
+        z1 = c.b1 * x - c.a1 * output + z2
+        z2 = c.b2 * x - c.a2 * output
+        return Float(output)
     }
 }
