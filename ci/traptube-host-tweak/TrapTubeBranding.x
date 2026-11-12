@@ -726,6 +726,7 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     TTApplyAccentToWindow(self.view.window);
+    TTApplyStemStudioSurfaceToView(self.view);
 }
 
 %end
