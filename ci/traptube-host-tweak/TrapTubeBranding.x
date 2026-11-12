@@ -1364,12 +1364,24 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
 %hook UIBarButtonItem
 - (void)setTitle:(NSString *)title {
     %orig(TTRebrandedHostText(title));
+    if (TTIsTrapTubeBrandText(title)) {
+        NSDictionary *attributes = @{ NSFontAttributeName: TTBrandDisplayFont(16),
+                                       NSForegroundColorAttributeName: UIColor.whiteColor };
+        [self setTitleTextAttributes:attributes forState:UIControlStateNormal];
+        [self setTitleTextAttributes:attributes forState:UIControlStateHighlighted];
+    }
 }
 %end
 
 %hook UITabBarItem
 - (void)setTitle:(NSString *)title {
     %orig(TTRebrandedHostText(title));
+    if (TTIsTrapTubeBrandText(title)) {
+        NSDictionary *attributes = @{ NSFontAttributeName: TTBrandDisplayFont(11),
+                                       NSForegroundColorAttributeName: UIColor.whiteColor };
+        [self setTitleTextAttributes:attributes forState:UIControlStateNormal];
+        [self setTitleTextAttributes:attributes forState:UIControlStateSelected];
+    }
 }
 %end
 
