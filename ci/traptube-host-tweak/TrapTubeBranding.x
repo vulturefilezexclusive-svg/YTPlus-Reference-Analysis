@@ -877,12 +877,14 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
 
     BOOL appearanceAdded = NO;
     BOOL boostAdded = NO;
+    BOOL eqAdded = NO;
     for (id item in items) {
         NSString *identifier = [item respondsToSelector:@selector(accessibilityIdentifier)] ? [item accessibilityIdentifier] : nil;
         if ([identifier isEqualToString:@"TrapTubeAppearance"]) appearanceAdded = YES;
         if ([identifier isEqualToString:@"TrapTubeStreamVolumeBoost"]) boostAdded = YES;
+        if ([identifier isEqualToString:@"TrapTubeEqualizer"]) eqAdded = YES;
     }
-    if (appearanceAdded && boostAdded) return;
+    if (appearanceAdded && boostAdded && eqAdded) return;
 
     __weak YTSettingsViewController *weakSettings = settings;
     Class settingsItemClass = NSClassFromString(@"YTSettingsSectionItem");
@@ -907,6 +909,29 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
             settingsItemClass, itemFactory, @"Stream Volume Boost", @"TrapTubeStreamVolumeBoost", boostDetail, boostSelect
         );
         if (boost) [items insertObject:boost atIndex:0];
+    }
+
+    if (!eqAdded) {
+        id eqDetail = ^NSString *{
+            return @"16-band graphic EQ, bass boost and master gain";
+        };
+        id eqSelect = ^BOOL(id cell, NSUInteger index) {
+            __strong YTSettingsViewController *strongSettings = weakSettings;
+            if (!strongSettings) return NO;
+            Class factory = NSClassFromString(@"TrapTubeEQFactory");
+            SEL make = NSSelectorFromString(@"makeViewController");
+            UIViewController *controller = nil;
+            if (factory && [factory respondsToSelector:make]) {
+                controller = ((id (*)(id, SEL))objc_msgSend)(factory, make);
+            }
+            if (!controller) return NO;
+            [strongSettings pushViewController:controller];
+            return YES;
+        };
+        id eq = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+            settingsItemClass, itemFactory, @"16-Band Equalizer", @"TrapTubeEqualizer", eqDetail, eqSelect
+        );
+        if (eq) [items insertObject:eq atIndex:0];
     }
 
     if (!appearanceAdded) {
