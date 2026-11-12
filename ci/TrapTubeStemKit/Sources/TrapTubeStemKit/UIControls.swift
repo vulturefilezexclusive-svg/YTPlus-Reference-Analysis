@@ -2,6 +2,7 @@ import SwiftUI
 import AVFoundation
 import UIKit
 
+@MainActor
 @objc(TrapTubeEQFactory)
 public final class TrapTubeEQFactory: NSObject {
     @objc public static func makeViewController() -> UIViewController {
@@ -10,6 +11,7 @@ public final class TrapTubeEQFactory: NSObject {
     }
 }
 
+@MainActor
 @objc(TrapTubeAudioBoostFactory)
 public final class TrapTubeAudioBoostFactory: NSObject {
     @objc public static func makeViewController() -> UIViewController {
