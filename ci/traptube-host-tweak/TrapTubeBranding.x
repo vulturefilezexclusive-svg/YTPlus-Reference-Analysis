@@ -1396,6 +1396,10 @@ static void TTShowHostileTakeoverSplash(void) {
     });
 }
 
+// Forward declaration: the UIWindow hook below invokes this scheduler before
+// its implementation appears later in this file.
+static void TTScheduleHostileTakeoverSplash(NSUInteger attempt);
+
 // Present the branded overlay synchronously as soon as the app's first
 // scene window becomes visible. The old 200 ms constructor timer allowed the
 // embedded YouTube host's own launch mark to render first.
