@@ -400,6 +400,10 @@ jobs:
           grep -Fq '%hook AVPlayerLayer' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTShouldHideDVNCellText' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'weightsFileIsValid' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'volumeboost' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'loadWithRecovery' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'glassEffect' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'ttGlassCard' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'TrapTube.EQ.Enabled' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'kAudioFormatFlagIsSignedInteger' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'isAttached' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
