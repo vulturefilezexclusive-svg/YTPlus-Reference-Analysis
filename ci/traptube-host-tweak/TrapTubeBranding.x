@@ -50,6 +50,14 @@ static void TTAttachEQToPlayerItem(id item) {
     ((void (*)(id, SEL, id))objc_msgSend)(hookClass, attachSelector, item);
 }
 
+static void TTAttachEQToPlayerItemWhenReady(id item) {
+    if (!item) return;
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL attachSelector = NSSelectorFromString(@"attachWhenReadyInBackgroundTo:");
+    if (!hookClass || ![hookClass respondsToSelector:attachSelector]) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(hookClass, attachSelector, item);
+}
+
 static void TTInstallPlayerEQHook(id player) {
     if (!player || objc_getAssociatedObject(player, &TTPlayerEQHookAssociationKey)) return;
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
@@ -922,6 +930,28 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
     TTAttachEQToPlayerItem(self);
 }
 
+- (AVAudioMix *)audioMix {
+    AVAudioMix *mix = %orig;
+    // The playback pipeline reads the mix while building its render graph,
+    // so a read is the most reliable "entering real playback" signal there
+    // is. Schedule an asynchronous attach only: a synchronous one could
+    // re-enter through the attach path's own mix reads.
+    TTAttachEQToPlayerItemWhenReady(self);
+    return mix;
+}
+
+%end
+
+%hook AVPlayerLayer
+
+- (void)setPlayer:(AVPlayer *)player {
+    %orig;
+    if (player) {
+        TTInstallPlayerEQHook(player);
+        TTAttachEQToPlayerItem([player currentItem]);
+    }
+}
+
 %end
 
 %hook AVQueuePlayer
@@ -1007,11 +1037,36 @@ static BOOL TTIsRemovedVersionFooter(NSString *text);
 // the Account / Developer / Credits sections, the Discord RPC row and the
 // version footer before anything is rendered.
 
+static BOOL TTShouldHideDVNCellText(NSString *title) {
+    if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
+    NSString *value = title.lowercaseString;
+    if (([value containsString:@"traptube"] || [value containsString:@"ytplus"] ||
+         [value containsString:@"youtube plus"]) && [value containsString:@"6.0~b2"]) return YES;
+    // Deliberately narrower than TTShouldHideSettingsItem: that list also
+    // matches feature pages' own rows (it emptied the Volume Boost page,
+    // whose cells are titled after the feature). Only the rows the user
+    // asked to remove from the Plus settings belong here; whole sections
+    // are dropped by header in TTIsRemovedDVNSection.
+    NSArray<NSString *> *labels = @[
+        @"subscription status", @"manage account", @"log out", @"logout",
+        @"discord",
+        @"support development", @"github repository", @"my telegram channel", @"follow me",
+        @"contributors", @"open source librar", @"special thanks",
+        @"traptube plus preferences", @"youtube plus preferences", @"ytplus preferences"
+    ];
+    for (NSString *label in labels) {
+        if ([value containsString:label]) return YES;
+    }
+    return NO;
+}
+
 static BOOL TTIsRemovedDVNCell(id cell) {
     if (!cell) return NO;
-    // TTShouldHideSettingsItem already reads an item's title (DVNCell exposes
-    // one) and matches it against the full removal list.
-    if (TTShouldHideSettingsItem(cell)) return YES;
+    NSString *cellTitle = nil;
+    @try {
+        if ([cell respondsToSelector:@selector(title)]) cellTitle = [cell valueForKey:@"title"];
+    } @catch (NSException *exception) {}
+    if (TTShouldHideDVNCellText(cellTitle)) return YES;
     NSString *key = nil;
     NSString *identifier = nil;
     @try {
@@ -1034,8 +1089,16 @@ static BOOL TTIsRemovedDVNSection(id section) {
         if ([section respondsToSelector:@selector(header)]) header = [section valueForKey:@"header"];
         if ([section respondsToSelector:@selector(identifier)]) identifier = [section valueForKey:@"identifier"];
     } @catch (NSException *exception) {}
-    if ([header isKindOfClass:NSString.class] && header.length && TTShouldHideSettingsSection(header)) return YES;
-    if ([identifier isKindOfClass:NSString.class] && identifier.length && TTShouldHideSettingsSection(identifier)) return YES;
+    // Narrower than TTShouldHideSettingsSection on purpose: broad terms in
+    // that list (support, github, telegram) can appear in kept pages.
+    NSArray<NSString *> *removedSections = @[
+        @"account", @"developer", @"dayanch96", @"credits",
+        @"traptube plus preferences", @"youtube plus preferences", @"ytplus preferences", @"6.0~b2"
+    ];
+    for (NSString *label in removedSections) {
+        if ([header isKindOfClass:NSString.class] && [header.lowercaseString containsString:label]) return YES;
+        if ([identifier isKindOfClass:NSString.class] && [identifier.lowercaseString containsString:label]) return YES;
+    }
     return NO;
 }
 
