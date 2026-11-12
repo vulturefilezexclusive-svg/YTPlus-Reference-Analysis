@@ -14,10 +14,21 @@ public final class TrapTubeEQManager: NSObject {
     private var bandGains = Array(repeating: Float(0), count: 16)
     private var bassBoost: Float = 0
     private var masterPercent: Float = 100
-    private var attachedItems = NSHashTable<AVPlayerItem>.weakObjects()
-    private var tapSampleRate: Double = 44100
-    private var tapIsFloatPCM = false
-    private var tapStates: [[BiquadState]] = []
+    // Attachment bookkeeping is separate from the audio callback's parameter lock.
+    // The lock covers the entire install/restore transaction so async callers cannot
+    // race and install duplicate taps on the same AVPlayerItem.
+    private let attachmentLock = NSRecursiveLock()
+    private final class AttachmentRecord {
+        weak var item: AVPlayerItem?
+        let originalMix: AVAudioMix?
+        let installedMix: AVAudioMix
+        init(item: AVPlayerItem, originalMix: AVAudioMix?, installedMix: AVAudioMix) {
+            self.item = item
+            self.originalMix = originalMix
+            self.installedMix = installedMix
+        }
+    }
+    private var attachmentRecords: [ObjectIdentifier: AttachmentRecord] = [:]
 
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
@@ -90,9 +101,9 @@ public final class TrapTubeEQManager: NSObject {
     /// Attach after AVAsset has finished loading its audio-track metadata.
     /// This avoids the synchronous empty-track race when YouTube replaces items.
     public func attachWhenReady(to item: AVPlayerItem) async -> Bool {
-        lock.lock()
-        let alreadyAttached = attachedItems.contains(item)
-        lock.unlock()
+        attachmentLock.lock()
+        let alreadyAttached = attachmentRecords[ObjectIdentifier(item)]?.item === item
+        attachmentLock.unlock()
         if alreadyAttached { return true }
 
         do {
@@ -123,13 +134,25 @@ public final class TrapTubeEQManager: NSObject {
             NSLog("[TrapTube EQ] Player item has no loaded audio tracks")
             return false
         }
-        lock.lock()
-        let alreadyAttached = attachedItems.contains(item)
-        lock.unlock()
-        if alreadyAttached { return true }
+        attachmentLock.lock()
+        defer { attachmentLock.unlock() }
+        let itemID = ObjectIdentifier(item)
+        if attachmentRecords[itemID]?.item === item { return true }
+
+        let originalMix = item.audioMix
+        // A second processing tap on a track, or replacing existing per-track
+        // mix parameters, can silently disable host processing. Fail closed rather
+        // than altering an audio mix we do not own.
+        if let originalMix,
+           originalMix.inputParameters.contains(where: { existing in
+               tracks.contains(where: { $0.trackID == existing.trackID })
+           }) {
+            NSLog("[TrapTube EQ] Existing host audio-mix parameters found; leaving host mix untouched")
+            return false
+        }
 
         let mix = AVMutableAudioMix()
-        var parameters: [AVAudioMixInputParameters] = []
+        var parameters: [AVAudioMixInputParameters] = originalMix?.inputParameters ?? []
         for track in tracks {
             let input = AVMutableAudioMixInputParameters(track: track)
             var callbacks = MTAudioProcessingTapCallbacks(
@@ -168,18 +191,25 @@ public final class TrapTubeEQManager: NSObject {
         }
         mix.inputParameters = parameters
         item.audioMix = mix
-        lock.lock()
-        attachedItems.add(item)
-        lock.unlock()
+        attachmentRecords[itemID] = AttachmentRecord(item: item, originalMix: originalMix, installedMix: mix)
         NSLog("[TrapTube EQ] Installed audio tap on %lu audio track(s)", UInt(tracks.count))
         return true
     }
 
     public func detach(from item: AVPlayerItem) {
-        item.audioMix = nil
-        lock.lock()
-        attachedItems.remove(item)
-        lock.unlock()
+        attachmentLock.lock()
+        defer { attachmentLock.unlock() }
+        let itemID = ObjectIdentifier(item)
+        guard let record = attachmentRecords[itemID], record.item === item else {
+            attachmentRecords.removeValue(forKey: itemID)
+            return
+        }
+        // Restore only if our mix is still installed. If the host replaced it
+        // after attachment, do not overwrite that newer host-owned mix.
+        if item.audioMix === record.installedMix {
+            item.audioMix = record.originalMix
+        }
+        attachmentRecords.removeValue(forKey: itemID)
     }
 
     /// Use this engine path for audio files/stems owned and decoded by TrapTube.
