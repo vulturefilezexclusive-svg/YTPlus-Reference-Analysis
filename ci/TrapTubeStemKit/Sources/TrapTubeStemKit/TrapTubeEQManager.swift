@@ -196,6 +196,7 @@ public final class TrapTubeEQManager: NSObject {
         defer { attachmentLock.unlock() }
         let itemID = ObjectIdentifier(item)
         if attachmentRecords[itemID]?.item === item { return true }
+        setAttachmentStatus("Installing the EQ tap on this stream...")
 
         let originalMix = item.audioMix
         // Host parameters that carry no processing tap of their own can be
@@ -289,6 +290,7 @@ public final class TrapTubeEQManager: NSObject {
             guard status == noErr, let tap else {
                 // Creation did not transfer the retained client context to a tap.
                 retainedTapContext.release()
+                setAttachmentStatus("The system rejected the EQ audio tap")
                 NSLog("[TrapTube EQ] MediaToolbox rejected audio tap creation (status=%d)", status)
                 return false
             }
