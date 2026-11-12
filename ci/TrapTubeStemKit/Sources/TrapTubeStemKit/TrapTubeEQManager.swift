@@ -60,7 +60,7 @@ public final class TrapTubeEQManager: NSObject {
     }
 
     public func bandGain(at index: Int) -> Float {
-        guard frequencies.indices.contains(index) else { return 0 }
+        guard Self.frequencies.indices.contains(index) else { return 0 }
         lock.lock(); defer { lock.unlock() }; return bandGains[index]
     }
 
@@ -78,7 +78,7 @@ public final class TrapTubeEQManager: NSObject {
     public func setMasterGainPercent(_ percent: Float) {
         let value = min(200, max(0, percent))
         lock.lock(); masterPercent = value; lock.unlock()
-        // AVAudioUnitGain uses dB; 0% is silence and 200% is +6.02 dB.
+        // AVAudioUnitEQ globalGain provides the 0-200% master gain range.
         UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Master")
         engineEQ.globalGain = value == 0 ? -96 : 20 * log10(value / 100)
     }
@@ -116,7 +116,8 @@ public final class TrapTubeEQManager: NSObject {
                 unprepare: { _ in },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
                     let status = MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut)
-                    guard status == noErr, let raw = MTAudioProcessingTapGetStorage(tap) else { return }
+                    guard status == noErr else { return }
+                    let raw = MTAudioProcessingTapGetStorage(tap)
                     let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
                     manager.processTapBuffers(bufferList, frameCount: Int(framesOut.pointee))
                 })
@@ -159,7 +160,7 @@ public final class TrapTubeEQManager: NSObject {
         for index in 0..<16 {
             let band = engineEQ.bands[index]
             band.filterType = .parametric
-            band.frequency = frequencies[index]
+            band.frequency = Self.frequencies[index]
             band.bandwidth = 1.0
             band.gain = 0
             band.bypass = false
@@ -169,11 +170,6 @@ public final class TrapTubeEQManager: NSObject {
         shelf.frequency = 100
         shelf.gain = 0
         shelf.bypass = false
-        limiter.threshold = -1.0
-        limiter.headRoom = 0.5
-        limiter.attackTime = 0.001
-        limiter.releaseTime = 0.08
-        limiter.masterGain = 0
         engine.connect(playerNode, to: engineEQ, format: nil)
         engine.connect(engineEQ, to: limiter, format: nil)
         engine.connect(limiter, to: engine.mainMixerNode, format: nil)
