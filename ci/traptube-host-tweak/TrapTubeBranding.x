@@ -272,7 +272,7 @@ static BOOL TTShouldHideSettingsSection(NSString *title) {
     if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
     NSString *value = title.lowercaseString;
     NSArray<NSString *> *hiddenSections = @[
-        @"account", @"developer", @"dayanch96", @"credits", @"special thanks", @"discord", @"social", @"support",
+        @"developer", @"dayanch96", @"credits", @"special thanks", @"discord", @"social", @"support",
         @"github", @"telegram", @"twitter", @"open source", @"contributors",
         @"feedback", @"traptube plus 6.0 b2"
     ];
@@ -303,7 +303,7 @@ static BOOL TTShouldHideSettingsItem(id item) {
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
         @"discord rpc", @"discord rich presence", @"discord",
         @"twitter", @"support", @"github", @"telegram", @"social",
-        @"account", @"developer", @"dayanch96", @"credits", @"special thanks", @"open source", @"contributors", @"feedback",
+        @"developer", @"dayanch96", @"credits", @"special thanks", @"open source", @"contributors", @"feedback",
         @"volumeboostyt", @"enable volumeboostyt", @"remember volume"
     ];
     for (NSString *label in hiddenLabels) {
@@ -317,10 +317,10 @@ static BOOL TTShouldHideRenderedSettingsText(NSString *text) {
     NSString *value = text.lowercaseString;
     NSArray<NSString *> *removed = @[
         @"subscription status", @"manage account", @"log out", @"logout", @"sign out",
-        @"discord rpc", @"discord rich presence", @"dayanch96",
-        @"support development", @"github repository", @"my telegram channel",
-        @"contributors", @"open source libraries", @"special thanks",
-        @"traptube plus 6.0 b2"
+        @"discord rpc", @"discord rich presence", @"discord", @"dayanch96",
+        @"support development", @"github repository", @"my telegram channel", @"telegram",
+        @"contributors", @"open source libraries", @"special thanks", @"twitter", @"social",
+        @"feedback", @"traptube plus 6.0 b2"
     ];
     for (NSString *needle in removed) {
         if ([value containsString:needle]) return YES;
@@ -747,158 +747,8 @@ static BOOL TTIsYTLiteSettingsSection(NSString *title, NSArray *items) {
 
 #pragma mark - Stream volume boost controls
 
-@interface TrapTubeAudioBoostViewController : UIViewController
-@property(nonatomic, strong) UISwitch *boostSwitch;
-@property(nonatomic, strong) UISlider *gainSlider;
-@property(nonatomic, strong) UILabel *gainValueLabel;
-@end
-
-@implementation TrapTubeAudioBoostViewController
-
-- (void)viewDidLoad {
-    [super viewDidLoad];
-    self.title = @"Stream Volume Boost";
-    self.view.backgroundColor = TTStemBackgroundColor();
-
-    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
-    BOOL enabled = [defaults boolForKey:@"VolumeBoostYTEnabled"];
-    NSNumber *savedGain = [defaults objectForKey:@"CustomYouTubeVolumeScalar"];
-    float gain = savedGain ? savedGain.floatValue : 1.0f;
-
-    UIScrollView *scroll = [[UIScrollView alloc] init];
-    scroll.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:scroll];
-
-    UIStackView *stack = [[UIStackView alloc] init];
-    stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 18;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [scroll addSubview:stack];
-
-    UILabel *heading = [[UILabel alloc] init];
-    heading.text = @"Turn up your stream";
-    heading.font = [UIFont systemFontOfSize:25 weight:UIFontWeightHeavy];
-    heading.textColor = UIColor.whiteColor;
-    [stack addArrangedSubview:heading];
-
-    UILabel *subtitle = [[UILabel alloc] init];
-    subtitle.text = @"Use the existing YTPlus audio gain processor to raise supported video playback above the normal 100% level.";
-    subtitle.font = [UIFont systemFontOfSize:14 weight:UIFontWeightRegular];
-    subtitle.textColor = [UIColor.whiteColor colorWithAlphaComponent:0.68];
-    subtitle.numberOfLines = 0;
-    [stack addArrangedSubview:subtitle];
-
-    UIView *card = [[UIView alloc] init];
-    card.backgroundColor = TTColorFromHex(@"141417");
-    card.layer.cornerRadius = 18;
-    [stack addArrangedSubview:card];
-
-    UIStackView *controls = [[UIStackView alloc] init];
-    controls.axis = UILayoutConstraintAxisVertical;
-    controls.spacing = 16;
-    controls.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:controls];
-
-    UIStackView *toggleRow = [[UIStackView alloc] init];
-    toggleRow.axis = UILayoutConstraintAxisHorizontal;
-    toggleRow.alignment = UIStackViewAlignmentCenter;
-    UILabel *toggleTitle = [[UILabel alloc] init];
-    toggleTitle.text = @"Enable stream boost";
-    toggleTitle.font = [UIFont systemFontOfSize:16 weight:UIFontWeightSemibold];
-    toggleTitle.textColor = UIColor.whiteColor;
-    [toggleRow addArrangedSubview:toggleTitle];
-    [toggleRow addArrangedSubview:[[UIView alloc] init]];
-    self.boostSwitch = [[UISwitch alloc] init];
-    self.boostSwitch.onTintColor = TTAccentColor();
-    self.boostSwitch.on = enabled;
-    [self.boostSwitch addTarget:self action:@selector(boostSwitchChanged:) forControlEvents:UIControlEventValueChanged];
-    [toggleRow addArrangedSubview:self.boostSwitch];
-    [controls addArrangedSubview:toggleRow];
-
-    UIView *separator = [[UIView alloc] init];
-    separator.backgroundColor = [UIColor.whiteColor colorWithAlphaComponent:0.09];
-    [controls addArrangedSubview:separator];
-    [separator.heightAnchor constraintEqualToConstant:1].active = YES;
-
-    UILabel *gainTitle = [[UILabel alloc] init];
-    gainTitle.text = @"Boost amount";
-    gainTitle.font = [UIFont systemFontOfSize:15 weight:UIFontWeightBold];
-    gainTitle.textColor = UIColor.whiteColor;
-    [controls addArrangedSubview:gainTitle];
-
-    self.gainValueLabel = [[UILabel alloc] init];
-    self.gainValueLabel.font = [UIFont monospacedDigitSystemFontOfSize:14 weight:UIFontWeightBold];
-    self.gainValueLabel.textColor = TTAccentColor();
-    [controls addArrangedSubview:self.gainValueLabel];
-
-    self.gainSlider = [[UISlider alloc] init];
-    self.gainSlider.minimumValue = 1.0f;
-    self.gainSlider.maximumValue = 20.0f;
-    self.gainSlider.minimumTrackTintColor = TTAccentColor();
-    self.gainSlider.maximumTrackTintColor = [UIColor.whiteColor colorWithAlphaComponent:0.18];
-    self.gainSlider.value = MIN(20.0f, MAX(1.0f, gain));
-    [self.gainSlider addTarget:self action:@selector(gainSliderChanged:) forControlEvents:UIControlEventValueChanged];
-    [controls addArrangedSubview:self.gainSlider];
-
-    UILabel *range = [[UILabel alloc] init];
-    range.text = @"Normal 100%  ·  Up to +20 dB / 10× signal amplitude";
-    range.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-    range.textColor = TTStemMutedColor();
-    range.numberOfLines = 0;
-    [controls addArrangedSubview:range];
-
-    UILabel *warning = [[UILabel alloc] init];
-    warning.text = @"Large boosts can cause clipping, distortion, or uncomfortable playback levels. Start low and reduce the boost if the sound becomes harsh.";
-    warning.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
-    warning.textColor = [UIColor colorWithRed:1 green:0.62 blue:0.42 alpha:1];
-    warning.numberOfLines = 0;
-    [stack addArrangedSubview:warning];
-
-    UILabel *restart = [[UILabel alloc] init];
-    restart.text = @"The gain level is cached by the bundled boost component. After changing the slider, fully close and reopen TrapTube to reload the new gain level.";
-    restart.font = [UIFont systemFontOfSize:11 weight:UIFontWeightRegular];
-    restart.textColor = TTStemMutedColor();
-    restart.numberOfLines = 0;
-    [stack addArrangedSubview:restart];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-        [scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
-        [scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-        [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor constant:20],
-        [stack.bottomAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.bottomAnchor constant:-24],
-        [stack.leadingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.leadingAnchor constant:18],
-        [stack.trailingAnchor constraintEqualToAnchor:scroll.frameLayoutGuide.trailingAnchor constant:-18],
-        [controls.topAnchor constraintEqualToAnchor:card.topAnchor constant:18],
-        [controls.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-18],
-        [controls.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:16],
-        [controls.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-16]
-    ]];
-    [self updateGainLabel];
-}
-
-- (void)boostSwitchChanged:(UISwitch *)sender {
-    [NSUserDefaults.standardUserDefaults setBool:sender.isOn forKey:@"VolumeBoostYTEnabled"];
-    [NSUserDefaults.standardUserDefaults synchronize];
-}
-
-- (void)gainSliderChanged:(UISlider *)sender {
-    float snapped = roundf(sender.value);
-    sender.value = snapped;
-    [NSUserDefaults.standardUserDefaults setFloat:snapped forKey:@"CustomYouTubeVolumeScalar"];
-    [NSUserDefaults.standardUserDefaults synchronize];
-    [self updateGainLabel];
-}
-
-- (void)updateGainLabel {
-    float scalar = self.gainSlider.value;
-    float decibels = 20.0f * (scalar - 1.0f) / 19.0f;
-    float multiplier = powf(10.0f, (scalar - 1.0f) / 19.0f);
-    self.gainValueLabel.text = [NSString stringWithFormat:@"+%.1f dB  ·  %.2f×", decibels, multiplier];
-}
-
-@end
+// The controls are hosted in SwiftUI by TrapTubeAudioBoostFactory. This keeps
+// the settings destination consistent with the native Stem Studio surfaces.
 
 #pragma mark - Settings registration
 
@@ -917,14 +767,12 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
 
     BOOL appearanceAdded = NO;
     BOOL boostAdded = NO;
-    BOOL eqAdded = NO;
     for (id item in items) {
         NSString *identifier = [item respondsToSelector:@selector(accessibilityIdentifier)] ? [item accessibilityIdentifier] : nil;
         if ([identifier isEqualToString:@"TrapTubeAppearance"]) appearanceAdded = YES;
         if ([identifier isEqualToString:@"TrapTubeStreamVolumeBoost"]) boostAdded = YES;
-        if ([identifier isEqualToString:@"TrapTubeEqualizer"]) eqAdded = YES;
     }
-    if (appearanceAdded && boostAdded && eqAdded) return;
+    if (appearanceAdded && boostAdded) return;
 
     __weak YTSettingsViewController *weakSettings = settings;
     Class settingsItemClass = NSClassFromString(@"YTSettingsSectionItem");
@@ -941,24 +789,7 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
         id boostSelect = ^BOOL(id cell, NSUInteger index) {
             __strong YTSettingsViewController *strongSettings = weakSettings;
             if (!strongSettings) return NO;
-            TrapTubeAudioBoostViewController *controller = [[TrapTubeAudioBoostViewController alloc] init];
-            [strongSettings pushViewController:controller];
-            return YES;
-        };
-        id boost = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
-            settingsItemClass, itemFactory, @"Stream Volume Boost", @"TrapTubeStreamVolumeBoost", boostDetail, boostSelect
-        );
-        if (boost) [items insertObject:boost atIndex:0];
-    }
-
-    if (!eqAdded) {
-        id eqDetail = ^NSString *{
-            return @"16-band graphic EQ, bass boost and master gain";
-        };
-        id eqSelect = ^BOOL(id cell, NSUInteger index) {
-            __strong YTSettingsViewController *strongSettings = weakSettings;
-            if (!strongSettings) return NO;
-            Class factory = NSClassFromString(@"TrapTubeEQFactory");
+            Class factory = NSClassFromString(@"TrapTubeAudioBoostFactory");
             SEL make = NSSelectorFromString(@"makeViewController");
             UIViewController *controller = nil;
             if (factory && [factory respondsToSelector:make]) {
@@ -968,10 +799,10 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
             [strongSettings pushViewController:controller];
             return YES;
         };
-        id eq = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
-            settingsItemClass, itemFactory, @"16-Band Equalizer", @"TrapTubeEqualizer", eqDetail, eqSelect
+        id boost = ((id (*)(id, SEL, id, id, id, id))objc_msgSend)(
+            settingsItemClass, itemFactory, @"Stream Volume Boost", @"TrapTubeStreamVolumeBoost", boostDetail, boostSelect
         );
-        if (eq) [items insertObject:eq atIndex:0];
+        if (boost) [items insertObject:boost atIndex:0];
     }
 
     if (!appearanceAdded) {
