@@ -19,7 +19,7 @@ public final class TrapTubeEQManager: NSObject {
     // race and install duplicate taps on the same AVPlayerItem.
     private let attachmentLock = NSRecursiveLock()
     private final class EQTapContext {
-        weak var manager: TrapTubeEQManager?
+        unowned let manager: TrapTubeEQManager
         var sampleRate: Double = 44100
         var isFloatPCM = false
         var states: [[BiquadState]] = []
@@ -178,8 +178,11 @@ public final class TrapTubeEQManager: NSObject {
                     let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
                     let format = processingFormat.pointee
                     context.sampleRate = max(8000, format.mSampleRate)
-                    context.isFloatPCM = (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
-                                         format.mBitsPerChannel == 32
+                    context.isFloatPCM = format.mFormatID == kAudioFormatLinearPCM &&
+                                         (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
+                                         (format.mFormatFlags & kAudioFormatFlagIsBigEndian) == 0 &&
+                                         format.mBitsPerChannel == 32 &&
+                                         format.mBytesPerFrame >= UInt32(MemoryLayout<Float>.size)
                     let channelCount = max(1, Int(format.mChannelsPerFrame))
                     if context.isFloatPCM {
                         if (format.mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0 {
@@ -207,7 +210,7 @@ public final class TrapTubeEQManager: NSObject {
                     guard status == noErr else { return }
                     let raw = MTAudioProcessingTapGetStorage(tap)
                     let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
-                    context.manager?.processTapBuffers(bufferList, frameCount: Int(framesOut.pointee), context: context)
+                    context.manager.processTapBuffers(bufferList, frameCount: Int(framesOut.pointee), context: context)
                 })
             var tap: MTAudioProcessingTap?
             let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks,
