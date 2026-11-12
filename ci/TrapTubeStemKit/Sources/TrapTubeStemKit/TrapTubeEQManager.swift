@@ -87,8 +87,25 @@ public final class TrapTubeEQManager: NSObject {
         lock.lock(); defer { lock.unlock() }; return masterPercent
     }
 
-    /// Configure an AVPlayerItem audio mix tap. Returns false when the item has no
-    /// audio tracks or MediaToolbox refuses tap creation (possible with protected media).
+    /// Attach after AVAsset has finished loading its audio-track metadata.
+    /// This avoids the synchronous empty-track race when YouTube replaces items.
+    public func attachWhenReady(to item: AVPlayerItem) async -> Bool {
+        lock.lock()
+        let alreadyAttached = attachedItems.contains(item)
+        lock.unlock()
+        if alreadyAttached { return true }
+
+        do {
+            let tracks = try await item.asset.load(.tracks)
+            guard !Task.isCancelled else { return false }
+            return attach(to: item, tracks: tracks.filter { $0.mediaType == .audio })
+        } catch {
+            NSLog("[TrapTube EQ] Unable to load player audio tracks: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    /// Synchronous compatibility path for callers whose asset tracks are already loaded.
     @discardableResult
     public func attachToPlayer(_ player: AVPlayer) -> Bool {
         guard let item = player.currentItem else { return false }
@@ -97,10 +114,23 @@ public final class TrapTubeEQManager: NSObject {
 
     @discardableResult
     public func attach(to item: AVPlayerItem) -> Bool {
-        guard !item.asset.tracks(withMediaType: .audio).isEmpty else { return false }
+        attach(to: item, tracks: item.asset.tracks(withMediaType: .audio))
+    }
+
+    @discardableResult
+    private func attach(to item: AVPlayerItem, tracks: [AVAssetTrack]) -> Bool {
+        guard !tracks.isEmpty else {
+            NSLog("[TrapTube EQ] Player item has no loaded audio tracks")
+            return false
+        }
+        lock.lock()
+        let alreadyAttached = attachedItems.contains(item)
+        lock.unlock()
+        if alreadyAttached { return true }
+
         let mix = AVMutableAudioMix()
         var parameters: [AVAudioMixInputParameters] = []
-        for track in item.asset.tracks(withMediaType: .audio) {
+        for track in tracks {
             let input = AVMutableAudioMixInputParameters(track: track)
             var callbacks = MTAudioProcessingTapCallbacks(
                 version: kMTAudioProcessingTapCallbacksVersion_0,
@@ -110,8 +140,13 @@ public final class TrapTubeEQManager: NSObject {
                 prepare: { tap, _, processingFormat in
                     let raw = MTAudioProcessingTapGetStorage(tap)
                     let manager = Unmanaged<TrapTubeEQManager>.fromOpaque(raw).takeUnretainedValue()
-                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate,
-                                         isFloatPCM: (processingFormat.pointee.mFormatFlags & kAudioFormatFlagIsFloat) != 0)
+                    let flags = processingFormat.pointee.mFormatFlags
+                    let isFloat = (flags & kAudioFormatFlagIsFloat) != 0
+                    manager.configureTap(sampleRate: processingFormat.pointee.mSampleRate, isFloatPCM: isFloat)
+                    if !isFloat {
+                        NSLog("[TrapTube EQ] Unsupported decoded PCM format (flags=0x%x, bits=%u); EQ tap will pass audio unchanged",
+                              flags, processingFormat.pointee.mBitsPerChannel)
+                    }
                 },
                 unprepare: { _ in },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
@@ -124,13 +159,19 @@ public final class TrapTubeEQManager: NSObject {
             var tap: MTAudioProcessingTap?
             let status = MTAudioProcessingTapCreate(kCFAllocatorDefault, &callbacks,
                                                     kMTAudioProcessingTapCreationFlag_PostEffects, &tap)
-            guard status == noErr, let tap else { return false }
+            guard status == noErr, let tap else {
+                NSLog("[TrapTube EQ] MediaToolbox rejected audio tap creation (status=%d)", status)
+                return false
+            }
             input.audioTapProcessor = tap
             parameters.append(input)
         }
         mix.inputParameters = parameters
         item.audioMix = mix
+        lock.lock()
         attachedItems.add(item)
+        lock.unlock()
+        NSLog("[TrapTube EQ] Installed audio tap on %lu audio track(s)", UInt(tracks.count))
         return true
     }
 
