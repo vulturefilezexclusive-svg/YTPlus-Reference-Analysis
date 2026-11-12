@@ -122,8 +122,8 @@ static void TTApplyAccentGlobally(void) {
     navigation.tintColor = accent;
     navigation.barTintColor = background;
     navigation.barStyle = UIBarStyleBlack;
-    navigation.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: TTBrandDisplayFont(20) };
-    navigation.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: TTBrandDisplayFont(32) };
+    navigation.titleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold] };
+    navigation.largeTitleTextAttributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor, NSFontAttributeName: [UIFont systemFontOfSize:32 weight:UIFontWeightBold] };
 
     UITabBar *tabs = [UITabBar appearance];
     tabs.tintColor = accent;
@@ -1351,12 +1351,20 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
 
 %hook UINavigationItem
 - (void)setTitle:(NSString *)title {
-    %orig(TTRebrandedHostText(title));
-    if (TTIsTrapTubeBrandText(title)) {
-        NSDictionary *attributes = @{ NSForegroundColorAttributeName: UIColor.whiteColor,
-                                       NSFontAttributeName: TTBrandDisplayFont(20) };
-        self.navigationBar.standardAppearance.titleTextAttributes = attributes;
-        self.navigationBar.scrollEdgeAppearance.titleTextAttributes = attributes;
+    NSString *displayTitle = TTRebrandedHostText(title);
+    %orig(displayTitle);
+    if (TTIsTrapTubeBrandText(displayTitle)) {
+        UILabel *brandTitle = [[UILabel alloc] init];
+        brandTitle.text = displayTitle;
+        brandTitle.font = TTBrandDisplayFont(20);
+        brandTitle.textColor = UIColor.whiteColor;
+        brandTitle.textAlignment = NSTextAlignmentCenter;
+        brandTitle.layer.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.9].CGColor;
+        brandTitle.layer.shadowOffset = CGSizeMake(0, 1);
+        brandTitle.layer.shadowRadius = 2.0;
+        brandTitle.layer.shadowOpacity = 0.7;
+        [brandTitle sizeToFit];
+        self.titleView = brandTitle;
     }
 }
 %end
