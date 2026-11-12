@@ -214,6 +214,43 @@ private final class TrapTubeStemModel: ObservableObject {
         runSeparation()
     }
 
+    /// Exact byte sizes of the published weights files. The engine's own
+    /// cache check only tests that a file exists, so a damaged download
+    /// would otherwise poison every load attempt with a native panic.
+    private static let expectedWeightsBytes: [String: Int64] = [
+        "htdemucs": 84_030_696,
+        "htdemucs_6s": 54_890_960,
+        "htdemucs_ft": 336_125_008
+    ]
+
+    /// Structural validation of a downloaded weights file: exact size plus a
+    /// safetensors header whose tensor offsets end exactly at end-of-file.
+    static func weightsFileIsValid(_ model: DemucsModel) -> Bool {
+        guard let url = DemucsEngine.downloadedFileURL(for: model) else { return false }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = (attrs[.size] as? NSNumber)?.int64Value, size > 16 else { return false }
+        if let expected = expectedWeightsBytes[DemucsEngine.info(for: model).id], size != expected {
+            return false
+        }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let prefix = try? handle.read(upToCount: 8), prefix.count == 8 else { return false }
+        var headerLength: UInt64 = 0
+        for (index, byte) in prefix.enumerated() { headerLength |= UInt64(byte) << UInt64(index * 8) }
+        guard headerLength > 0, headerLength < UInt64(size) - 8,
+              let headerData = try? handle.read(upToCount: Int(headerLength)),
+              headerData.count == Int(headerLength),
+              let header = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any]
+        else { return false }
+        var maxEnd: UInt64 = 0
+        for (key, value) in header where key != "__metadata__" {
+            guard let tensor = value as? [String: Any],
+                  let offsets = tensor["data_offsets"] as? [Int], offsets.count == 2 else { return false }
+            maxEnd = max(maxEnd, UInt64(offsets[1]))
+        }
+        return 8 + headerLength + maxEnd == UInt64(size)
+    }
+
     private func runSeparation() {
         guard let selectedFile, !isProcessing else { return }
         isProcessing = true
@@ -236,6 +273,12 @@ private final class TrapTubeStemModel: ObservableObject {
                 }
                 stage = "HTDemucs model loading"
                 await self.setStatus("Loading HTDemucs…", progress: 0.02)
+                if DemucsEngine.isDownloaded(selectedModel),
+                   !Self.weightsFileIsValid(selectedModel) {
+                    _ = DemucsEngine.deleteDownload(selectedModel)
+                    throw NSError(domain: "TrapTubeStemKit", code: 13,
+                                  userInfo: [NSLocalizedDescriptionKey: "The downloaded model file was corrupt (it failed an integrity check) and has been deleted. Tap Separate again to download a clean copy."])
+                }
                 try await engine.load(selectedModel)
                 stage = "Metal GPU warmup"
                 await self.setStatus("Preparing Metal inference…", progress: 0.05)
@@ -274,7 +317,15 @@ private final class TrapTubeStemModel: ObservableObject {
             } catch {
                 let detail = "\(stage) failed: \(error.localizedDescription)"
                 NSLog("[TrapTube Stem Studio] %@", detail)
-                await self.fail(detail)
+                if detail.contains("worker panicked") {
+                    // The native loader crashed. Drop the cached weights so
+                    // the next attempt starts from a clean download, and say
+                    // so plainly instead of surfacing the raw panic text.
+                    _ = DemucsEngine.deleteDownload(selectedModel)
+                    await self.fail("The model engine crashed while loading (stage: \(stage)). The cached model was deleted - tap Separate to download a fresh copy. If it crashes again on a fresh download, try the standard HTDemucs model instead of the fine-tuned one.")
+                } else {
+                    await self.fail(detail)
+                }
             }
         }
     }
