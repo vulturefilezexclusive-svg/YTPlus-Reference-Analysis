@@ -128,6 +128,15 @@ public final class TrapTubeEQManager: NSObject {
         lock.lock(); defer { lock.unlock() }; return attachmentStatusText
     }
 
+    private var hookFiredCount = 0
+
+    /// Diagnostic probe: called from the tweak's player/item hooks so the EQ
+    /// page's live status proves the hooks fired and how far attach got.
+    @objc public func noteHookFired(_ source: String) {
+        lock.lock(); hookFiredCount += 1; let count = hookFiredCount; lock.unlock()
+        setAttachmentStatus("Player hook fired (\(source) #\(count)) - attaching...")
+    }
+
     public func setAttachmentStatus(_ text: String) {
         lock.lock(); attachmentStatusText = text; lock.unlock()
         NotificationCenter.default.post(name: Notification.Name("TrapTubeEQAttachmentStatusChanged"),
@@ -148,10 +157,15 @@ public final class TrapTubeEQManager: NSObject {
         attachmentLock.unlock()
         if alreadyAttached { return true }
 
+        setAttachmentStatus("Loading this stream's audio tracks...")
         do {
             let tracks = try await item.asset.load(.tracks)
             guard !Task.isCancelled else { return false }
-            return attach(to: item, tracks: tracks.filter { $0.mediaType == .audio })
+            let audioTracks = tracks.filter { $0.mediaType == .audio }
+            if !audioTracks.isEmpty {
+                setAttachmentStatus("Attaching EQ to the stream...")
+            }
+            return attach(to: item, tracks: audioTracks)
         } catch {
             setAttachmentStatus("Could not load this stream's audio tracks")
             NSLog("[TrapTube EQ] Unable to load player audio tracks: %@", error.localizedDescription)
