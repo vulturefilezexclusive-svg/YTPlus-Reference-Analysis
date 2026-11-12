@@ -352,7 +352,14 @@ jobs:
           grep -Fq 'struct BiquadState' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'struct BiquadCoefficients' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           grep -Fq 'TrapTubeAudioHook' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
-          grep -Fq 'TrapTubeEqualizer' ci/traptube-host-tweak/TrapTubeBranding.x
+          # EQ is intentionally hosted inside Stem Studio now; do not require
+          # the removed standalone YTPlus settings row identifier.
+          grep -Fq 'private var equalizerPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'private var stemSeparationPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'pageButton("Equalizer"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq '.tabViewStyle(.page(indexDisplayMode: .never))' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TrapTubeAudioBoostFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
+          grep -Fq 'TrapTubeAudioBoostFactory' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'case .balanced: .fourStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'case .sixStem: .sixStem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'case .fineTuned: .fineTunedAll' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
