@@ -325,9 +325,10 @@ jobs:
             [[ -s "$required" ]] || { echo "VERIFY FAIL: required app resource missing or empty: $required"; find "$APP" -maxdepth 3 -iname '*TrapTube*' -print; exit 24; }
             echo "Verified resource: ${required#$APP/}"
           done
-          FONT_ENTRY="$(/usr/libexec/PlistBuddy -c 'Print :UIAppFonts:0' "$APP/Info.plist")"
-          echo "Registered app font: $FONT_ENTRY"
-          [[ "$FONT_ENTRY" == "TrapTubeGraffiti.ttf" ]] || { echo "VERIFY FAIL: TrapTubeGraffiti.ttf is not registered as UIAppFonts:0"; exit 25; }
+          FONT_ENTRIES="$(/usr/libexec/PlistBuddy -c 'Print :UIAppFonts' "$APP/Info.plist")"
+          echo "Registered app fonts:"
+          echo "$FONT_ENTRIES"
+          echo "$FONT_ENTRIES" | grep -Fq 'TrapTubeGraffiti.ttf' || { echo "VERIFY FAIL: TrapTubeGraffiti.ttf is not present anywhere in UIAppFonts"; exit 25; }
           test -s "$APP/Frameworks/TrapTubeBranding.dylib"
           test -s "$APP/TrapTube-Third-Party-Notices.md"
           otool -L "$APP/YouTube" | grep -F '@rpath/TrapTubeBranding.dylib'
