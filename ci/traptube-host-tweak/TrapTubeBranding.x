@@ -57,7 +57,8 @@ static void TTInstallPlayerEQHook(id player) {
 #pragma mark - TrapTube accent
 
 static UIFont *TTBrandDisplayFont(CGFloat size) {
-    UIFont *font = [UIFont fontWithName:@"MarkerFelt-Wide" size:size];
+    UIFont *font = [UIFont fontWithName:@"RubikSprayPaint-Regular" size:size];
+    if (!font) font = [UIFont fontWithName:@"MarkerFelt-Wide" size:size];
     if (!font) font = [UIFont fontWithName:@"AvenirNextCondensed-HeavyItalic" size:size];
     if (!font) font = [UIFont systemFontOfSize:size weight:UIFontWeightBlack];
     return font;
