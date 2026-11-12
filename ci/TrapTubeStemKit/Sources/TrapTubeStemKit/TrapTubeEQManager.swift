@@ -130,6 +130,8 @@ public final class TrapTubeEQManager: NSObject {
 
     public func setAttachmentStatus(_ text: String) {
         lock.lock(); attachmentStatusText = text; lock.unlock()
+        NotificationCenter.default.post(name: Notification.Name("TrapTubeEQAttachmentStatusChanged"),
+                                        object: nil, userInfo: ["status": text])
     }
 
     public func resetAll() {
