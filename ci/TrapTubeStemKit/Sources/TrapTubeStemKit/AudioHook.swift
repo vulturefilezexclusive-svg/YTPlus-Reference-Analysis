@@ -17,6 +17,21 @@ public final class TrapTubeAudioHook: NSObject {
     /// into existence or receives an audio mix, whoever created it. The
     /// manager de-dupes per item, so repeated calls are cheap no-ops.
     @objc public static func attachInBackground(to item: AVPlayerItem) {
+        TrapTubeEQManager.shared.noteHookFired("player item")
+        // Fast path: for an item whose tracks are already loaded (the usual
+        // case once playback is starting) attach synchronously. The async
+        // below stalls forever on some host assets whose track loading only
+        // completes inside the player's own pipeline.
+        if !item.asset.tracks(withMediaType: .audio).isEmpty,
+           TrapTubeEQManager.shared.attach(to: item) {
+            return
+        }
+        attachWhenReadyInBackground(to: item)
+    }
+
+    /// Async-only attach for very hot call sites (the audioMix getter hook),
+    /// where a synchronous attach could re-enter itself.
+    @objc public static func attachWhenReadyInBackground(to item: AVPlayerItem) {
         Task {
             let attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
             if attached {
@@ -26,6 +41,7 @@ public final class TrapTubeAudioHook: NSObject {
     }
 
     @objc public func install(on player: AVPlayer) {
+        TrapTubeEQManager.shared.noteHookFired("player")
         invalidate()
         self.player = player
         itemObservation = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] observedPlayer, _ in
@@ -76,7 +92,13 @@ public final class TrapTubeAudioHook: NSObject {
         attachmentTask?.cancel()
         attachmentTask = Task { [weak self, weak item] in
             guard let item else { return }
-            let attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
+            var attached = false
+            if !item.asset.tracks(withMediaType: .audio).isEmpty {
+                attached = TrapTubeEQManager.shared.attach(to: item)
+            }
+            if !attached {
+                attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
+            }
             guard !Task.isCancelled else {
                 TrapTubeEQManager.shared.detach(from: item)
                 return
