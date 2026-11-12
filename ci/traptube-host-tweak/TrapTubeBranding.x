@@ -66,10 +66,6 @@ static UIColor *TTStemBackgroundColor(void) {
     return TTColorFromHex(@"080809");
 }
 
-static UIColor *TTStemSurfaceColor(void) {
-    return [UIColor colorWithWhite:1.0 alpha:0.055];
-}
-
 static UIColor *TTStemMutedColor(void) {
     return TTColorFromHex(@"A6A4A6");
 }
@@ -134,9 +130,11 @@ static void TTApplyStemStudioSurfaceToView(UIView *view) {
         UITableViewCell *cell = (UITableViewCell *)view;
         cell.backgroundColor = surface;
         cell.contentView.backgroundColor = surface;
-        UIView *selected = [[UIView alloc] initWithFrame:cell.bounds];
-        selected.backgroundColor = [UIColor.whiteColor colorWithAlphaComponent:0.075];
-        cell.selectedBackgroundView = selected;
+        if (!cell.selectedBackgroundView) {
+            UIView *selected = [[UIView alloc] initWithFrame:cell.bounds];
+            selected.backgroundColor = [UIColor.whiteColor colorWithAlphaComponent:0.075];
+            cell.selectedBackgroundView = selected;
+        }
     } else if ([view isKindOfClass:UISwitch.class]) {
         ((UISwitch *)view).onTintColor = accent;
     } else if ([view isKindOfClass:UISlider.class]) {
@@ -985,6 +983,15 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
         return;
     }
     %orig(TTRebrandedHostText(text));
+}
+- (void)setAttributedText:(NSAttributedString *)text {
+    if (TTIsRemovedVersionFooter(text.string)) {
+        self.hidden = YES;
+        self.userInteractionEnabled = NO;
+        %orig(nil);
+        return;
+    }
+    %orig(text);
 }
 %end
 
