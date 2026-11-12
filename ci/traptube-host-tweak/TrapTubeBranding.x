@@ -1009,18 +1009,18 @@ static BOOL TTIsRemovedVersionFooter(NSString *text);
 
 static BOOL TTIsRemovedDVNCell(id cell) {
     if (!cell) return NO;
-    NSString *title = nil;
+    // TTShouldHideSettingsItem already reads an item's title (DVNCell exposes
+    // one) and matches it against the full removal list.
+    if (TTShouldHideSettingsItem(cell)) return YES;
     NSString *key = nil;
     NSString *identifier = nil;
     @try {
-        if ([cell respondsToSelector:@selector(title)]) title = [cell valueForKey:@"title"];
         if ([cell respondsToSelector:@selector(key)]) key = [cell valueForKey:@"key"];
         if ([cell respondsToSelector:@selector(identifier)]) identifier = [cell valueForKey:@"identifier"];
     } @catch (NSException *exception) {}
-    if ([title isKindOfClass:NSString.class] && title.length && TTShouldRemoveSettingsItem(title)) return YES;
-    NSString *identity = TTNormalizedSettingsKey([NSString stringWithFormat:@"%@ %@",
-                                                  [key isKindOfClass:NSString.class] ? key : @"",
-                                                  [identifier isKindOfClass:NSString.class] ? identifier : @""]);
+    NSString *identity = [NSString stringWithFormat:@"%@ %@",
+                            [key isKindOfClass:NSString.class] ? key : @"",
+                            [identifier isKindOfClass:NSString.class] ? identifier : @""].lowercaseString;
     if ([identity containsString:@"discord"]) return YES;
     if ([identity containsString:@"patreon"]) return YES;
     return NO;
