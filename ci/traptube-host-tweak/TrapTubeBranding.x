@@ -42,6 +42,14 @@ static char TTStemStudioControllerKey;
 
 static char TTPlayerEQHookAssociationKey;
 
+static void TTAttachEQToPlayerItem(id item) {
+    if (!item) return;
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL attachSelector = NSSelectorFromString(@"attachInBackgroundTo:");
+    if (!hookClass || ![hookClass respondsToSelector:attachSelector]) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(hookClass, attachSelector, item);
+}
+
 static void TTInstallPlayerEQHook(id player) {
     if (!player || objc_getAssociatedObject(player, &TTPlayerEQHookAssociationKey)) return;
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
@@ -856,6 +864,64 @@ static void TTPrepareSettingsItems(NSMutableArray *items, YTSettingsViewControll
     return result;
 }
 
+- (void)play {
+    %orig;
+    TTInstallPlayerEQHook(self);
+}
+
+- (void)playImmediatelyAtRate:(float)rate {
+    %orig;
+    TTInstallPlayerEQHook(self);
+}
+
+%end
+
+%hook AVPlayerItem
+
++ (instancetype)playerItemWithURL:(NSURL *)url {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
++ (instancetype)playerItemWithAsset:(AVAsset *)asset {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
++ (instancetype)playerItemWithAsset:(AVAsset *)asset automaticallyLoadedAssetKeys:(NSArray<NSString *> *)automaticallyLoadedAssetKeys {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
+- (instancetype)initWithURL:(NSURL *)url {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
+- (instancetype)initWithAsset:(AVAsset *)asset {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
+- (instancetype)initWithAsset:(AVAsset *)asset automaticallyLoadedAssetKeys:(NSArray<NSString *> *)automaticallyLoadedAssetKeys {
+    id result = %orig;
+    TTAttachEQToPlayerItem(result);
+    return result;
+}
+
+- (void)setAudioMix:(AVAudioMix *)audioMix {
+    %orig;
+    // Any code assigning this item a mix is a signal the item is entering a
+    // real playback pipeline. If our tap is not part of that mix, the Swift
+    // attach path re-checks and installs it (it de-dupes per item).
+    TTAttachEQToPlayerItem(self);
+}
+
 %end
 
 %hook AVQueuePlayer
@@ -1155,7 +1221,10 @@ static UIImage *TTTrapTubeWordmark(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         NSString *text = @"TrapTube";
-        UIFont *font = TTBrandDisplayFont(42);
+        // Keep the replacement close to the stock YouTube wordmark footprint
+        // (about 90x20 pt). The previous 42 pt render sprawled across headers
+        // and overlapped neighbouring buttons such as the settings gear.
+        UIFont *font = TTBrandDisplayFont(24);
         NSShadow *shadow = [[NSShadow alloc] init];
         shadow.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.95];
         shadow.shadowOffset = CGSizeMake(1.5, 1.5);
@@ -1168,9 +1237,9 @@ static UIImage *TTTrapTubeWordmark(void) {
             NSShadowAttributeName: shadow
         };
         CGSize textSize = [text sizeWithAttributes:attributes];
-        CGSize canvas = CGSizeMake(ceil(textSize.width + 8.0), 56.0);
+        CGSize canvas = CGSizeMake(ceil(textSize.width + 6.0), ceil(textSize.height + 6.0));
         UIGraphicsBeginImageContextWithOptions(canvas, NO, 0.0);
-        [text drawAtPoint:CGPointMake(4.0, (canvas.height - textSize.height) * 0.5)
+        [text drawAtPoint:CGPointMake(3.0, (canvas.height - textSize.height) * 0.5)
            withAttributes:attributes];
         wordmark = UIGraphicsGetImageFromCurrentImageContext();
         UIGraphicsEndImageContext();
