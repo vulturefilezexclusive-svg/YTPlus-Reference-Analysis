@@ -390,6 +390,7 @@ struct TrapTubeNativePlayerView: View {
     @State private var streamStatus = "Not attached yet"
     @State private var scrubbing = false
     @State private var scrubTime: Double = 0
+    @State private var showEQ = false
     @Environment(\.dismiss) private var dismiss
 
     private var accent: Color {
@@ -420,6 +421,9 @@ struct TrapTubeNativePlayerView: View {
         .onReceive(NotificationCenter.default.publisher(
             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
             if let status = note.userInfo?["status"] as? String { streamStatus = status }
+        }
+        .sheet(isPresented: $showEQ) {
+            TrapTubeEqualizerPanel()
         }
     }
 
@@ -537,9 +541,14 @@ struct TrapTubeNativePlayerView: View {
                         .foregroundStyle(.white)
                 }
                 Spacer()
-                Image(systemName: "hifispeaker.fill")
-                    .foregroundStyle(Color.white.opacity(0.0))
-                    .frame(width: 52, height: 40)
+                Button { showEQ = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 52, height: 40)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
 
             Text("This is TrapTube's own player, so the equalizer tap attaches to its audio. Adjust bands on the Equalizer tab - changes apply live. Pause the video in YouTube's own player first if it's also playing.")
@@ -560,12 +569,285 @@ struct TrapTubeNativePlayerView: View {
     }
 }
 
-// MARK: - Launcher (Stem Studio Player tab)
+// MARK: - Equalizer panel (presented from the player)
+//
+// The EQ controls used to be their own Stem Studio tab. They now live with
+// the player they actually affect: one tap on the player's EQ button opens
+// this panel, and every change applies live to the playing item through the
+// shared manager.
+
+struct TrapTubeEqualizerPanel: View {
+    @State private var streamStatus = "Not attached yet"
+    @Environment(\.dismiss) private var dismiss
+
+    private var manager: TrapTubeEQManager { TrapTubeEQManager.shared }
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Toggle("Equalizer enabled", isOn: Binding(
+                            get: { manager.isEQEnabled },
+                            set: { manager.setEQEnabled($0) }
+                        ))
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                        .tint(accent)
+                        HStack {
+                            Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Spacer()
+                            Text(streamStatus)
+                                .font(.caption.weight(.bold)).foregroundStyle(accent)
+                        }
+                        .onAppear { streamStatus = manager.attachmentStatus }
+                        .onReceive(NotificationCenter.default.publisher(
+                            for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
+                            if let status = note.userInfo?["status"] as? String { streamStatus = status }
+                        }
+                        Button("Reset EQ to flat") { manager.resetAll() }
+                            .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                    }
+                    .padding(16)
+                    .ttGlassCard(cornerRadius: 18)
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
+                                            range: 0...20, suffix: " dB") { manager.setBassBoost($0) }
+                        TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
+                                            range: 0...200, suffix: "%") { manager.setMasterGainPercent($0) }
+                    }
+                    .padding(16)
+                    .ttGlassCard(cornerRadius: 18)
+
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("16-BAND EQUALIZER").font(.caption.weight(.black))
+                            .tracking(1.5).foregroundStyle(accent)
+                        ForEach(Array(TrapTubeEQManager.frequencies.enumerated()), id: \.offset) { index, frequency in
+                            let label = frequency >= 1000
+                                ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
+                                   ? "\(Int(frequency / 1000)) kHz"
+                                   : String(format: "%.1f kHz", frequency / 1000))
+                                : "\(Int(frequency)) Hz"
+                            TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
+                                                range: -12...12, suffix: " dB") {
+                                manager.setBandGain($0, at: index)
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .ttGlassCard(cornerRadius: 18)
+
+                    Text("EQ applies to the TrapTube Player and to TrapTube-owned audio. YouTube's own player renders through its private pipeline and doesn't expose its audio.")
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(18)
+            }
+        }
+        .background {
+            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
+                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+// MARK: - Feed (Stem Studio Player tab)
+//
+// A YouTube-style home feed and search, backed by the same InnerTube
+// interface the resolver uses: browse (FEwhat_to_watch) for the
+// recommendation grid and search for queries. Signed out, recommendations
+// are YouTube's public picks; every row plays in the native player.
+
+struct TrapTubeFeedItem: Identifiable {
+    let videoID: String
+    let title: String
+    let channel: String
+    let duration: String?
+    let meta: String
+    let thumbnailURL: URL?
+    var id: String { videoID }
+}
+
+@MainActor
+final class TrapTubeFeedModel: ObservableObject {
+    @Published var items: [TrapTubeFeedItem] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    @Published var isSearching = false
+
+    private var continuation: String?
+    private var currentQuery: String?
+    private var generation = 0
+
+    func loadHome() async {
+        currentQuery = nil
+        isSearching = false
+        await load(reset: true) { token in
+            token == nil
+                ? ["browseId": "FEwhat_to_watch"]
+                : ["continuation": token as Any]
+        }
+    }
+
+    func search(_ query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { await loadHome(); return }
+        currentQuery = trimmed
+        isSearching = true
+        await load(reset: true) { token in
+            token == nil
+                ? ["query": trimmed, "params": "EgIQAQ%3D%3D"]
+                : ["query": trimmed, "continuation": token as Any]
+        }
+    }
+
+    func loadMore() async {
+        guard continuation != nil, !isLoading else { return }
+        if let query = currentQuery {
+            await load(reset: false) { token in
+                ["query": query, "continuation": token as Any]
+            }
+        } else {
+            await load(reset: false) { token in
+                ["continuation": token as Any]
+            }
+        }
+    }
+
+    private func load(reset: Bool, body: (String?) -> [String: Any]) async {
+        generation += 1
+        let run = generation
+        if reset {
+            continuation = nil
+            items = []
+            errorMessage = nil
+        }
+        isLoading = true
+        defer { if run == generation { isLoading = false } }
+        do {
+            let endpoint = (currentQuery != nil)
+                ? "https://www.youtube.com/youtubei/v1/search"
+                : "https://www.youtube.com/youtubei/v1/browse"
+            let json = try await TrapTubeInnerTube.post(endpoint: endpoint,
+                                                        body: body(continuation))
+            guard run == generation else { return }
+            var seen = Set(items.map { $0.videoID })
+            var found: [TrapTubeFeedItem] = []
+            var token: String?
+            Self.collect(node: json, items: &found, seen: &seen, continuation: &token)
+            if reset { items = found } else { items.append(contentsOf: found) }
+            continuation = token
+            if items.isEmpty && reset {
+                errorMessage = "YouTube returned no videos for this view."
+            }
+        } catch {
+            guard run == generation else { return }
+            if reset { errorMessage = "Couldn't load the feed: \(error.localizedDescription)" }
+        }
+    }
+
+    private static func collect(node: Any, items: inout [TrapTubeFeedItem],
+                                seen: inout Set<String>, continuation: inout String?) {
+        if let dict = node as? [String: Any] {
+            if let renderer = dict["videoRenderer"] as? [String: Any],
+               let item = parse(renderer), !seen.contains(item.videoID) {
+                seen.insert(item.videoID)
+                items.append(item)
+            }
+            if let renderer = dict["continuationItemRenderer"] as? [String: Any],
+               let endpoint = renderer["continuationEndpoint"] as? [String: Any],
+               let command = endpoint["continuationCommand"] as? [String: Any],
+               let token = command["token"] as? String {
+                continuation = token
+            }
+            for value in dict.values {
+                collect(node: value, items: &items, seen: &seen, continuation: &continuation)
+            }
+        } else if let array = node as? [Any] {
+            for value in array {
+                collect(node: value, items: &items, seen: &seen, continuation: &continuation)
+            }
+        }
+    }
+
+    private static func parse(_ renderer: [String: Any]) -> TrapTubeFeedItem? {
+        guard let videoID = renderer["videoId"] as? String else { return nil }
+        func text(_ key: String) -> String? {
+            guard let node = renderer[key] as? [String: Any] else { return nil }
+            if let simple = node["simpleText"] as? String { return simple }
+            if let runs = node["runs"] as? [[String: Any]] {
+                return runs.compactMap { $0["text"] as? String }.joined()
+            }
+            return nil
+        }
+        let title = text("title") ?? "Untitled video"
+        let channel = text("longBylineText") ?? text("ownerText") ?? ""
+        let duration = text("lengthText")
+        var metaParts: [String] = []
+        if let views = text("viewCountText") ?? text("shortViewCountText") { metaParts.append(views) }
+        if let age = text("publishedTimeText") { metaParts.append(age) }
+        var thumbnailURL: URL?
+        if let thumb = renderer["thumbnail"] as? [String: Any],
+           let variants = thumb["thumbnails"] as? [[String: Any]],
+           let best = variants.last, var urlString = best["url"] as? String {
+            if urlString.hasPrefix("//") { urlString = "https:" + urlString }
+            thumbnailURL = URL(string: urlString)
+        }
+        return TrapTubeFeedItem(videoID: videoID, title: title, channel: channel,
+                                duration: duration, meta: metaParts.joined(separator: " · "),
+                                thumbnailURL: thumbnailURL)
+    }
+}
+
+enum TrapTubeInnerTube {
+    static func post(endpoint: String, body: [String: Any]) async throws -> [String: Any] {
+        guard let url = URL(string: "\(endpoint)?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false") else {
+            throw TrapTubePlayerError.network("bad endpoint")
+        }
+        var fullBody = body
+        fullBody["context"] = ["client": ["clientName": "IOS", "clientVersion": "19.45.4",
+                                          "deviceMake": "Apple", "deviceModel": "iPhone16,2",
+                                          "osName": "iPhone", "osVersion": "18.1.0",
+                                          "hl": "en", "gl": "US"]]
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X)",
+                         forHTTPHeaderField: "User-Agent")
+        request.httpBody = try JSONSerialization.data(withJSONObject: fullBody)
+        let (data, _) = try await URLSession.shared.data(for: request)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw TrapTubePlayerError.network("unexpected response")
+        }
+        return json
+    }
+}
 
 struct TrapTubePlayerHomeView: View {
-    @State private var input = ""
+    @StateObject private var feed = TrapTubeFeedModel()
+    @State private var searchText = ""
     @State private var request: TrapTubePlayerRequest?
-    @State private var inputError: String?
     @State private var detectedID: String?
 
     private var accent: Color {
@@ -578,81 +860,179 @@ struct TrapTubePlayerHomeView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("TRAPTUBE PLAYER").font(.caption.weight(.black))
-                    .tracking(1.5).foregroundStyle(accent)
-                Text("Watch with the equalizer")
-                    .font(.title2.weight(.black)).foregroundStyle(.white)
-                Text("YouTube's own player never hands its audio to the EQ. This player resolves the same video's stream and plays it natively - the way Musi did - so the EQ tap attaches and every band works.")
-                    .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(spacing: 0) {
+            searchBar
+            if let detectedID {
+                detectedButton(detectedID)
             }
-            .padding(16)
-            .ttGlassCard(cornerRadius: 18)
-
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Open a video")
-                    .font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                TextField("Paste a YouTube link or video ID", text: $input)
-                    .textFieldStyle(.plain)
-                    .font(.subheadline)
-                    .foregroundStyle(.white)
-                    .padding(12)
-                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                if let inputError {
-                    Text(inputError).font(.caption).foregroundStyle(accent)
-                }
-                Button {
-                    if let videoID = TrapTubeStreamResolver.extractVideoID(from: input) {
-                        inputError = nil
-                        request = TrapTubePlayerRequest(videoID: videoID)
-                    } else {
-                        inputError = "Couldn't find a video ID in that text."
-                    }
-                } label: {
-                    HStack {
-                        Image(systemName: "play.fill")
-                        Text("Play in TrapTube Player").font(.subheadline.weight(.bold))
-                    }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
-                    .background(accent, in: Capsule())
-                }
-                .buttonStyle(.plain)
-
-                if let detectedID {
-                    Button {
-                        request = TrapTubePlayerRequest(videoID: detectedID)
-                    } label: {
-                        HStack {
-                            Image(systemName: "play.circle.fill")
-                            Text("Play the video open in YouTube (\(detectedID))")
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                        }
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color.white.opacity(0.08), in: Capsule())
-                        .overlay(Capsule().stroke(Color.white.opacity(0.14), lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(16)
-            .ttGlassCard(cornerRadius: 18)
-
-            Text("Everything else in the app is untouched - this is an additional player, not a replacement for YouTube's screens. Some videos refuse direct playback (age gates, music licensing, signature protection); the player will say so plainly when that happens.")
-                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
-                .fixedSize(horizontal: false, vertical: true)
+            content
         }
-        .onAppear { detectedID = TrapTubeCurrentVideo.detectVideoID() }
+        .task {
+            if feed.items.isEmpty { await feed.loadHome() }
+            detectedID = TrapTubeCurrentVideo.detectVideoID()
+        }
         .fullScreenCover(item: $request) { request in
             TrapTubeNativePlayerView(request: request)
         }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(Color.white.opacity(0.5))
+            TextField("Search YouTube", text: $searchText)
+                .foregroundStyle(.white)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.search)
+                .onSubmit { Task { await feed.search(searchText) } }
+            if feed.isSearching {
+                Button {
+                    searchText = ""
+                    Task { await feed.loadHome() }
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Color.white.opacity(0.5))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .font(.subheadline)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private func detectedButton(_ videoID: String) -> some View {
+        Button {
+            request = TrapTubePlayerRequest(videoID: videoID)
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "play.circle.fill").foregroundStyle(accent)
+                Text("Play the video open in YouTube")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold)).foregroundStyle(Color.white.opacity(0.4))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if feed.items.isEmpty {
+            VStack(spacing: 12) {
+                Spacer()
+                if feed.isLoading {
+                    ProgressView().tint(.white)
+                    Text("Loading your feed…")
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.6))
+                } else if let message = feed.errorMessage {
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.title2).foregroundStyle(accent)
+                    Text(message)
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.7))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 32)
+                    Button("Try again") {
+                        Task {
+                            if feed.isSearching { await feed.search(searchText) }
+                            else { await feed.loadHome() }
+                        }
+                    }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                }
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else {
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    Text(feed.isSearching ? "Results" : "Recommended")
+                        .font(.caption.weight(.black)).tracking(1.5)
+                        .foregroundStyle(accent)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 6)
+                        .padding(.bottom, 4)
+                    ForEach(feed.items) { item in
+                        row(item)
+                            .onAppear {
+                                if item.videoID == feed.items.last?.videoID {
+                                    Task { await feed.loadMore() }
+                                }
+                            }
+                    }
+                    if feed.isLoading {
+                        HStack { Spacer(); ProgressView().tint(.white); Spacer() }
+                            .padding(.vertical, 14)
+                    }
+                }
+                .padding(.bottom, 16)
+            }
+        }
+    }
+
+    private func row(_ item: TrapTubeFeedItem) -> some View {
+        Button {
+            request = TrapTubePlayerRequest(videoID: item.videoID)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack(alignment: .bottomTrailing) {
+                    AsyncImage(url: item.thumbnailURL) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        default:
+                            Color.white.opacity(0.08)
+                        }
+                    }
+                    .frame(width: 132, height: 74)
+                    .clipped()
+                    if let duration = item.duration {
+                        Text(duration)
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 5).padding(.vertical, 2)
+                            .background(Color.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 4))
+                            .padding(4)
+                    }
+                }
+                .frame(width: 132, height: 74)
+                .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    if !item.channel.isEmpty {
+                        Text(item.channel)
+                            .font(.caption).foregroundStyle(Color.white.opacity(0.6))
+                            .lineLimit(1)
+                    }
+                    if !item.meta.isEmpty {
+                        Text(item.meta)
+                            .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
