@@ -738,7 +738,7 @@ enum TrapTubeStreamResolver {
     /// else the muxed file's own URL (whose audio track the reader
     /// can still pump). SABR-only responses carry no plain audio URL
     /// at all - those entries are skipped, never parsed.
-    static func ghostSource(videoID: String, profile: ClientProfile,
+    private static func ghostSource(videoID: String, profile: ClientProfile,
                             muxedURL: URL?, adaptive: [FormatEntry]) -> TrapTubeGhostAudio.Source? {
         let audios = adaptive
             .filter { $0.url != nil && $0.hasAudio && !$0.hasVideo && $0.mime.contains("mp4") }
