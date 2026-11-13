@@ -18,15 +18,31 @@ public final class TrapTubeAudioHook: NSObject {
     /// manager de-dupes per item, so repeated calls are cheap no-ops.
     @objc public static func attachInBackground(to item: AVPlayerItem) {
         TrapTubeEQManager.shared.noteHookFired("player item")
-        // Fast path: for an item whose tracks are already loaded (the usual
-        // case once playback is starting) attach synchronously. The async
-        // below stalls forever on some host assets whose track loading only
-        // completes inside the player's own pipeline.
-        if !item.asset.tracks(withMediaType: .audio).isEmpty,
-           TrapTubeEQManager.shared.attach(to: item) {
-            return
+        // Round 16: attach is strictly fire-and-forget. This entry point is
+        // called synchronously from the AVPlayerItem creation hooks -
+        // including inside the stream resolver's AVPlayerItem(asset:)
+        // construction, before resolve() returns - so it must never run
+        // attach work on the caller's thread. The fast path it used to run
+        // inline starts with the legacy synchronous
+        // asset.tracks(withMediaType:) accessor, which can park
+        // indefinitely on these googlevideo assets (the manager's own
+        // attach(to:) overload repeats the same call). On Build 173 that
+        // park froze resolve() mid-construction: the Diag trail ended at
+        // "item built", the EQ status never advanced past this hook probe,
+        // and replaceCurrentItem/play() were never reached. All attach
+        // work - the loaded-tracks fast path included - now runs in this
+        // detached task, where a stall can only ever delay the EQ, never
+        // playback. The async path below stalls on some host assets whose
+        // track loading only completes inside the player's own pipeline,
+        // which is why the fast path is kept - just moved off the
+        // caller's thread.
+        Task {
+            if !item.asset.tracks(withMediaType: .audio).isEmpty,
+               TrapTubeEQManager.shared.attach(to: item) {
+                return
+            }
+            _ = await TrapTubeEQManager.shared.attachWhenReady(to: item)
         }
-        attachWhenReadyInBackground(to: item)
     }
 
     /// Async-only attach for very hot call sites (the audioMix getter hook),
