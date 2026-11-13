@@ -477,7 +477,7 @@ private final class TrapTubeStemModel: ObservableObject {
 /// Liquid Glass surface: the real iOS 26 glass effect where the OS offers
 /// it, and a layered material approximation on iOS 17-25, so the design
 /// language is the same on every supported version.
-private struct TTGlassCard: ViewModifier {
+struct TTGlassCard: ViewModifier {
     var cornerRadius: CGFloat = 18
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
@@ -495,7 +495,7 @@ private struct TTGlassCard: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func ttGlassCard(cornerRadius: CGFloat = 18) -> some View {
         modifier(TTGlassCard(cornerRadius: cornerRadius))
     }
@@ -522,6 +522,7 @@ private struct TrapTubeStemStudioView: View {
             HStack(spacing: 8) {
                 pageButton("Equalizer", page: 0, symbol: "slider.horizontal.3")
                 pageButton("Stem Separation", page: 1, symbol: "waveform")
+                pageButton("Player", page: 2, symbol: "play.circle.fill")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -530,6 +531,7 @@ private struct TrapTubeStemStudioView: View {
             TabView(selection: $selectedPage) {
                 equalizerPage.tag(0)
                 stemSeparationPage.tag(1)
+                playerPage.tag(2)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
@@ -549,6 +551,13 @@ private struct TrapTubeStemStudioView: View {
             }
         }
         .onAppear { model.refresh() }
+    }
+
+    private var playerPage: some View {
+        ScrollView {
+            TrapTubePlayerHomeView()
+                .padding(18)
+        }
     }
 
     private var equalizerPage: some View {
