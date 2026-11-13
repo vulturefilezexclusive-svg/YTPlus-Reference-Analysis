@@ -480,6 +480,12 @@ struct TrapTubeResolvedPlayback {
     let author: String
     let item: AVPlayerItem
     let profileName: String
+    /// Round 20: the Ghost audio leg resolved from the SAME player
+    /// response (no second fetch): the best direct AAC audio-only
+    /// URL, or the muxed file itself. Nil when no profile offered
+    /// any direct audio URL - Ghost then has nothing to eat and the
+    /// controller falls back to the tap.
+    let ghostSource: TrapTubeGhostAudio.Source?
 }
 
 enum TrapTubeStreamResolver {
@@ -642,9 +648,12 @@ enum TrapTubeStreamResolver {
                     TrapTubeAudioHook.endResolverItemConstruction()
                     TrapTubeAudioHook.registerResolverItem(item)
                     onStep?("\(profile.name): item built (muxed \(best.height)p, tracks validated)")
+                    let ghostLeg = ghostSource(videoID: videoID, profile: profile,
+                                               muxedURL: url, adaptive: adaptive)
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: item,
-                                                    profileName: profile.name)
+                                                    profileName: profile.name,
+                                                    ghostSource: ghostLeg)
                 }
 
                 // 2) Otherwise combine the best MP4 video-only and audio-only
@@ -696,9 +705,13 @@ enum TrapTubeStreamResolver {
                     TrapTubeAudioHook.endResolverItemConstruction()
                     TrapTubeAudioHook.registerResolverItem(item)
                     onStep?("\(profile.name): item built (composition \(video.height)p + audio, tracks validated)")
+                    let ghostLeg = TrapTubeGhostAudio.Source(
+                        url: audioURL, userAgent: profile.userAgent,
+                        refresher: { await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) })
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: item,
-                                                    profileName: profile.name)
+                                                    profileName: profile.name,
+                                                    ghostSource: ghostLeg)
                 }
                 failures.append("\(profile.name): formats were present but none were directly playable")
             } catch {
@@ -718,6 +731,49 @@ enum TrapTubeStreamResolver {
         if sawCipher { throw TrapTubePlayerError.cipherProtected }
         if let reason = lastPlayability { throw TrapTubePlayerError.unplayable(reason) }
         throw TrapTubePlayerError.noPlayableFormat
+    }
+
+    /// Round 20: builds the Ghost audio source from a response this
+    /// resolver already fetched: the best AAC audio-only direct URL,
+    /// else the muxed file's own URL (whose audio track the reader
+    /// can still pump). SABR-only responses carry no plain audio URL
+    /// at all - those entries are skipped, never parsed.
+    static func ghostSource(videoID: String, profile: ClientProfile,
+                            muxedURL: URL?, adaptive: [FormatEntry]) -> TrapTubeGhostAudio.Source? {
+        let audios = adaptive
+            .filter { $0.url != nil && $0.hasAudio && !$0.hasVideo && $0.mime.contains("mp4") }
+            .sorted { $0.bitrate > $1.bitrate }
+        if let best = audios.first, let url = URL(string: best.url ?? "") {
+            return TrapTubeGhostAudio.Source(url: url, userAgent: profile.userAgent,
+                                             refresher: { await fetchGhostAudioSource(videoID: videoID) })
+        }
+        if let muxedURL {
+            return TrapTubeGhostAudio.Source(url: muxedURL, userAgent: profile.userAgent,
+                                             refresher: { await fetchGhostAudioSource(videoID: videoID) })
+        }
+        return nil
+    }
+
+    /// Round 20: re-mints a fresh Ghost audio URL (the download
+    /// refresher and any later re-prime). Ghost asks the profiles in
+    /// its own order - IOS, then WEB_EMBEDDED_PLAYER, then ANDROID -
+    /// because the Android aggregate is the one that most often
+    /// serves no direct audio URL at all (the hybrid's Round 12
+    /// lesson). Returns nil when no profile offers one.
+    static func fetchGhostAudioSource(videoID: String) async -> (url: URL, userAgent: String)? {
+        for name in ["IOS", "WEB_EMBEDDED_PLAYER", "ANDROID"] {
+            guard let profile = profiles.first(where: { $0.name == name }),
+                  let json = try? await fetchPlayerResponse(videoID: videoID, profile: profile),
+                  let streaming = json["streamingData"] as? [String: Any] else { continue }
+            let adaptive = formatList(streaming["adaptiveFormats"])
+            let audios = adaptive
+                .filter { $0.url != nil && $0.hasAudio && !$0.hasVideo && $0.mime.contains("mp4") }
+                .sorted { $0.bitrate > $1.bitrate }
+            if let best = audios.first, let url = URL(string: best.url ?? "") {
+                return (url: url, userAgent: profile.userAgent)
+            }
+        }
+        return nil
     }
 
     private struct FormatEntry {
@@ -993,6 +1049,57 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var duration: Double = 0
     @Published var rate: Float = 1.0
 
+    // Round 20: Ghost Tier 1 - the dual-path audio engine for this
+    // player (see TrapTubeGhostAudio.swift). The persisted A/B choice
+    // uses the same defaults key as the hybrid app; Ghost is the
+    // default. The view shows pathStatusText while Ghost owns the
+    // audio; the tap path keeps the EQ manager's own status line.
+    enum AudioPath: String { case ghost, tap }
+    private(set) var audioPath: AudioPath = {
+        let saved = UserDefaults.standard.string(forKey: "TrapTube.NativePlayer.AudioPath")
+        return AudioPath(rawValue: saved ?? "") ?? .ghost
+    }()
+    let ghost = TrapTubeGhostAudio()
+    @Published var ghostFeed: TrapTubeGhostAudio.Feed = .none
+    @Published var ghostDriftMs: Int?
+    @Published var usingTapFallback = false
+    private var ghostTask: Task<Void, Never>?
+    private var syncTask: Task<Void, Never>?
+    private var audioPathObserver: NSObjectProtocol?
+    private var lastHardResync = Date.distantPast
+    /// The video this session loaded; a re-presented (adopted)
+    /// player view compares it against its request and skips the
+    /// reload when they match.
+    private(set) var loadedVideoID: String?
+    /// The request that opened this session, kept so a minimized
+    /// session can be re-presented exactly as it was.
+    var sessionRequest: TrapTubePlayerRequest?
+    /// Set by the view's minimize button; stop() turns it into a
+    /// retained mini-player session instead of a teardown.
+    var minimizeRequested = false
+    private static var retainedForMiniPlayer: TrapTubePlayerController?
+
+    /// The status line for the audio path, in the hybrid's readout
+    /// style. Empty on the plain tap path, where the view keeps
+    /// showing the EQ manager's attach status instead.
+    var pathStatusText: String {
+        if usingTapFallback { return "TAP (FALLBACK)" }
+        guard audioPath == .ghost else { return "" }
+        switch ghostFeed {
+        case .none:
+            return loadedVideoID == nil ? "" : "GHOST STARTING..."
+        case .streamed, .file:
+            var text = ghostFeed == .file ? "GHOST (FILE)" : "GHOST (STREAMED)"
+            if !TrapTubeEQManager.shared.isEQEnabled { text += " · EQ OFF" }
+            if let ghostDriftMs {
+                text += " · drift \(ghostDriftMs) ms"
+            } else {
+                text += " · SYNCING..."
+            }
+            return text
+        }
+    }
+
     // Round 15 diagnostics: a compact, always-visible trail of the
     // load's milestones (last resolver step, per-profile outcome, item
     // status/error) rendered under the EQ status line in the player, so
@@ -1046,6 +1153,12 @@ final class TrapTubePlayerController: ObservableObject {
         // a second hook instance's synchronous work around our items.
         TrapTubeAudioHook.registerResolverPlayer(player)
         hook.install(on: player)
+        audioPathObserver = NotificationCenter.default.addObserver(
+            forName: Notification.Name("TrapTubeAudioPathChanged"), object: nil, queue: .main) { [weak self] note in
+            guard let raw = note.userInfo?["path"] as? String,
+                  let path = AudioPath(rawValue: raw) else { return }
+            self?.switchAudioPath(to: path)
+        }
         pipDelegate.onDidStart = { [weak self] in
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -1119,6 +1232,16 @@ final class TrapTubePlayerController: ObservableObject {
             NSLog("[TrapTube Player] Audio session setup failed (continuing): %@",
                   TrapTubeErrorFormatting.describe(error))
         }
+        loadedVideoID = videoID
+        ghostTask?.cancel()
+        ghostTask = nil
+        syncTask?.cancel()
+        syncTask = nil
+        ghost.shutdown()
+        ghostFeed = .none
+        ghostDriftMs = nil
+        usingTapFallback = false
+        player.isMuted = false
         loadTask?.cancel()
         watchdogTask?.cancel()
         watchdogTask = nil
@@ -1177,8 +1300,26 @@ final class TrapTubePlayerController: ObservableObject {
                 // for the hook's KVO round-trip and async track load.
                 // Strictly after play(), outside the construction
                 // window, and the span above stays suspension-free.
-                self.hook.attachImmediately(to: resolved.item)
+                // Round 20: the audio path decides what happens
+                // next. Tap: the Round 19 immediate attach, exactly
+                // as before. Ghost: the tap stays OUT of this item -
+                // the engine owns the audio and the muted item is
+                // video-only; the tap is attached later only if
+                // Ghost fails outright (beginTapFallback).
+                if self.audioPath == .tap {
+                    self.hook.attachImmediately(to: resolved.item)
+                }
                 self.startLoadWatchdog(for: resolved.item)
+                if self.audioPath == .ghost {
+                    if let ghostSource = resolved.ghostSource {
+                        self.startGhost(source: ghostSource, item: resolved.item)
+                    } else {
+                        // No profile offered any direct audio URL:
+                        // Ghost has nothing to eat on this video.
+                        self.noteDiagnostic("ghost: no direct audio URL from any profile - tap fallback")
+                        self.beginTapFallback(item: resolved.item)
+                    }
+                }
             } catch {
                 guard !Task.isCancelled else { return }
                 self.heartbeatTask?.cancel()
@@ -1357,8 +1498,10 @@ final class TrapTubePlayerController: ObservableObject {
     func togglePlayPause() {
         if player.timeControlStatus == .playing {
             player.pause()
+            ghost.setDesiredPlaying(false)
         } else {
             player.rate = rate
+            ghost.setDesiredPlaying(true)
         }
         isPlaying = player.timeControlStatus == .playing
     }
@@ -1368,6 +1511,14 @@ final class TrapTubePlayerController: ObservableObject {
     /// disturb attachment - and the hook's play-state revalidation
     /// covers the resume side exactly like a pause/play cycle.
     func toggleMute() {
+        // In Ghost mode the item must STAY muted (it is video-only);
+        // the mute button drives the ghost mixer instead, so the two
+        // audio legs can never sound at once.
+        if audioPath == .ghost, !usingTapFallback, ghostFeed != .none {
+            isMuted.toggle()
+            ghost.setMuted(isMuted)
+            return
+        }
         player.isMuted.toggle()
         isMuted = player.isMuted
     }
@@ -1376,16 +1527,27 @@ final class TrapTubePlayerController: ObservableObject {
         let target = max(0, currentTime + seconds)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
+        noteUserSeek()
     }
 
     func seek(to seconds: Double) {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
+        noteUserSeek()
+    }
+
+    /// Round 20: a user seek moves the video instantly; the ghost
+    /// feed hard-resyncs to the same position so the audio follows
+    /// the playhead instead of bending back through the sync loop.
+    private func noteUserSeek() {
+        guard audioPath == .ghost, !usingTapFallback, ghostFeed != .none else { return }
+        Task { [weak self] in await self?.hardResyncGhost() }
     }
 
     func setRate(_ newRate: Float) {
         rate = newRate
         if player.timeControlStatus == .playing { player.rate = newRate }
+        ghost.setBaselineRate(newRate)
     }
 
     // MARK: Fullscreen + Picture in Picture
@@ -1463,7 +1625,197 @@ final class TrapTubePlayerController: ObservableObject {
         return top
     }
 
+
+    // MARK: Ghost orchestration (Round 20)
+
+    private func startGhost(source: TrapTubeGhostAudio.Source, item: AVPlayerItem) {
+        ghostTask?.cancel()
+        ghost.onStreamStalled = { [weak self] in
+            Task { @MainActor in self?.escalateGhostToFile() }
+        }
+        // The item goes silent the moment Ghost takes the audio; if
+        // the prime fails, beginTapFallback unmutes it again.
+        player.isMuted = true
+        ghostTask = Task { [weak self] in
+            guard let self else { return }
+            self.ghost.setBaselineRate(self.rate)
+            self.ghost.applyManagerState()
+            let feed = await self.ghost.start(source: source) { [weak self] in
+                self?.player.currentTime().seconds ?? 0
+            }
+            guard !Task.isCancelled, self.player.currentItem === item else { return }
+            if feed == .none {
+                self.beginTapFallback(item: item)
+                return
+            }
+            self.ghostFeed = feed
+            self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+            self.ghost.setMuted(self.isMuted)
+            self.noteDiagnostic("ghost live (\(feed == .file ? "file" : "streamed"))")
+            self.startSyncLoop(item: item)
+        }
+    }
+
+    /// A streamed feed that fails or starves escalates to the file
+    /// feed at the video's current position.
+    private func escalateGhostToFile() {
+        guard audioPath == .ghost, !usingTapFallback, ghostFeed == .streamed,
+              let item = player.currentItem else { return }
+        ghostTask?.cancel()
+        ghostTask = Task { [weak self] in
+            guard let self else { return }
+            let ok = await self.ghost.switchToFile { [weak self] in
+                self?.player.currentTime().seconds ?? 0
+            }
+            guard !Task.isCancelled, self.player.currentItem === item else { return }
+            if ok {
+                self.ghostFeed = .file
+                self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+            } else {
+                self.beginTapFallback(item: item)
+            }
+        }
+    }
+
+    /// Ghost failed outright on this item: unmute the stream (to the
+    /// user's own mute choice) and run the Round 19 tap attach for
+    /// it instead. The status line says TAP (FALLBACK), so the state
+    /// is never a mystery on a screenshot.
+    private func beginTapFallback(item: AVPlayerItem) {
+        guard player.currentItem === item else { return }
+        usingTapFallback = true
+        ghostFeed = .none
+        ghostDriftMs = nil
+        syncTask?.cancel()
+        ghost.teardownFeed(deleteTemp: true)
+        player.isMuted = isMuted
+        noteDiagnostic("ghost failed - tap fallback")
+        hook.attachImmediately(to: item)
+    }
+
+    /// The 5 Hz sync loop (the hybrid's tunables, unchanged):
+    /// deadband +/-25 ms does nothing; 25-120 ms bends the varispeed
+    /// rate (proportional, clamped to +/-3%); beyond 120 ms - or when
+    /// the video comes back from a stall - the feed hard-resyncs at
+    /// the video's position. While AVPlayer waits on the network the
+    /// ghost node waits with it. The manager's EQ state is re-applied
+    /// every tick, so EQ panel changes land live on the ghost unit.
+    private func startSyncLoop(item: AVPlayerItem) {
+        syncTask?.cancel()
+        lastHardResync = Date.distantPast
+        var waitingOnVideo = false
+        syncTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self, self.audioPath == .ghost, !self.usingTapFallback,
+                      self.ghostFeed != .none, self.player.currentItem === item else { continue }
+                self.ghost.applyManagerState()
+                if self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                    if !waitingOnVideo {
+                        waitingOnVideo = true
+                        self.ghost.pauseRendering()
+                    }
+                    continue
+                }
+                if waitingOnVideo {
+                    waitingOnVideo = false
+                    self.ghost.resumeRendering()
+                    await self.hardResyncGhost()
+                    continue
+                }
+                guard let audioTime = self.ghost.position() else { continue }
+                let videoTime = self.player.currentTime().seconds
+                guard videoTime.isFinite else { continue }
+                let drift = audioTime - videoTime
+                self.ghostDriftMs = Int((drift * 1000).rounded())
+                guard self.player.timeControlStatus == .playing else { continue }
+                let magnitude = abs(drift)
+                if magnitude <= 0.025 {
+                    self.ghost.setCorrection(1)
+                } else if magnitude <= 0.120 {
+                    self.ghost.setCorrection(Float(min(max(1 - drift * 0.8, 0.97), 1.03)))
+                } else if !self.ghost.streamEnded,
+                          Date().timeIntervalSince(self.lastHardResync) > 1.5 {
+                    await self.hardResyncGhost()
+                }
+            }
+        }
+    }
+
+    private func hardResyncGhost() async {
+        lastHardResync = Date()
+        ghost.setCorrection(1)
+        let target = player.currentTime().seconds
+        let ok = await ghost.resync(to: target.isFinite ? target : 0)
+        guard audioPath == .ghost, !usingTapFallback else { return }
+        if !ok {
+            if ghostFeed == .streamed {
+                escalateGhostToFile()
+            } else if let item = player.currentItem {
+                beginTapFallback(item: item)
+            }
+        }
+    }
+
+    /// The EQ panel's Ghost/Tap A/B switch, live on the playing
+    /// session: the video item is never reloaded and the position
+    /// never resets - only the AUDIO leg changes hands at the
+    /// current position. Tap -> Ghost mints a fresh source, takes
+    /// the tap off, and primes the engine; Ghost -> Tap shuts the
+    /// engine down, unmutes, and attaches the tap to the live item.
+    func switchAudioPath(to path: AudioPath) {
+        guard path != audioPath else { return }
+        audioPath = path
+        UserDefaults.standard.set(path.rawValue, forKey: "TrapTube.NativePlayer.AudioPath")
+        noteDiagnostic("audio path -> \(path.rawValue) at \(Int(currentTime))s")
+        guard let item = player.currentItem, let videoID = loadedVideoID else { return }
+        if path == .ghost {
+            usingTapFallback = false
+            ghostTask = Task { [weak self] in
+                guard let self else { return }
+                guard let fresh = await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) else {
+                    self.usingTapFallback = true
+                    return
+                }
+                let source = TrapTubeGhostAudio.Source(
+                    url: fresh.url, userAgent: fresh.userAgent,
+                    refresher: { await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) })
+                TrapTubeEQManager.shared.detach(from: item)
+                self.startGhost(source: source, item: item)
+            }
+        } else {
+            ghostTask?.cancel()
+            syncTask?.cancel()
+            ghost.shutdown()
+            ghostFeed = .none
+            ghostDriftMs = nil
+            usingTapFallback = false
+            player.isMuted = isMuted
+            hook.attachImmediately(to: item)
+        }
+    }
+
+    /// Full teardown for the mini player's close button: the
+    /// retained session ends instead of being retained again.
+    func closeRetainedSession() {
+        if Self.retainedForMiniPlayer === self { Self.retainedForMiniPlayer = nil }
+        minimizeRequested = false
+        stop()
+    }
+
     func stop() {
+        // Round 20 minimize: the view is dismissing BECAUSE the user
+        // minimized. Retain the whole session (player, EQ tap, ghost
+        // engine) in the mini-player store so playback continues at
+        // the tab-bar level and the player can be re-presented with
+        // this same controller - no reload, no position loss.
+        if minimizeRequested {
+            minimizeRequested = false
+            Self.retainedForMiniPlayer = self
+            TrapTubeMiniPlayerStore.shared.hold(controller: self)
+            NSLog("[TrapTube Player] View minimized; session retained in the mini player")
+            return
+        }
         // PiP is live: the sheet is dismissing BECAUSE PiP started. Keep
         // the player, its EQ tap and this controller alive (self-retained)
         // until the PiP delegate reports the session has fully stopped.
@@ -1474,6 +1826,14 @@ final class TrapTubePlayerController: ObservableObject {
             NSLog("[TrapTube Player] View dismissed during PiP; session retained until PiP stops")
             return
         }
+        ghostTask?.cancel()
+        ghostTask = nil
+        syncTask?.cancel()
+        syncTask = nil
+        ghost.shutdown()
+        ghostFeed = .none
+        ghostDriftMs = nil
+        if Self.retainedForMiniPlayer === self { Self.retainedForMiniPlayer = nil }
         loadTask?.cancel()
         watchdogTask?.cancel()
         watchdogTask = nil
@@ -1530,14 +1890,59 @@ struct TrapTubePlayerRequest: Identifiable {
     var id: String { stamp.uuidString }
 }
 
+/// Round 20: holds a minimized player session at the tab-bar level.
+/// The controller retains itself (see stop()) and hands itself here;
+/// the feed renders the mini bar from it, and re-presenting the
+/// player adopts the SAME controller back - same item, same
+/// position, same EQ and ghost state.
+@MainActor
+final class TrapTubeMiniPlayerStore: ObservableObject {
+    static let shared = TrapTubeMiniPlayerStore()
+    @Published private(set) var controller: TrapTubePlayerController?
+
+    var request: TrapTubePlayerRequest? { controller?.sessionRequest }
+
+    func hold(controller: TrapTubePlayerController) {
+        self.controller = controller
+    }
+
+    /// The re-opened player view takes its controller back.
+    func adopt() -> TrapTubePlayerController? {
+        defer { controller = nil }
+        return controller
+    }
+
+    func close() {
+        let closing = controller
+        controller = nil
+        closing?.closeRetainedSession()
+    }
+}
+
 struct TrapTubeNativePlayerView: View {
     let request: TrapTubePlayerRequest
-    @StateObject private var controller = TrapTubePlayerController()
+    @StateObject private var controller: TrapTubePlayerController
     @State private var streamStatus = "Not attached yet"
     @State private var scrubbing = false
     @State private var scrubTime: Double = 0
     @State private var showEQ = false
+    @State private var reattachNote: String?
     @Environment(\.dismiss) private var dismiss
+
+    init(request: TrapTubePlayerRequest) {
+        self.request = request
+        // Round 20: reopening from the mini player adopts the
+        // retained controller - same item, same position, same EQ
+        // and ghost state - instead of building a new session that
+        // would reload the stream from zero.
+        if let retained = TrapTubeMiniPlayerStore.shared.controller,
+           retained.sessionRequest?.videoID == request.videoID,
+           let adopted = TrapTubeMiniPlayerStore.shared.adopt() {
+            _controller = StateObject(wrappedValue: adopted)
+        } else {
+            _controller = StateObject(wrappedValue: TrapTubePlayerController())
+        }
+    }
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -1549,28 +1954,50 @@ struct TrapTubeNativePlayerView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 0) {
-                topBar
-                videoCard
-                titleBlock
-                eqStrip
-                transportRow
-                statusBlock
-                Spacer(minLength: 0)
+        // Round 20: the column's width comes from THIS cover's own
+        // geometry (the device's width inside its safe area), never
+        // from the widest child. In Round 19 the transport row's
+        // fixed frames plus its spacers' minimum lengths summed to
+        // ~404pt inside a ~353pt column; a VStack adopts its widest
+        // child's width, so the entire player rendered over-wide and
+        // centered, cropping controls and text off BOTH edges.
+        // Pinning the frame to the measured width makes that
+        // overflow class impossible: children lay out inside the
+        // pinned width or shrink - they cannot widen it.
+        GeometryReader { proxy in
+            ZStack {
+                Color.black.ignoresSafeArea()
+                VStack(spacing: 0) {
+                    topBar
+                    videoCard
+                    titleBlock
+                    eqStrip
+                    transportRow
+                    statusBlock
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
-            .padding(.horizontal, 20)
         }
         .preferredColorScheme(.dark)
         .onAppear {
             streamStatus = TrapTubeEQManager.shared.attachmentStatus
-            controller.load(videoID: request.videoID)
+            controller.sessionRequest = request
+            // Round 20: an adopted (minimized) session already has
+            // this video loaded - reopening must not reload it.
+            if controller.loadedVideoID != request.videoID || controller.player.currentItem == nil {
+                controller.load(videoID: request.videoID)
+            }
         }
         .onDisappear { controller.stop() }
         .onReceive(NotificationCenter.default.publisher(
             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
             if let status = note.userInfo?["status"] as? String { streamStatus = status }
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: Notification.Name("TrapTubeEQReattachBreadcrumb"))) { note in
+            if let text = note.userInfo?["note"] as? String { reattachNote = text }
         }
         .onChange(of: controller.pictureInPictureStartCount) { _ in
             // Standard PiP behavior: once the video is floating, the
@@ -1584,10 +2011,20 @@ struct TrapTubeNativePlayerView: View {
     }
 
     /// Round 19 restyle: the mockup's player has no title header - the
-    /// title lives under the video card - so the top row is just the
-    /// sheet's close button, kept because the screen still needs one.
+    /// title lives under the video card. Round 20 adds the missing
+    /// MINIMIZE button on the left: it collapses the player to the
+    /// mini player over the feed (the session is retained - see
+    /// TrapTubeMiniPlayerStore) instead of ending playback.
     private var topBar: some View {
         HStack {
+            Button { minimize() } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 32, height: 32)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
             Spacer()
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
@@ -1600,6 +2037,14 @@ struct TrapTubeNativePlayerView: View {
         }
         .padding(.top, 10)
         .padding(.bottom, 12)
+    }
+
+    /// Collapse to the mini player: flag the session for retention,
+    /// then dismiss - stop() hands the live controller to the mini
+    /// player store instead of tearing it down.
+    private func minimize() {
+        controller.minimizeRequested = true
+        dismiss()
     }
 
     private var titleBlock: some View {
@@ -1752,7 +2197,9 @@ struct TrapTubeNativePlayerView: View {
     /// the EQ strip's waveform tint keys off this so the strip reflects
     /// real attachment instead of decorating unconditionally.
     private var eqIsAttached: Bool {
-        streamStatus == "Attached to the playing stream"
+        // Round 20: on the Ghost path the engine IS the EQ, so a live
+        // ghost feed tints the strip the same way a tap attach does.
+        streamStatus == "Attached to the playing stream" || controller.ghostFeed != .none
     }
 
     /// The mockup's full-width EQ strip: audio-lines icon + "EQ" label
@@ -1770,7 +2217,6 @@ struct TrapTubeNativePlayerView: View {
                     .font(.system(size: 16, weight: .semibold))
                 dottedWaveform
                     .frame(maxWidth: .infinity)
-                    .clipped()
                 Image(systemName: "chevron.right")
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(Color.white.opacity(0.35))
@@ -1787,12 +2233,21 @@ struct TrapTubeNativePlayerView: View {
     }
 
     private var dottedWaveform: some View {
-        HStack(alignment: .center, spacing: 3.5) {
-            ForEach(Array(Self.waveformBarHeights.enumerated()), id: \.offset) { _, height in
-                Capsule()
-                    .fill(eqIsAttached ? accent : Color.white.opacity(0.35))
-                    .frame(width: 2.5, height: height)
+        // Round 20: the bar count is derived from the measured width,
+        // so the strip fills exactly the space it is given - Round 19
+        // drew a fixed 40 bars (~236pt) regardless of the column and
+        // helped push the strip past the screen edge.
+        GeometryReader { geometry in
+            let count = max(8, Int(geometry.size.width / 6))
+            HStack(alignment: .center, spacing: 3.5) {
+                ForEach(0..<count, id: \.self) { index in
+                    Capsule()
+                        .fill(eqIsAttached ? accent : Color.white.opacity(0.35))
+                        .frame(width: 2.5,
+                               height: Self.waveformBarHeights[index % Self.waveformBarHeights.count])
+                }
             }
+            .frame(width: geometry.size.width, height: 26, alignment: .leading)
         }
         .frame(height: 26)
     }
@@ -1804,11 +2259,16 @@ struct TrapTubeNativePlayerView: View {
     ]
 
     /// The mockup's transport row: speed, -15s, the big red play/pause
-    /// button, +15s, EQ, and SETTINGS. SETTINGS is a menu of real
+    /// button, +15s, EQ, and SETTINGS. Round 20: every cell is
+    /// flexible (maxWidth .infinity) and there are no spacers, so the
+    /// row's total width IS the column width by construction - the
+    /// Round 19 row's fixed frames plus spacer minimums summed wider
+    /// than the column and widened the whole player (see the body
+    /// pinning note). SETTINGS is a menu of real
     /// player actions (fullscreen, PiP, the EQ enable switch, reset to
     /// flat) rather than a dead gear.
     private var transportRow: some View {
-        HStack(alignment: .center, spacing: 4) {
+        HStack(alignment: .center, spacing: 0) {
             Menu {
                 ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
                     Button("\(speed, specifier: "%g")x") { controller.setRate(Float(speed)) }
@@ -1817,13 +2277,12 @@ struct TrapTubeNativePlayerView: View {
                 Text("\(controller.rate, specifier: "%g")x")
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 52, height: 44)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
             }
-            Spacer()
             transportButton(symbol: "gobackward.15", caption: "15 SEC") {
                 controller.skip(by: -15)
             }
-            Spacer()
             Button { controller.togglePlayPause() } label: {
                 Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
                     .font(.system(size: 27, weight: .bold))
@@ -1833,15 +2292,13 @@ struct TrapTubeNativePlayerView: View {
                     .shadow(color: accent.opacity(0.35), radius: 12, y: 4)
             }
             .buttonStyle(.plain)
-            Spacer()
+            .frame(maxWidth: .infinity)
             transportButton(symbol: "goforward.15", caption: "15 SEC") {
                 controller.skip(by: 15)
             }
-            Spacer()
             transportButton(symbol: "slider.horizontal.3", caption: "EQ") {
                 showEQ = true
             }
-            Spacer()
             Menu {
                 Button { controller.presentFullscreen() } label: {
                     Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
@@ -1868,7 +2325,7 @@ struct TrapTubeNativePlayerView: View {
                         .tracking(0.4)
                 }
                 .foregroundStyle(.white)
-                .frame(width: 58)
+                .frame(maxWidth: .infinity)
             }
         }
         .padding(.top, 22)
@@ -1885,7 +2342,7 @@ struct TrapTubeNativePlayerView: View {
                     .tracking(0.4)
             }
             .foregroundStyle(.white)
-            .frame(width: 58)
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
     }
@@ -1896,6 +2353,20 @@ struct TrapTubeNativePlayerView: View {
     /// never hides them.
     private var statusBlock: some View {
         VStack(alignment: .leading, spacing: 5) {
+            // Round 20: the audio-path line (Ghost feed + drift, or
+            // the tap-fallback marker) above the EQ attach status.
+            if !controller.pathStatusText.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "waveform")
+                    Text("Audio path")
+                    Spacer()
+                    Text(controller.pathStatusText)
+                        .foregroundStyle(accent)
+                        .multilineTextAlignment(.trailing)
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.65))
+            }
             HStack(spacing: 6) {
                 Image(systemName: "waveform")
                 Text("EQ stream status")
@@ -1906,6 +2377,15 @@ struct TrapTubeNativePlayerView: View {
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(Color.white.opacity(0.65))
+
+            // Round 20: the seamless re-attach breadcrumb - the
+            // re-attach's timestamp and its position verdict.
+            if let reattachNote {
+                Text(reattachNote)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.6))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             Text(controller.diagnosticsLine)
                 .font(.caption2.monospaced())
@@ -1981,6 +2461,22 @@ struct TrapTubeEqualizerPanel: View {
     @Environment(\.dismiss) private var dismiss
 
     private var manager: TrapTubeEQManager { TrapTubeEQManager.shared }
+
+    /// Round 20: the Ghost/Tap A/B selection. Reads and writes the
+    /// persisted choice; a change also posts the switch so whichever
+    /// player session is live swaps its audio leg at the current
+    /// position (the controller owns the switch - see
+    /// switchAudioPath).
+    private var audioPathSelection: Binding<String> {
+        Binding(
+            get: { UserDefaults.standard.string(forKey: "TrapTube.NativePlayer.AudioPath") ?? "ghost" },
+            set: { newValue in
+                UserDefaults.standard.set(newValue, forKey: "TrapTube.NativePlayer.AudioPath")
+                NotificationCenter.default.post(name: Notification.Name("TrapTubeAudioPathChanged"),
+                                                object: nil, userInfo: ["path": newValue])
+            }
+        )
+    }
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -2077,6 +2573,21 @@ struct TrapTubeEqualizerPanel: View {
                         .onReceive(NotificationCenter.default.publisher(
                             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
                             if let status = note.userInfo?["status"] as? String { streamStatus = status }
+                        }
+                        // Round 20: Ghost/Tap A/B - Ghost renders
+                        // the audio through TrapTube's own engine
+                        // (the item plays muted); Tap processes the
+                        // stream in place on the item's mix.
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Audio path").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                            Picker("Audio path", selection: audioPathSelection) {
+                                Text("Ghost").tag("ghost")
+                                Text("Tap").tag("tap")
+                            }
+                            .pickerStyle(.segmented)
+                            Text("Switching keeps the song at its current position - only the audio leg changes hands.")
+                                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                         Button("Reset EQ to flat") { applyPreset(.flat) }
                             .font(.subheadline.weight(.bold)).foregroundStyle(accent)
@@ -2763,6 +3274,7 @@ struct TrapTubePlayerHomeView: View {
     @State private var showProfile = false
     @State private var authSignedIn = TrapTubeYouTubeAuth.isSignedIn
     @State private var authStale = TrapTubeYouTubeAuth.isSessionStale
+    @ObservedObject private var miniStore = TrapTubeMiniPlayerStore.shared
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -2784,6 +3296,9 @@ struct TrapTubePlayerHomeView: View {
                 detectedButton(detectedID)
             }
             content
+            if let mini = miniStore.controller {
+                miniPlayerBar(mini)
+            }
         }
         .task {
             // Round 19: pay the EQ manager's one-time engine-graph
@@ -2814,6 +3329,44 @@ struct TrapTubePlayerHomeView: View {
         }) {
             TrapTubeProfileView()
         }
+    }
+
+    /// Round 20: the minimized session's bar - play/pause, the
+    /// title and path readout, close, and tap-to-reopen, which
+    /// re-presents the player with the SAME controller (nothing
+    /// reloads, the position is untouched).
+    private func miniPlayerBar(_ controller: TrapTubePlayerController) -> some View {
+        HStack(spacing: 12) {
+            Button { controller.togglePlayPause() } label: {
+                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(accent, in: Circle())
+            }
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                Text(controller.pathStatusText.isEmpty ? "Now playing" : controller.pathStatusText)
+                    .font(.caption2).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let saved = miniStore.request { request = saved }
+            }
+            Button { miniStore.close() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
     }
 
     private var accountBar: some View {
