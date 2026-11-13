@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import AVKit
 import SwiftUI
 import UIKit
 import WebKit
@@ -578,6 +579,42 @@ enum TrapTubeCurrentVideo {
 
 // MARK: - Player controller
 
+/// Delegate bridge for AVPictureInPictureController. Kept as its own
+/// non-isolated NSObject so the @MainActor player controller never has to
+/// satisfy AVKit's delegate requirements directly; callbacks hop to the
+/// main actor through the closures the controller installs.
+private final class TrapTubePiPDelegateBridge: NSObject, AVPictureInPictureControllerDelegate {
+    var onDidStart: (() -> Void)?
+    var onDidStop: (() -> Void)?
+    var onFailed: ((Error) -> Void)?
+
+    func pictureInPictureControllerDidStartPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController) {
+        onDidStart?()
+    }
+
+    func pictureInPictureControllerDidStopPictureInPicture(
+        _ pictureInPictureController: AVPictureInPictureController) {
+        onDidStop?()
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        failedToStartPictureInPictureWithError error: Error) {
+        onFailed?(error)
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+        completionHandler: @escaping (Bool) -> Void) {
+        // The inline player sheet is dismissed while PiP runs, so there is
+        // no inline interface to restore into; ending PiP then tears the
+        // retained session down cleanly (see onDidStop in the controller).
+        completionHandler(false)
+    }
+}
+
 @MainActor
 final class TrapTubePlayerController: ObservableObject {
     let player = AVPlayer()
@@ -585,6 +622,23 @@ final class TrapTubePlayerController: ObservableObject {
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
     private var loadTask: Task<Void, Never>?
+
+    // Picture-in-picture state. The controller owns the PiP controller and
+    // its delegate bridge; the inline view hands its AVPlayerLayer over via
+    // registerPlayerLayer(_:) because PiP binds to the layer, not the view.
+    private var pipController: AVPictureInPictureController?
+    private let pipDelegate = TrapTubePiPDelegateBridge()
+    private weak var playerLayer: AVPlayerLayer?
+    @Published var isPictureInPictureActive = false
+    /// Incremented every time PiP actually starts; the view observes this
+    /// to dismiss the player sheet, which is the standard PiP behavior.
+    @Published var pictureInPictureStartCount = 0
+
+    /// While PiP is running the player sheet (and with it this controller's
+    /// @StateObject owner) goes away, so the controller retains itself here
+    /// until PiP stops; otherwise the AVPlayer, its EQ tap and the PiP
+    /// session would all be released the moment the sheet dismisses.
+    private static var retainedForPictureInPicture: TrapTubePlayerController?
 
     @Published var title = ""
     @Published var author = ""
@@ -597,6 +651,44 @@ final class TrapTubePlayerController: ObservableObject {
 
     init() {
         hook.install(on: player)
+        pipDelegate.onDidStart = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isPictureInPictureActive = true
+                self.pictureInPictureStartCount += 1
+                NSLog("[TrapTube Player] Picture in Picture started")
+            }
+        }
+        pipDelegate.onDidStop = { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isPictureInPictureActive = false
+                NSLog("[TrapTube Player] Picture in Picture stopped")
+                // If the sheet is gone, this controller only exists because
+                // stop() retained it for the PiP session: finish teardown.
+                if Self.retainedForPictureInPicture === self {
+                    Self.retainedForPictureInPicture = nil
+                    self.player.pause()
+                    self.hook.invalidate()
+                    self.itemStatusObservation?.invalidate()
+                    self.itemStatusObservation = nil
+                    if let timeObserver = self.timeObserver {
+                        self.player.removeTimeObserver(timeObserver)
+                        self.timeObserver = nil
+                    }
+                }
+            }
+        }
+        pipDelegate.onFailed = { [weak self] error in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.isPictureInPictureActive = false
+                NSLog("[TrapTube Player] Picture in Picture failed to start: %@",
+                      TrapTubeErrorFormatting.describe(error))
+                TrapTubeEQManager.shared.setAttachmentStatus(
+                    "Picture in Picture couldn't start (\(TrapTubeErrorFormatting.describe(error)))")
+            }
+        }
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
             queue: .main) { [weak self] time in
@@ -611,6 +703,17 @@ final class TrapTubePlayerController: ObservableObject {
     }
 
     func load(videoID: String) {
+        // Picture in Picture requires a .playback audio session. The host
+        // YouTube app very likely already runs one, so any failure here is
+        // logged and playback continues untouched.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+        } catch {
+            NSLog("[TrapTube Player] Audio session setup failed (continuing): %@",
+                  TrapTubeErrorFormatting.describe(error))
+        }
         loadTask?.cancel()
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
@@ -695,10 +798,96 @@ final class TrapTubePlayerController: ObservableObject {
         if player.timeControlStatus == .playing { player.rate = newRate }
     }
 
+    // MARK: Fullscreen + Picture in Picture
+
+    /// The inline layer view reports its AVPlayerLayer here; PiP binds to
+    /// that layer, so this is the controller's only handle on it.
+    func registerPlayerLayer(_ layer: AVPlayerLayer) {
+        playerLayer = layer
+        setupPictureInPictureIfNeeded()
+    }
+
+    private func setupPictureInPictureIfNeeded() {
+        guard pipController == nil,
+              let layer = playerLayer,
+              AVPictureInPictureController.isPictureInPictureSupported() else { return }
+        guard let pip = AVPictureInPictureController(playerLayer: layer) else {
+            NSLog("[TrapTube Player] AVPictureInPictureController init returned nil")
+            return
+        }
+        pip.delegate = pipDelegate
+        pip.requiresLinearPlayback = false
+        pip.canStartPictureInPictureAutomaticallyFromInline = false
+        pipController = pip
+    }
+
+    /// PiP button action. Never a silent dead button: every failure path
+    /// lands on the EQ status line and in the log.
+    func togglePictureInPicture() {
+        guard AVPictureInPictureController.isPictureInPictureSupported() else {
+            TrapTubeEQManager.shared.setAttachmentStatus("Picture in Picture isn't supported on this device")
+            return
+        }
+        setupPictureInPictureIfNeeded()
+        guard let pip = pipController else {
+            NSLog("[TrapTube Player] No PiP controller available for toggle")
+            TrapTubeEQManager.shared.setAttachmentStatus("Picture in Picture isn't ready yet - try again in a moment")
+            return
+        }
+        if pip.isPictureInPictureActive {
+            pip.stopPictureInPicture()
+        } else if pip.isPictureInPicturePossible {
+            pip.startPictureInPicture()
+        } else {
+            NSLog("[TrapTube Player] PiP toggled while not possible (item not ready)")
+            TrapTubeEQManager.shared.setAttachmentStatus("Picture in Picture is available once the video is playing")
+        }
+    }
+
+    /// Native fullscreen: Apple's own AVPlayerViewController UI (with its
+    /// own PiP affordance) over the SAME AVPlayer, so playback position,
+    /// playing state and the EQ tap all carry across and survive the
+    /// return to the inline view. No presenter -> safe no-op.
+    func presentFullscreen() {
+        guard let presenter = Self.topViewController() else {
+            NSLog("[TrapTube Player] Fullscreen requested but no presenter found")
+            return
+        }
+        let fullscreen = AVPlayerViewController()
+        fullscreen.player = player
+        fullscreen.showsPlaybackControls = true
+        fullscreen.allowsPictureInPicturePlayback = true
+        fullscreen.modalPresentationStyle = .fullScreen
+        presenter.present(fullscreen, animated: true)
+    }
+
+    /// Topmost presented view controller in the foreground scene, found by
+    /// the same scene/root walk TrapTubeCurrentVideo uses in this file.
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+                ?? scenes.first,
+              var top = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+                ?? scene.windows.first?.rootViewController else { return nil }
+        while let presented = top.presentedViewController { top = presented }
+        return top
+    }
+
     func stop() {
+        // PiP is live: the sheet is dismissing BECAUSE PiP started. Keep
+        // the player, its EQ tap and this controller alive (self-retained)
+        // until the PiP delegate reports the session has fully stopped.
+        if isPictureInPictureActive || pipController?.isPictureInPictureActive == true {
+            Self.retainedForPictureInPicture = self
+            loadTask?.cancel()
+            NSLog("[TrapTube Player] View dismissed during PiP; session retained until PiP stops")
+            return
+        }
         loadTask?.cancel()
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
+        pipController?.delegate = nil
+        pipController = nil
         player.pause()
         hook.invalidate()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
@@ -710,6 +899,9 @@ final class TrapTubePlayerController: ObservableObject {
 
 private struct TrapTubePlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    /// Hands the concrete AVPlayerLayer to the controller, which needs it
+    /// to bind AVPictureInPictureController.
+    var onLayerAvailable: ((AVPlayerLayer) -> Void)?
 
     final class LayerView: UIView {
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
@@ -721,11 +913,13 @@ private struct TrapTubePlayerLayerView: UIViewRepresentable {
         view.playerLayer.player = player
         view.playerLayer.videoGravity = .resizeAspect
         view.backgroundColor = .black
+        onLayerAvailable?(view.playerLayer)
         return view
     }
 
     func updateUIView(_ uiView: LayerView, context: Context) {
         uiView.playerLayer.player = player
+        onLayerAvailable?(uiView.playerLayer)
     }
 }
 
@@ -775,6 +969,12 @@ struct TrapTubeNativePlayerView: View {
             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
             if let status = note.userInfo?["status"] as? String { streamStatus = status }
         }
+        .onChange(of: controller.pictureInPictureStartCount) { _ in
+            // Standard PiP behavior: once the video is floating, the
+            // inline player sheet steps out of the way. The controller
+            // retains the session (see stop()) so playback + EQ continue.
+            dismiss()
+        }
         .sheet(isPresented: $showEQ) {
             TrapTubeEqualizerPanel()
         }
@@ -808,7 +1008,32 @@ struct TrapTubeNativePlayerView: View {
 
     private var videoArea: some View {
         ZStack {
-            TrapTubePlayerLayerView(player: controller.player)
+            TrapTubePlayerLayerView(player: controller.player,
+                                    onLayerAvailable: { controller.registerPlayerLayer($0) })
+            VStack {
+                Spacer()
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button { controller.togglePictureInPicture() } label: {
+                        Image(systemName: controller.isPictureInPictureActive ? "pip.exit" : "pip.enter")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    Button { controller.presentFullscreen() } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.trailing, 10)
+                .padding(.bottom, 10)
+            }
             if controller.isLoading {
                 ProgressView().tint(.white).scaleEffect(1.3)
             }
@@ -903,11 +1128,6 @@ struct TrapTubeNativePlayerView: View {
                 }
                 .buttonStyle(.plain)
             }
-
-            Text("This is TrapTube's own player, so the equalizer tap attaches to its audio. Adjust bands on the Equalizer tab - changes apply live. Pause the video in YouTube's own player first if it's also playing.")
-                .font(.caption)
-                .foregroundStyle(Color.white.opacity(0.45))
-                .fixedSize(horizontal: false, vertical: true)
         }
         .padding(16)
         .ttGlassCard(cornerRadius: 20)
@@ -929,8 +1149,54 @@ struct TrapTubeNativePlayerView: View {
 // this panel, and every change applies live to the playing item through the
 // shared manager.
 
+/// One-tap EQ presets for the panel. Band gains are dB for the manager's
+/// 16 frequencies in order (31, 62, 125, 250, 500, 750, 1k, 1.5k, 2k, 3k,
+/// 4k, 6k, 8k, 10k, 12k, 16k); every value sits inside the manager's
+/// clamps (±12 dB bands, 0-20 dB bass, 0-200% master), so applying one is
+/// just the normal setters, live on the playing stream.
+struct TrapTubeEQPreset {
+    let name: String
+    let bandGains: [Float]
+    let bass: Float
+    let master: Float
+
+    static let flat = TrapTubeEQPreset(
+        name: "Flat",
+        bandGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 0, master: 100)
+    static let trap = TrapTubeEQPreset(
+        name: "Trap",
+        bandGains: [7, 6, 4, 1, -1, -1, 0, 1, 2, 2, 3, 3, 4, 4, 3, 2],
+        bass: 8, master: 105)
+    static let drill = TrapTubeEQPreset(
+        name: "Drill",
+        bandGains: [8, 7, 5, 2, 0, -2, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3],
+        bass: 10, master: 105)
+    static let hipHop = TrapTubeEQPreset(
+        name: "Hip-Hop",
+        bandGains: [5, 5, 4, 2, 1, 0, 1, 2, 3, 3, 2, 2, 2, 1, 0, 0],
+        bass: 6, master: 105)
+    static let bass = TrapTubeEQPreset(
+        name: "Bass",
+        bandGains: [10, 9, 7, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 14, master: 95)
+    static let clarity = TrapTubeEQPreset(
+        name: "Clarity",
+        bandGains: [-2, -2, -1, -3, -2, 0, 1, 2, 3, 4, 4, 3, 3, 4, 4, 5],
+        bass: 2, master: 110)
+
+    /// Genre-first order; Flat sits last as the reset-style option.
+    static let all: [TrapTubeEQPreset] = [.trap, .drill, .hipHop, .bass, .clarity, .flat]
+}
+
 struct TrapTubeEqualizerPanel: View {
     @State private var streamStatus = "Not attached yet"
+    @State private var selectedPresetName: String? =
+        UserDefaults.standard.string(forKey: "TrapTube.EQ.Preset")
+    /// TrapTubeEQSliderRow snapshots its value at init, so after a preset
+    /// is applied programmatically this token is bumped and used as the
+    /// slider cards' .id(...) to force fresh rows showing the new values.
+    @State private var eqRefreshToken = 0
     @Environment(\.dismiss) private var dismiss
 
     private var manager: TrapTubeEQManager { TrapTubeEQManager.shared }
@@ -942,6 +1208,58 @@ struct TrapTubeEqualizerPanel: View {
         return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
                      green: Double((value >> 8) & 255) / 255,
                      blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    /// Applies a preset live through the manager setters, remembers it,
+    /// and forces the (snapshot-based) slider rows to rebuild so the
+    /// sliders visibly jump to the preset's values.
+    private func applyPreset(_ preset: TrapTubeEQPreset) {
+        for (index, gain) in preset.bandGains.enumerated() {
+            manager.setBandGain(gain, at: index)
+        }
+        manager.setBassBoost(preset.bass)
+        manager.setMasterGainPercent(preset.master)
+        selectedPresetName = preset.name
+        UserDefaults.standard.set(preset.name, forKey: "TrapTube.EQ.Preset")
+        eqRefreshToken += 1
+    }
+
+    /// A manual slider move means the sound no longer matches any preset.
+    private func noteManualEQChange() {
+        if selectedPresetName != nil {
+            selectedPresetName = nil
+            UserDefaults.standard.removeObject(forKey: "TrapTube.EQ.Preset")
+        }
+    }
+
+    private var presetsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("PRESETS").font(.caption.weight(.black))
+                .tracking(1.5).foregroundStyle(accent)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(TrapTubeEQPreset.all, id: \.name) { preset in
+                        Button { applyPreset(preset) } label: {
+                            Text(preset.name)
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(selectedPresetName == preset.name
+                                            ? AnyShapeStyle(accent)
+                                            : AnyShapeStyle(.ultraThinMaterial),
+                                            in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            Text("One tap sets all 16 bands, bass and master for the sound you want - tweak any slider afterwards to make it yours.")
+                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .ttGlassCard(cornerRadius: 18)
     }
 
     var body: some View {
@@ -979,20 +1297,29 @@ struct TrapTubeEqualizerPanel: View {
                             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
                             if let status = note.userInfo?["status"] as? String { streamStatus = status }
                         }
-                        Button("Reset EQ to flat") { manager.resetAll() }
+                        Button("Reset EQ to flat") { applyPreset(.flat) }
                             .font(.subheadline.weight(.bold)).foregroundStyle(accent)
                     }
                     .padding(16)
                     .ttGlassCard(cornerRadius: 18)
 
+                    presetsCard
+
                     VStack(alignment: .leading, spacing: 16) {
                         TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
-                                            range: 0...20, suffix: " dB") { manager.setBassBoost($0) }
+                                            range: 0...20, suffix: " dB") {
+                            manager.setBassBoost($0)
+                            noteManualEQChange()
+                        }
                         TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
-                                            range: 0...200, suffix: "%") { manager.setMasterGainPercent($0) }
+                                            range: 0...200, suffix: "%") {
+                            manager.setMasterGainPercent($0)
+                            noteManualEQChange()
+                        }
                     }
                     .padding(16)
                     .ttGlassCard(cornerRadius: 18)
+                    .id(eqRefreshToken)
 
                     VStack(alignment: .leading, spacing: 14) {
                         Text("16-BAND EQUALIZER").font(.caption.weight(.black))
@@ -1006,11 +1333,13 @@ struct TrapTubeEqualizerPanel: View {
                             TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
                                                 range: -12...12, suffix: " dB") {
                                 manager.setBandGain($0, at: index)
+                                noteManualEQChange()
                             }
                         }
                     }
                     .padding(16)
                     .ttGlassCard(cornerRadius: 18)
+                    .id(eqRefreshToken)
 
                     Text("EQ applies to the TrapTube Player and to TrapTube-owned audio. YouTube's own player renders through its private pipeline and doesn't expose its audio.")
                         .font(.caption).foregroundStyle(Color.white.opacity(0.45))
