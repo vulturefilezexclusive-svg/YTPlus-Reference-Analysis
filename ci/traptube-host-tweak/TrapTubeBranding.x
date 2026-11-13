@@ -145,6 +145,19 @@ static void TTStyleTrapTubeBrandLabel(UILabel *label) {
     label.layer.shadowOpacity = 0.65;
 }
 
+// Round 18: the version footer's replacement text (see
+// TTVersionFooterReplacementText) contains no "TrapTube" token, so
+// TTStyleTrapTubeBrandLabel above would skip it. This applies the exact
+// same styling the brand path gave the original footer label.
+static void TTStyleBanditFooterLabel(UILabel *label) {
+    if (!label) return;
+    label.font = TTBrandDisplayFont(label.font.pointSize > 0 ? label.font.pointSize : 18);
+    label.layer.shadowColor = [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:0.9].CGColor;
+    label.layer.shadowOffset = CGSizeMake(0, 1);
+    label.layer.shadowRadius = 2.0;
+    label.layer.shadowOpacity = 0.65;
+}
+
 static UIColor *TTColorFromHex(NSString *hex) {
     NSString *value = [[hex stringByReplacingOccurrencesOfString:@"#" withString:@""] uppercaseString];
     if (value.length != 6) return [UIColor colorWithRed:0.82 green:0.035 blue:0.12 alpha:1.0];
@@ -426,15 +439,30 @@ static void TTAppendVisibleSettingsText(UIView *view, NSMutableString *buffer, N
     }
 }
 
+static BOOL TTIsRemovedVersionFooter(NSString *text);
+static NSString *TTVersionFooterReplacementText(void);
+
 static void TTPruneRemovedSettingsRows(UIView *root) {
     for (UIView *view in [root.subviews copy]) {
+        // Round 18: the version footer is replaced, never hidden. If a
+        // footer label reached the screen still carrying its original
+        // text (set through a path the model/label hooks cannot
+        // intercept), rewrite it in place here. Assigning .text routes
+        // through the UILabel hook, which substitutes and restyles.
+        if ([view isKindOfClass:UILabel.class]) {
+            UILabel *footerLabel = (UILabel *)view;
+            if (TTIsRemovedVersionFooter(footerLabel.text)) {
+                footerLabel.hidden = NO;
+                footerLabel.text = TTVersionFooterReplacementText();
+            }
+        }
         BOOL isRow = [view isKindOfClass:UITableViewCell.class] ||
                      [view isKindOfClass:UICollectionViewCell.class] ||
                      [NSStringFromClass(view.class) containsString:@"HeaderFooterView"];
         if (isRow) {
             NSMutableString *text = [NSMutableString string];
             TTAppendVisibleSettingsText(view, text, 0);
-            if (TTShouldHideRenderedSettingsText(text)) {
+            if (TTShouldHideRenderedSettingsText(text) && !TTIsRemovedVersionFooter(text)) {
                 view.hidden = YES;
                 view.accessibilityElementsHidden = YES;
                 view.frame = CGRectZero;
@@ -1073,14 +1101,23 @@ static BOOL TTSuppressPresentation(UIViewController *controller) {
 
 static BOOL TTIsRemovedVersionFooter(NSString *text);
 
+// Round 18: the settings version footer ("<brand>: 6.0~b2 • YouTube:
+// <host version>") is NOT removed anymore. Wherever it is set on the
+// settings model or one of its sections - or rendered by a label the
+// model hooks cannot reach - its text is replaced with this credit line.
+static NSString *TTVersionFooterReplacementText(void) {
+    return @"THIS WAS CRACKED BY A BANDIT 😤";
+}
+
 // MARK: - YTPlus (YTLite) settings model filtering
 //
 // The Plus settings screen never uses YTSettingsViewController. It is built
 // from DVNTableModel / DVNSection / DVNCell objects (signatures confirmed from
 // the host binary) assembled by YTPSettingsBuilder and rendered by
 // DVNTableViewController. Filtering at the model chokepoints below removes
-// the Account / Developer / Credits sections, the Discord RPC row and the
-// version footer before anything is rendered.
+// the Account / Developer / Credits sections and the Discord RPC row before
+// anything is rendered; the version footer is kept and its text replaced
+// (see TTVersionFooterReplacementText).
 
 static BOOL TTShouldHideDVNCellText(NSString *title) {
     if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
@@ -1392,7 +1429,7 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 
 - (void)setFooter:(NSString *)footer {
     if (footer.length && TTIsRemovedVersionFooter(footer)) {
-        %orig(nil);
+        %orig(TTVersionFooterReplacementText());
         return;
     }
     %orig;
@@ -1408,7 +1445,7 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 }
 
 + (id)modelWithTitle:(NSString *)title header:(NSString *)header footer:(NSString *)footer sections:(NSArray *)sections {
-    if (footer.length && TTIsRemovedVersionFooter(footer)) footer = nil;
+    if (footer.length && TTIsRemovedVersionFooter(footer)) footer = TTVersionFooterReplacementText();
     if (TTFeatureSettingsTitleToken(title) || TTSectionsBelongToFeaturePage(sections)) {
         return %orig(title, header, footer, sections);
     }
@@ -1445,7 +1482,7 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 
 - (void)setFooter:(NSString *)footer {
     if (footer.length && TTIsRemovedVersionFooter(footer)) {
-        %orig(nil);
+        %orig(TTVersionFooterReplacementText());
         return;
     }
     %orig;
@@ -1755,17 +1792,31 @@ static UIImage *TTTrapTubeWordmark(void) {
 static BOOL TTIsRemovedVersionFooter(NSString *text) {
     if (![text isKindOfClass:NSString.class] || text.length == 0) return NO;
     NSString *value = [[text stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet] lowercaseString];
-    // Match the footer as it is actually rendered: "TrapTube Plus: 6.0~b2 ...".
-    return [value containsString:@"traptube plus: 6.0~b2"] ||
-           ([value containsString:@"traptube"] && [value containsString:@"6.0~b2"]);
+    // The footer is built dynamically by YTLite ("<brand>: 6.0~b2 • YouTube:
+    // <host version>"), and different layers see different brand forms of
+    // it: the raw "YTPlus: ..." string reaches the model setters, while the
+    // rebranded "TrapTube Plus: ..." is what finally renders. The previous
+    // matcher only knew the rebranded form, so the raw string passed every
+    // hook untouched and the footer stayed visible on device. Keep those
+    // exact clauses, then match the footer's shape so every form is
+    // caught: a "plus" brand token, the 6.0 build stamp and the
+    // "YouTube:" segment, in any punctuation variant.
+    if ([value containsString:@"traptube plus: 6.0~b2"] ||
+        ([value containsString:@"traptube"] && [value containsString:@"6.0~b2"])) return YES;
+    return [value containsString:@"plus"] &&
+           [value containsString:@"6.0"] &&
+           [value containsString:@"youtube:"];
 }
 
 %hook UILabel
 - (void)setText:(NSString *)text {
     if (TTIsRemovedVersionFooter(text)) {
-        self.hidden = YES;
-        self.userInteractionEnabled = NO;
-        %orig(@"");
+        // Round 18: replace the version footer's text, never hide it.
+        // The label is the footer's own styled label; the bandit text
+        // carries no brand token, so its bubbly styling is applied
+        // explicitly right after the text lands.
+        %orig(TTVersionFooterReplacementText());
+        TTStyleBanditFooterLabel(self);
         return;
     }
     %orig(TTRebrandedHostText(text));
@@ -1773,9 +1824,15 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
 }
 - (void)setAttributedText:(NSAttributedString *)text {
     if (TTIsRemovedVersionFooter(text.string)) {
-        self.hidden = YES;
-        self.userInteractionEnabled = NO;
-        %orig(nil);
+        // Round 18: swap the version footer's words, keep its styling -
+        // reuse the incoming attributes and force the same display font
+        // the brand path below applies, at the incoming font's size.
+        NSMutableDictionary *attributes = [NSMutableDictionary dictionary];
+        if (text.length) [attributes addEntriesFromDictionary:[text attributesAtIndex:0 effectiveRange:NULL]];
+        UIFont *sourceFont = attributes[NSFontAttributeName];
+        CGFloat size = sourceFont ? sourceFont.pointSize : (self.font.pointSize > 0 ? self.font.pointSize : 18);
+        attributes[NSFontAttributeName] = TTBrandDisplayFont(size);
+        %orig([[NSAttributedString alloc] initWithString:TTVersionFooterReplacementText() attributes:attributes]);
         return;
     }
     if (TTIsTrapTubeBrandText(text.string)) {
@@ -1789,16 +1846,19 @@ static BOOL TTIsRemovedVersionFooter(NSString *text) {
     }
 }
 - (void)setFont:(UIFont *)font {
-    %orig(TTIsTrapTubeBrandText(self.text) ? TTBrandDisplayFont(font.pointSize) : font);
+    // Round 18: a label already showing the replacement footer text keeps
+    // the bubbly display font when its font is (re)set, exactly as a
+    // brand-text label does.
+    BOOL styled = TTIsTrapTubeBrandText(self.text) ||
+                  [self.text isEqualToString:TTVersionFooterReplacementText()];
+    %orig(styled ? TTBrandDisplayFont(font.pointSize) : font);
 }
 %end
 
 %hook UIButton
 - (void)setTitle:(NSString *)title forState:(UIControlState)state {
     if (TTIsRemovedVersionFooter(title)) {
-        self.hidden = YES;
-        self.userInteractionEnabled = NO;
-        %orig(@"", state);
+        %orig(TTVersionFooterReplacementText(), state);
         return;
     }
     %orig(TTRebrandedHostText(title), state);
