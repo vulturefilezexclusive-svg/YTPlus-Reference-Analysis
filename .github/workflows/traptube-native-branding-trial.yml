@@ -464,6 +464,12 @@ jobs:
           grep -Fq 'X-Goog-AuthUser' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'Last answer from YouTube' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           test "$(grep -c 'TrapTubeYouTubeAuth.applyAuth(to: &request)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 1 || { echo "VERIFY FAIL: auth headers must be attached in exactly one place (TrapTubeInnerTube.performPost) and never in the stream resolver"; exit 28; }
+          grep -Fq 'diagnosticsLine' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'func noteDiagnostic' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Round 15 diagnostics' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'item readyToPlay' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'ITEM FAILED' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'onStep' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
