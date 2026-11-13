@@ -33,10 +33,16 @@ public final class TrapTubeEQManager: NSObject {
         weak var item: AVPlayerItem?
         let originalMix: AVAudioMix?
         let installedMix: AVAudioMix
-        init(item: AVPlayerItem, originalMix: AVAudioMix?, installedMix: AVAudioMix) {
+        /// The same mix as a mutable object, kept so a re-attach can
+        /// repair its parameter list IN PLACE (Round 20) instead of
+        /// assigning a new mix to the playing item.
+        let installedMutableMix: AVMutableAudioMix
+        init(item: AVPlayerItem, originalMix: AVAudioMix?, installedMix: AVAudioMix,
+             installedMutableMix: AVMutableAudioMix) {
             self.item = item
             self.originalMix = originalMix
             self.installedMix = installedMix
+            self.installedMutableMix = installedMutableMix
         }
     }
     private var attachmentRecords: [ObjectIdentifier: AttachmentRecord] = [:]
@@ -247,13 +253,65 @@ public final class TrapTubeEQManager: NSObject {
         attachmentLock.lock()
         defer { attachmentLock.unlock() }
         let itemID = ObjectIdentifier(item)
+        // Round 20 (seamless re-attach): snapshot any existing record
+        // and the playhead BEFORE validation prunes a stale record.
+        // Nothing in this path ever replaces the player item, reloads
+        // the asset or seeks - the playhead lives on the item's
+        // timeline, which attach never touches - and the two install
+        // modes below are ordered to disturb the live pipeline as
+        // little as possible.
+        let priorRecord = attachmentRecords[itemID]
+        let isReattach = priorRecord != nil && priorRecord?.item === item
+        let positionBefore = item.currentTime().seconds
         // Round 19: a record alone is not proof - validate against the
         // item's live mix (this also prunes a displaced record so the
         // install below starts from the mix that is actually there).
         if validatedAttachment(for: item) != nil { return true }
         setAttachmentStatus("Installing the EQ tap on this stream...")
 
+        // Mode 1 (zero pipeline disturbance): the item's live mix IS
+        // the mix object we installed earlier - only its parameter
+        // list lost our tap. Rebuild the tap parameters on that same
+        // object and return: the item keeps the identical mix
+        // instance, AVFoundation swaps nothing, and playback runs
+        // through the re-attach untouched at the same position.
+        if isReattach, let priorRecord, let liveMix = item.audioMix,
+           liveMix === priorRecord.installedMutableMix {
+            guard let parameters = makeTapParameters(tracks: tracks, originalMix: liveMix) else { return false }
+            priorRecord.installedMutableMix.inputParameters = parameters
+            setAttachmentStatus("Attached to the playing stream")
+            postReattachBreadcrumb(item: item, positionBefore: positionBefore, inPlace: true)
+            NSLog("[TrapTube EQ] Re-attached EQ tap in place on the live mix (no mix swap, position preserved)")
+            return true
+        }
+
+        // Mode 2: the live mix belongs to someone else now, so a new
+        // mix carrying our tap must be assigned. This is the ONLY mix
+        // assignment in the re-attach path, it is built from the
+        // item's CURRENT mix (host parameters carried over by
+        // makeTapParameters), and the breadcrumb below proves the
+        // playhead survived it.
         let originalMix = item.audioMix
+        guard let parameters = makeTapParameters(tracks: tracks, originalMix: originalMix) else { return false }
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = parameters
+        item.audioMix = mix
+        attachmentRecords[itemID] = AttachmentRecord(item: item, originalMix: originalMix,
+                                                    installedMix: mix, installedMutableMix: mix)
+        setAttachmentStatus("Attached to the playing stream")
+        NSLog("[TrapTube EQ] Installed audio tap on %lu audio track(s)", UInt(tracks.count))
+        if isReattach {
+            postReattachBreadcrumb(item: item, positionBefore: positionBefore, inPlace: false)
+        }
+        return true
+    }
+
+    /// Builds the input-parameter list for an install: the host's own
+    /// parameters carried over (copied, settings intact) plus our tap
+    /// on each of the item's audio tracks. Returns nil - leaving the
+    /// item and its mix untouched - when a foreign tap already
+    /// occupies one of the tracks.
+    private func makeTapParameters(tracks: [AVAssetTrack], originalMix: AVAudioMix?) -> [AVAudioMixInputParameters]? {
         // Host parameters that carry no processing tap of their own can be
         // reused: copy them, keep their settings, and add our tap. Only a
         // foreign tap already occupying one of this item's audio tracks is a
@@ -269,7 +327,7 @@ public final class TrapTubeEQManager: NSObject {
                 if existing.audioTapProcessor != nil {
                     setAttachmentStatus("Another audio tap already controls this stream")
                     NSLog("[TrapTube EQ] A foreign audio tap already occupies track %d; leaving host mix untouched", existing.trackID)
-                    return false
+                    return nil
                 }
                 if let mutableCopy = existing.mutableCopy() as? AVMutableAudioMixInputParameters {
                     parameters.append(mutableCopy)
@@ -279,7 +337,6 @@ public final class TrapTubeEQManager: NSObject {
             }
         }
 
-        let mix = AVMutableAudioMix()
         for track in tracks {
             // Attach to the reused host parameter copy for this track when one
             // exists, instead of adding a second parameter entry for it.
@@ -347,17 +404,36 @@ public final class TrapTubeEQManager: NSObject {
                 retainedTapContext.release()
                 setAttachmentStatus("The system rejected the EQ audio tap")
                 NSLog("[TrapTube EQ] MediaToolbox rejected audio tap creation (status=%d)", status)
-                return false
+                return nil
             }
             input.audioTapProcessor = tap
             if !parameters.contains(where: { $0 === input }) { parameters.append(input) }
         }
-        mix.inputParameters = parameters
-        item.audioMix = mix
-        attachmentRecords[itemID] = AttachmentRecord(item: item, originalMix: originalMix, installedMix: mix)
-        setAttachmentStatus("Attached to the playing stream")
-        NSLog("[TrapTube EQ] Installed audio tap on %lu audio track(s)", UInt(tracks.count))
-        return true
+        return parameters
+    }
+
+    /// Round 20: visible proof of a seamless re-attach. Compares the
+    /// playhead across the install and posts the result for the
+    /// player's status area: the re-attach happened at the preserved
+    /// position - or, if a mix swap ever did move the playhead, the
+    /// note says by how much instead of hiding it.
+    private func postReattachBreadcrumb(item: AVPlayerItem, positionBefore: Double, inPlace: Bool) {
+        let positionAfter = item.currentTime().seconds
+        let deltaMs = (positionAfter - positionBefore) * 1000
+        func clock(_ seconds: Double) -> String {
+            guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+            let total = Int(seconds.rounded())
+            return String(format: "%d:%02d", total / 60, total % 60)
+        }
+        let note: String
+        if positionBefore.isFinite, positionAfter.isFinite, abs(deltaMs) < 500 {
+            note = "EQ re-attached at \(clock(positionAfter)) - position kept\(inPlace ? " (in place, no mix swap)" : "")"
+        } else {
+            note = "EQ re-attached at \(clock(positionAfter)) - playhead moved \(Int(deltaMs.rounded())) ms"
+        }
+        NSLog("[TrapTube EQ] %@", note)
+        NotificationCenter.default.post(name: Notification.Name("TrapTubeEQReattachBreadcrumb"),
+                                        object: nil, userInfo: ["note": note])
     }
 
     public func detach(from item: AVPlayerItem) {
