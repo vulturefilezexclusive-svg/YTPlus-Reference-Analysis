@@ -10,6 +10,7 @@ public final class TrapTubeAudioHook: NSObject {
     private var itemObservation: NSKeyValueObservation?
     private var statusObservation: NSKeyValueObservation?
     private var audioMixObservation: NSKeyValueObservation?
+    private var playStateObservation: NSKeyValueObservation?
     private var attachmentTask: Task<Void, Never>?
     private weak var observedItem: AVPlayerItem?
 
@@ -193,7 +194,57 @@ public final class TrapTubeAudioHook: NSObject {
                 self.observeCurrentItem(observedPlayer.currentItem)
             }
         }
+        // Round 19: EVERY transition into .playing re-validates the EQ.
+        // Pause/resume (and replay-after-end, and play/pause inside the
+        // fullscreen AVPlayerViewController, whose button is not ours)
+        // never changes currentItem and never re-fires the item's
+        // status, so before this observer nothing re-checked the tap on
+        // resume - and the manager's record-only isAttached check would
+        // have waved the retry off anyway. The check itself is an
+        // identity comparison plus a scan of the live mix's parameters:
+        // cheap, and a no-op while the tap is really there.
+        playStateObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] observedPlayer, change in
+            guard change.newValue == .playing else { return }
+            DispatchQueue.main.async { [weak self, weak observedPlayer] in
+                guard let self, let observedPlayer,
+                      self.player === observedPlayer,
+                      let item = observedPlayer.currentItem,
+                      self.observedItem === item else { return }
+                self.revalidateAttachment(for: item)
+            }
+        }
         Self.noteHookStage("installDone")
+    }
+
+    /// Round 19: if the manager's validated check says the tap is not
+    /// actually on the item's current audio mix, run the normal attach
+    /// path again. Idempotent: attach() validates first and installs at
+    /// most one tap, so calling this on every play transition is safe.
+    private func revalidateAttachment(for item: AVPlayerItem) {
+        guard !TrapTubeEQManager.shared.isAttached(to: item) else { return }
+        NSLog("[TrapTube EQ] Playback (re)started without the EQ tap on the current mix; re-attaching")
+        attachWhenTracksAreReady(item)
+    }
+
+    /// Round 19: synchronous fast-path attach for the one moment the
+    /// async chain is pure delay - immediately after the player
+    /// controller has set the resolver's item and called play(). The
+    /// resolver already loaded and validated the item's tracks before
+    /// constructing it, so the loaded-tracks fast path lands the tap
+    /// now instead of after the currentItem KVO round-trip, a
+    /// main-queue hop and a redundant async track load. This runs
+    /// strictly AFTER play() - never inside the resolver's
+    /// construction window - and falls back to the normal async path
+    /// whenever the fast path cannot attach.
+    public func attachImmediately(to item: AVPlayerItem) {
+        guard player?.currentItem === item else { return }
+        if TrapTubeEQManager.shared.isAttached(to: item) { return }
+        if !item.asset.tracks(withMediaType: .audio).isEmpty,
+           TrapTubeEQManager.shared.attach(to: item) {
+            NSLog("[TrapTube EQ] Attached audio processing tap immediately after play()")
+            return
+        }
+        attachWhenTracksAreReady(item)
     }
 
     private func observeCurrentItem(_ item: AVPlayerItem?) {
@@ -278,6 +329,8 @@ public final class TrapTubeAudioHook: NSObject {
         attachmentTask = nil
         itemObservation?.invalidate()
         itemObservation = nil
+        playStateObservation?.invalidate()
+        playStateObservation = nil
         statusObservation?.invalidate()
         statusObservation = nil
         audioMixObservation?.invalidate()
