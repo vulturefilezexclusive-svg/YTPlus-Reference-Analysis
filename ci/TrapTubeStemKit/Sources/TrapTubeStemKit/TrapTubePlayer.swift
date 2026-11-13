@@ -2,6 +2,8 @@ import Foundation
 import AVFoundation
 import SwiftUI
 import UIKit
+import WebKit
+import CryptoKit
 
 // MARK: - Musi-style stream resolution
 //
@@ -20,6 +22,7 @@ enum TrapTubePlayerError: LocalizedError {
     case cipherProtected
     case noPlayableFormat
     case network(String)
+    case allProfilesFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -33,14 +36,259 @@ enum TrapTubePlayerError: LocalizedError {
             return "YouTube returned no format this player can use for this video."
         case .network(let detail):
             return "Couldn't reach YouTube: \(detail)"
+        case .allProfilesFailed(let details):
+            return "Playback failed - every YouTube client profile failed to build a playable stream. \(details)"
         }
+    }
+}
+
+/// Formats any error with its NSError domain and code, so a failure never
+/// surfaces as a bare "unknown error" (AVFoundation's -11800 localized
+/// description is literally that string, with the real cause hidden in the
+/// domain/code and the underlying error).
+enum TrapTubeErrorFormatting {
+    static func describe(_ error: Error) -> String {
+        if let playerError = error as? TrapTubePlayerError,
+           let description = playerError.errorDescription {
+            return description
+        }
+        let nsError = error as NSError
+        var text = "\(nsError.domain) \(nsError.code): \(nsError.localizedDescription)"
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? NSError,
+           underlying !== nsError {
+            text += " (underlying: \(underlying.domain) \(underlying.code): \(underlying.localizedDescription))"
+        }
+        return text
+    }
+
+    static func playbackFailure(_ error: Error) -> String {
+        if let playerError = error as? TrapTubePlayerError,
+           let description = playerError.errorDescription {
+            return description
+        }
+        return "Playback failed (\(describe(error)))"
+    }
+}
+
+// MARK: - YouTube account auth (Player section only)
+//
+// A dedicated sign-in for the TrapTube Player, separate from the host
+// YouTube app's own sign-in: a WKWebView completes Google's web login,
+// the resulting youtube.com cookies are stored locally, and subsequent
+// InnerTube requests carry Cookie + SAPISIDHASH Authorization headers so
+// the feed/search/player can answer as the signed-in account. The cookie
+// string is only ever stored in UserDefaults (the store this codebase
+// already uses for prefs) and attached to youtube.com requests - it is
+// never logged.
+
+struct TrapTubeChannelProfile {
+    let channelID: String
+    let title: String
+    let handle: String?
+
+    var channelURL: URL? {
+        if !channelID.isEmpty {
+            return URL(string: "https://www.youtube.com/channel/\(channelID)")
+        }
+        if let handle, !handle.isEmpty {
+            let clean = handle.hasPrefix("@") ? handle : "@\(handle)"
+            return URL(string: "https://www.youtube.com/\(clean)")
+        }
+        return nil
+    }
+}
+
+enum TrapTubeYouTubeAuth {
+    private static let cookieKey = "TrapTube.YouTube.CookieHeader"
+    private static let sapisidKey = "TrapTube.YouTube.SAPISID"
+    private static let channelIDKey = "TrapTube.YouTube.ChannelID"
+    private static let channelTitleKey = "TrapTube.YouTube.ChannelTitle"
+    private static let channelHandleKey = "TrapTube.YouTube.ChannelHandle"
+    static let origin = "https://www.youtube.com"
+
+    static var cookieHeader: String? {
+        let value = UserDefaults.standard.string(forKey: cookieKey)
+        return (value?.isEmpty == false) ? value : nil
+    }
+
+    static var sapisid: String? {
+        let value = UserDefaults.standard.string(forKey: sapisidKey)
+        return (value?.isEmpty == false) ? value : nil
+    }
+
+    static var isSignedIn: Bool { sapisid != nil || cookieHeader != nil }
+
+    static var cachedProfile: TrapTubeChannelProfile? {
+        guard let title = UserDefaults.standard.string(forKey: channelTitleKey), !title.isEmpty else {
+            return nil
+        }
+        return TrapTubeChannelProfile(
+            channelID: UserDefaults.standard.string(forKey: channelIDKey) ?? "",
+            title: title,
+            handle: UserDefaults.standard.string(forKey: channelHandleKey))
+    }
+
+    /// Stores the auth cookies found in the web view's cookie store.
+    /// Returns true when a real sign-in cookie (SAPISID family or
+    /// LOGIN_INFO) was present - callers must not fake a signed-in state
+    /// when this returns false.
+    @discardableResult
+    static func store(cookies: [HTTPCookie]) -> Bool {
+        let relevant = cookies.filter {
+            $0.domain.contains("youtube.com") || $0.domain.contains("google.com")
+        }
+        var sapisidValue: String?
+        var sawLoginCookie = false
+        for cookie in relevant {
+            if cookie.name == "SAPISID" || cookie.name == "__Secure-3PAPISID" {
+                sapisidValue = cookie.value
+            }
+            if cookie.name == "LOGIN_INFO" || cookie.name == "__Secure-3PAPISID" {
+                sawLoginCookie = true
+            }
+        }
+        guard sapisidValue != nil || sawLoginCookie else { return false }
+        let header = relevant
+            .filter { !$0.value.isEmpty }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: "; ")
+        guard !header.isEmpty else { return false }
+        UserDefaults.standard.set(header, forKey: cookieKey)
+        if let sapisidValue {
+            UserDefaults.standard.set(sapisidValue, forKey: sapisidKey)
+        }
+        return true
+    }
+
+    static func signOut() {
+        for key in [cookieKey, sapisidKey, channelIDKey, channelTitleKey, channelHandleKey] {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    static func cache(profile: TrapTubeChannelProfile) {
+        UserDefaults.standard.set(profile.channelID, forKey: channelIDKey)
+        UserDefaults.standard.set(profile.title, forKey: channelTitleKey)
+        if let handle = profile.handle {
+            UserDefaults.standard.set(handle, forKey: channelHandleKey)
+        }
+    }
+
+    /// SAPISIDHASH per YouTube's public web scheme:
+    /// sha1("<timestamp> <SAPISID> <origin>"), sent as
+    /// "SAPISIDHASH <timestamp>_<hex>".
+    static func authorizationHeader() -> String? {
+        guard let sapisid else { return nil }
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let input = "\(timestamp) \(sapisid) \(origin)"
+        let digest = Insecure.SHA1.hash(data: Data(input.utf8))
+        let hex = digest.map { String(format: "%02x", $0) }.joined()
+        return "SAPISIDHASH \(timestamp)_\(hex)"
+    }
+
+    static func applyAuth(to request: inout URLRequest) {
+        if let cookieHeader {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
+        if let authorizationHeader = authorizationHeader() {
+            request.setValue(authorizationHeader(), forHTTPHeaderField: "Authorization")
+            request.setValue(origin, forHTTPHeaderField: "X-Origin")
+        }
+    }
+
+    /// Fetches the signed-in account's own channel through authenticated
+    /// InnerTube calls. Tries the account-menu endpoint first, then the
+    /// account browse page, parsing both defensively: any unexpected JSON
+    /// shape just yields nil instead of a crash or a guessed identity.
+    static func fetchMyChannel() async -> TrapTubeChannelProfile? {
+        guard isSignedIn else { return nil }
+        if let json = try? await TrapTubeInnerTube.post(
+            endpoint: "https://www.youtube.com/youtubei/v1/account/getAccountMenu",
+            body: [:]),
+           let profile = parseChannelProfile(from: json) {
+            cache(profile: profile)
+            return profile
+        }
+        if let json = try? await TrapTubeInnerTube.post(
+            endpoint: "https://www.youtube.com/youtubei/v1/browse",
+            body: ["browseId": "FEaccount"]),
+           let profile = parseChannelProfile(from: json) {
+            cache(profile: profile)
+            return profile
+        }
+        return nil
+    }
+
+    static func parseChannelProfile(from json: [String: Any]) -> TrapTubeChannelProfile? {
+        var channelID: String?
+        var handle: String?
+        var accountName: String?
+        var titleNearChannelID: String?
+
+        func textValue(_ node: Any?) -> String? {
+            guard let dict = node as? [String: Any] else { return nil }
+            if let simple = dict["simpleText"] as? String { return simple }
+            if let runs = dict["runs"] as? [[String: Any]] {
+                let joined = runs.compactMap { $0["text"] as? String }.joined()
+                return joined.isEmpty ? nil : joined
+            }
+            return nil
+        }
+
+        func walk(_ node: Any) {
+            if let dict = node as? [String: Any] {
+                if let id = dict["channelId"] as? String,
+                   id.hasPrefix("UC"), id.count >= 20 {
+                    if channelID == nil { channelID = id }
+                    if titleNearChannelID == nil {
+                        titleNearChannelID = textValue(dict["title"]) ?? textValue(dict["name"])
+                    }
+                }
+                if let canonical = dict["canonicalBaseUrl"] as? String,
+                   canonical.hasPrefix("/@"), handle == nil {
+                    handle = String(canonical.dropFirst())
+                }
+                if let vanity = dict["vanityChannelUrl"] as? String,
+                   let atRange = vanity.range(of: "/@"), handle == nil {
+                    handle = String(vanity[atRange.upperBound...])
+                }
+                if accountName == nil {
+                    if let name = textValue(dict["accountName"]) {
+                        accountName = name
+                    } else if let nameString = dict["accountName"] as? String, !nameString.isEmpty {
+                        accountName = nameString
+                    }
+                }
+                if handle == nil {
+                    if let handleString = dict["handle"] as? String, handleString.hasPrefix("@") {
+                        handle = String(handleString.dropFirst())
+                    } else if let handleText = textValue(dict["handle"]), handleText.hasPrefix("@") {
+                        handle = String(handleText.dropFirst())
+                    } else if let channelHandle = dict["channelHandle"] as? String,
+                              channelHandle.hasPrefix("@") {
+                        handle = String(channelHandle.dropFirst())
+                    }
+                }
+                for value in dict.values { walk(value) }
+            } else if let array = node as? [Any] {
+                for value in array { walk(value) }
+            }
+        }
+        walk(json)
+
+        guard channelID != nil || handle != nil || accountName != nil else { return nil }
+        return TrapTubeChannelProfile(
+            channelID: channelID ?? "",
+            title: accountName ?? titleNearChannelID ?? "Your channel",
+            handle: handle.map { "@\($0)" })
     }
 }
 
 struct TrapTubeResolvedPlayback {
     let title: String
     let author: String
-    let makeItem: @Sendable () async throws -> AVPlayerItem
+    let item: AVPlayerItem
+    let profileName: String
 }
 
 enum TrapTubeStreamResolver {
@@ -102,69 +350,117 @@ enum TrapTubeStreamResolver {
     static func resolve(videoID: String) async throws -> TrapTubeResolvedPlayback {
         var sawCipher = false
         var lastPlayability: String?
+        var failures: [String] = []
         for profile in profiles {
-            let json = try await fetchPlayerResponse(videoID: videoID, profile: profile)
-            if let playability = json["playabilityStatus"] as? [String: Any],
-               let status = playability["status"] as? String, status != "OK" {
-                lastPlayability = (playability["reason"] as? String) ?? status
-                continue
-            }
-            guard let streaming = json["streamingData"] as? [String: Any] else {
-                continue
-            }
-            let details = json["videoDetails"] as? [String: Any]
-            let title = (details?["title"] as? String) ?? "YouTube video"
-            let author = (details?["author"] as? String) ?? ""
-
-            let muxed = formatList(streaming["formats"])
-            let adaptive = formatList(streaming["adaptiveFormats"])
-            if muxed.isEmpty && adaptive.isEmpty { continue }
-            if muxed.allSatisfy({ $0.url == nil }) && adaptive.allSatisfy({ $0.url == nil }) {
-                sawCipher = true
-                continue
-            }
-
-            // 1) A muxed MP4 (itag 22/18 style) is the simplest playable item.
-            let playableMuxed = muxed
-                .filter { $0.url != nil && $0.hasVideo && $0.hasAudio && $0.mime.contains("mp4") }
-                .sorted { $0.height > $1.height }
-            if let best = playableMuxed.first, let urlString = best.url, let url = URL(string: urlString) {
-                return TrapTubeResolvedPlayback(title: title, author: author) {
-                    AVPlayerItem(asset: AVURLAsset(url: url))
+            do {
+                let json = try await fetchPlayerResponse(videoID: videoID, profile: profile)
+                if let playability = json["playabilityStatus"] as? [String: Any],
+                   let status = playability["status"] as? String, status != "OK" {
+                    lastPlayability = (playability["reason"] as? String) ?? status
+                    continue
                 }
-            }
+                guard let streaming = json["streamingData"] as? [String: Any] else {
+                    failures.append("\(profile.name): no streaming data in the response")
+                    continue
+                }
+                let details = json["videoDetails"] as? [String: Any]
+                let title = (details?["title"] as? String) ?? "YouTube video"
+                let author = (details?["author"] as? String) ?? ""
 
-            // 2) Otherwise combine the best MP4 video-only and audio-only
-            //    adaptive formats into one composition; the composed audio
-            //    track accepts the EQ tap like any other track.
-            let videos = adaptive
-                .filter { $0.url != nil && $0.hasVideo && !$0.hasAudio && $0.mime.contains("mp4") && $0.mime.contains("avc1") }
-                .sorted { $0.height != $1.height ? $0.height > $1.height : $0.bitrate > $1.bitrate }
-            let audios = adaptive
-                .filter { $0.url != nil && $0.hasAudio && !$0.hasVideo && $0.mime.contains("mp4") }
-                .sorted { $0.bitrate > $1.bitrate }
-            if let video = videos.first(where: { $0.height <= 720 }) ?? videos.first,
-               let audio = audios.first,
-               let videoURL = URL(string: video.url ?? ""), let audioURL = URL(string: audio.url ?? "") {
-                return TrapTubeResolvedPlayback(title: title, author: author) {
-                    let videoAsset = AVURLAsset(url: videoURL)
-                    let audioAsset = AVURLAsset(url: audioURL)
+                let muxed = formatList(streaming["formats"])
+                let adaptive = formatList(streaming["adaptiveFormats"])
+                if muxed.isEmpty && adaptive.isEmpty { continue }
+                if muxed.allSatisfy({ $0.url == nil }) && adaptive.allSatisfy({ $0.url == nil }) {
+                    sawCipher = true
+                    continue
+                }
+
+                // Every AVURLAsset carries the resolving profile's
+                // User-Agent (plus a youtube.com Referer): googlevideo
+                // rejects AVPlayer's default agent on some clients, which
+                // used to fail track loading with a bare "unknown error".
+                let headers: [String: String] = [
+                    "User-Agent": profile.userAgent,
+                    "Referer": "https://www.youtube.com/",
+                ]
+
+                // 1) A muxed MP4 (itag 22/18 style) is the simplest playable
+                //    item - build AND validate it here, inside the profile
+                //    loop, so a failure falls through to the next profile
+                //    instead of dead-ending playback.
+                let playableMuxed = muxed
+                    .filter { $0.url != nil && $0.hasVideo && $0.hasAudio && $0.mime.contains("mp4") }
+                    .sorted { $0.height > $1.height }
+                if let best = playableMuxed.first, let urlString = best.url, let url = URL(string: urlString) {
+                    let asset = AVURLAsset(url: url, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
+                    let videoTracks = try await asset.loadTracks(withMediaType: .video)
+                    let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+                    guard !videoTracks.isEmpty, !audioTracks.isEmpty else {
+                        throw TrapTubePlayerError.noPlayableFormat
+                    }
+                    return TrapTubeResolvedPlayback(title: title, author: author,
+                                                    item: AVPlayerItem(asset: asset),
+                                                    profileName: profile.name)
+                }
+
+                // 2) Otherwise combine the best MP4 video-only and audio-only
+                //    adaptive formats into one composition; the composed
+                //    audio track accepts the EQ tap like any other track.
+                let videos = adaptive
+                    .filter { $0.url != nil && $0.hasVideo && !$0.hasAudio && $0.mime.contains("mp4") && $0.mime.contains("avc1") }
+                    .sorted { $0.height != $1.height ? $0.height > $1.height : $0.bitrate > $1.bitrate }
+                let audios = adaptive
+                    .filter { $0.url != nil && $0.hasAudio && !$0.hasVideo && $0.mime.contains("mp4") }
+                    .sorted { $0.bitrate > $1.bitrate }
+                if let video = videos.first(where: { $0.height <= 720 }) ?? videos.first,
+                   let audio = audios.first,
+                   let videoURL = URL(string: video.url ?? ""), let audioURL = URL(string: audio.url ?? "") {
+                    let videoAsset = AVURLAsset(url: videoURL, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
+                    let audioAsset = AVURLAsset(url: audioURL, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
                     guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
                           let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
                         throw TrapTubePlayerError.noPlayableFormat
                     }
+                    let videoDuration = try await videoAsset.load(.duration)
+                    let audioDuration = try await audioAsset.load(.duration)
+                    guard videoDuration.isValid, videoDuration.seconds > 0 else {
+                        throw TrapTubePlayerError.noPlayableFormat
+                    }
+                    // Clamp each track's range to its OWN duration: the
+                    // audio track is routinely a fraction shorter than the
+                    // video track, and inserting the video-length range for
+                    // it throws AVFoundationErrorDomain -11800 - literally
+                    // "unknown error".
+                    let videoRange = CMTimeRange(start: .zero, duration: videoDuration)
+                    let audioRange = (audioDuration.isValid && audioDuration.seconds > 0)
+                        ? CMTimeRange(start: .zero, duration: audioDuration.seconds < videoDuration.seconds ? audioDuration : videoDuration)
+                        : videoRange
                     let composition = AVMutableComposition()
-                    let duration = try await videoAsset.load(.duration)
-                    let range = CMTimeRange(start: .zero, duration: duration)
-                    let compVideo = composition.addMutableTrack(withMediaType: .video,
-                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
-                    try compVideo?.insertTimeRange(range, of: videoTrack, at: .zero)
-                    let compAudio = composition.addMutableTrack(withMediaType: .audio,
-                                                                preferredTrackID: kCMPersistentTrackID_Invalid)
-                    try compAudio?.insertTimeRange(range, of: audioTrack, at: .zero)
-                    return AVPlayerItem(asset: composition)
+                    guard let compVideo = composition.addMutableTrack(withMediaType: .video,
+                                                                      preferredTrackID: kCMPersistentTrackID_Invalid),
+                          let compAudio = composition.addMutableTrack(withMediaType: .audio,
+                                                                      preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                        throw TrapTubePlayerError.noPlayableFormat
+                    }
+                    try compVideo.insertTimeRange(videoRange, of: videoTrack, at: .zero)
+                    try compAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+                    return TrapTubeResolvedPlayback(title: title, author: author,
+                                                    item: AVPlayerItem(asset: composition),
+                                                    profileName: profile.name)
                 }
+                failures.append("\(profile.name): formats were present but none were directly playable")
+            } catch {
+                // Item construction (or the player request itself) failed
+                // for this profile: record the real error and try the next
+                // client instead of treating the first failure as final.
+                failures.append("\(profile.name): \(TrapTubeErrorFormatting.describe(error))")
+                NSLog("[TrapTube Player] Profile %@ failed: %@", profile.name,
+                      TrapTubeErrorFormatting.describe(error))
+                continue
             }
+        }
+        if !failures.isEmpty {
+            throw TrapTubePlayerError.allProfilesFailed(failures.joined(separator: " | "))
         }
         if sawCipher { throw TrapTubePlayerError.cipherProtected }
         if let reason = lastPlayability { throw TrapTubePlayerError.unplayable(reason) }
@@ -217,17 +513,23 @@ enum TrapTubeStreamResolver {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
+        TrapTubeYouTubeAuth.applyAuth(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw TrapTubePlayerError.network("unexpected response")
+            }
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                let serverMessage = ((json["error"] as? [String: Any])?["message"] as? String)
+                    ?? "HTTP \(http.statusCode)"
+                throw TrapTubePlayerError.network("YouTube refused the \(profile.name) player request: \(serverMessage)")
             }
             return json
         } catch let error as TrapTubePlayerError {
             throw error
         } catch {
-            throw TrapTubePlayerError.network(error.localizedDescription)
+            throw TrapTubePlayerError.network(TrapTubeErrorFormatting.describe(error))
         }
     }
 }
@@ -278,6 +580,7 @@ final class TrapTubePlayerController: ObservableObject {
     let player = AVPlayer()
     private let hook = TrapTubeAudioHook()
     private var timeObserver: Any?
+    private var itemStatusObservation: NSKeyValueObservation?
     private var loadTask: Task<Void, Never>?
 
     @Published var title = ""
@@ -306,6 +609,8 @@ final class TrapTubePlayerController: ObservableObject {
 
     func load(videoID: String) {
         loadTask?.cancel()
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         isLoading = true
         errorMessage = nil
         title = ""
@@ -313,18 +618,51 @@ final class TrapTubePlayerController: ObservableObject {
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
+                // resolve() now builds and validates the AVPlayerItem
+                // itself, per client profile, so a success here means a
+                // real item exists and the EQ hook can observe it.
                 let resolved = try await TrapTubeStreamResolver.resolve(videoID: videoID)
-                let item = try await resolved.makeItem()
                 guard !Task.isCancelled else { return }
                 self.title = resolved.title
                 self.author = resolved.author
-                self.player.replaceCurrentItem(with: item)
+                self.observeItemStatus(resolved.item)
+                self.player.replaceCurrentItem(with: resolved.item)
                 self.isLoading = false
                 self.player.play()
             } catch {
                 guard !Task.isCancelled else { return }
                 self.isLoading = false
-                self.errorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                self.errorMessage = TrapTubeErrorFormatting.playbackFailure(error)
+                // No item ever existed, so no EQ attach could start: say
+                // so plainly instead of leaving the status line sitting
+                // on a stale "attaching..." from the hook probe.
+                TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
+                NSLog("[TrapTube Player] Load failed for %@: %@", videoID,
+                      TrapTubeErrorFormatting.describe(error))
+            }
+        }
+    }
+
+    /// An item can also fail AFTER creation (network drop, a stream URL
+    /// the player itself rejects). Surface that failure with its real
+    /// domain/code instead of a bare "unknown error", and move the EQ
+    /// status off "attaching...".
+    private func observeItemStatus(_ item: AVPlayerItem) {
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
+            guard let item, item.status == .failed else { return }
+            let itemError = item.error
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let itemError {
+                    self.errorMessage = TrapTubeErrorFormatting.playbackFailure(itemError)
+                    NSLog("[TrapTube Player] Item failed after creation: %@",
+                          TrapTubeErrorFormatting.describe(itemError))
+                } else {
+                    self.errorMessage = "Playback failed (AVPlayerItem status became .failed with no error object)"
+                }
+                self.isLoading = false
+                TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
             }
         }
     }
@@ -356,6 +694,8 @@ final class TrapTubePlayerController: ObservableObject {
 
     func stop() {
         loadTask?.cancel()
+        itemStatusObservation?.invalidate()
+        itemStatusObservation = nil
         player.pause()
         hook.invalidate()
         if let timeObserver { player.removeTimeObserver(timeObserver) }
@@ -912,6 +1252,7 @@ enum TrapTubeInnerTube {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(webUserAgent, forHTTPHeaderField: "User-Agent")
+        TrapTubeYouTubeAuth.applyAuth(to: &request)
         request.httpBody = try JSONSerialization.data(withJSONObject: fullBody)
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -926,11 +1267,259 @@ enum TrapTubeInnerTube {
     }
 }
 
+// MARK: - Sign-in sheet and profile (Player section)
+//
+// Google is known to sometimes block embedded-browser logins ("This
+// browser or app may not be secure"). That path is handled honestly: the
+// sheet explains the block and that the main YouTube app's sign-in is a
+// separate system that does not carry cookies into the Player.
+
+private struct TrapTubeSignInWebView: UIViewRepresentable {
+    let onCookies: ([HTTPCookie]) -> Void
+    let onBlocked: () -> Void
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: TrapTubeSignInWebView
+        weak var webView: WKWebView?
+        var pollTimer: Timer?
+        var blockedReported = false
+
+        init(parent: TrapTubeSignInWebView) {
+            self.parent = parent
+        }
+
+        func startPolling() {
+            pollTimer?.invalidate()
+            pollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                self?.checkCookies()
+            }
+        }
+
+        func stopPolling() {
+            pollTimer?.invalidate()
+            pollTimer = nil
+        }
+
+        func checkCookies() {
+            webView?.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
+                self?.parent.onCookies(cookies)
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            checkCookies()
+            webView.evaluateJavaScript("document.body ? document.body.innerText : ''") { [weak self] result, _ in
+                guard let self, !self.blockedReported,
+                      let text = result as? String else { return }
+                if text.contains("may not be secure") || text.contains("Couldn't sign you in") {
+                    self.blockedReported = true
+                    self.parent.onBlocked()
+                }
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .default()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.navigationDelegate = context.coordinator
+        context.coordinator.webView = webView
+        context.coordinator.startPolling()
+        if let url = URL(string: "https://www.youtube.com/signin") {
+            webView.load(URLRequest(url: url))
+        }
+        return webView
+    }
+
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.parent = self
+    }
+
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        coordinator.stopPolling()
+    }
+}
+
+struct TrapTubeSignInView: View {
+    @State private var signedIn = TrapTubeYouTubeAuth.isSignedIn
+    @State private var blockedMessage: String?
+    @State private var statusText = "Sign in with the Google account you use on YouTube. This sign-in is only for the TrapTube Player - the main YouTube app's sign-in is separate."
+    @Environment(\.dismiss) private var dismiss
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(signedIn ? "YouTube account" : "Sign in to YouTube")
+                        .font(.headline.weight(.bold)).foregroundStyle(.white)
+                    Text(statusText)
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            if signedIn {
+                VStack(spacing: 12) {
+                    Image(systemName: "person.crop.circle.badge.checkmark")
+                        .font(.system(size: 44)).foregroundStyle(accent)
+                    Text("Signed in")
+                        .font(.headline.weight(.bold)).foregroundStyle(.white)
+                    Text("The Player feed, search and playback now use your account. Use My Channel to see your profile.")
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                    Button("Sign out of the Player") {
+                        TrapTubeYouTubeAuth.signOut()
+                        signedIn = false
+                        statusText = "Signed out of the TrapTube Player. The main YouTube app is unaffected."
+                    }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let blockedMessage {
+                VStack(spacing: 12) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 40)).foregroundStyle(accent)
+                    Text(blockedMessage)
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Try again") { self.blockedMessage = nil }
+                        .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                TrapTubeSignInWebView(onCookies: { cookies in
+                    if TrapTubeYouTubeAuth.store(cookies: cookies) {
+                        signedIn = true
+                        statusText = "Signed in to the TrapTube Player."
+                    }
+                }, onBlocked: {
+                    blockedMessage = "Sign-in was blocked by Google in this embedded browser - Google sometimes refuses logins from in-app web views. The main YouTube app's sign-in is separate and doesn't carry over to the Player, so the Player will keep working signed-out until Google allows this login."
+                })
+            }
+        }
+        .background(Color(red: 0.03, green: 0.03, blue: 0.045).ignoresSafeArea())
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct TrapTubeProfileView: View {
+    @State private var profile: TrapTubeChannelProfile? = TrapTubeYouTubeAuth.cachedProfile
+    @State private var isLoading = false
+    @State private var message: String?
+    @Environment(\.dismiss) private var dismiss
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                Text("My Channel")
+                    .font(.headline.weight(.bold)).foregroundStyle(.white)
+                Spacer()
+                Button("Done") { dismiss() }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            VStack(spacing: 14) {
+                Image(systemName: "person.crop.circle.fill")
+                    .font(.system(size: 56)).foregroundStyle(accent)
+                if let profile {
+                    Text(profile.title)
+                        .font(.title3.weight(.bold)).foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                    if let handle = profile.handle {
+                        Text(handle)
+                            .font(.subheadline).foregroundStyle(Color.white.opacity(0.6))
+                    }
+                    if let url = profile.channelURL {
+                        Button {
+                            UIApplication.shared.open(url)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "play.rectangle.fill")
+                                Text("Open in YouTube")
+                            }
+                            .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                            .padding(.horizontal, 16).padding(.vertical, 10)
+                            .background(accent, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else if isLoading {
+                    ProgressView().tint(.white)
+                    Text("Loading your channel…")
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.6))
+                } else {
+                    Text(message ?? "We couldn't read your channel details from YouTube yet. You're still signed in - try Refresh in a moment.")
+                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.65))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 24)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Button("Refresh") { Task { await loadProfile() } }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 24)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(red: 0.03, green: 0.03, blue: 0.045).ignoresSafeArea())
+        .preferredColorScheme(.dark)
+        .task { await loadProfile() }
+    }
+
+    private func loadProfile() async {
+        guard !isLoading else { return }
+        isLoading = true
+        defer { isLoading = false }
+        if let fetched = await TrapTubeYouTubeAuth.fetchMyChannel() {
+            profile = fetched
+            message = nil
+        } else if profile == nil {
+            message = "We couldn't read your channel details from YouTube yet. You're still signed in - try Refresh in a moment."
+        }
+    }
+}
+
 struct TrapTubePlayerHomeView: View {
     @StateObject private var feed = TrapTubeFeedModel()
     @State private var searchText = ""
     @State private var request: TrapTubePlayerRequest?
     @State private var detectedID: String?
+    @State private var showSignIn = false
+    @State private var showProfile = false
+    @State private var authSignedIn = TrapTubeYouTubeAuth.isSignedIn
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -944,6 +1533,7 @@ struct TrapTubePlayerHomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             searchBar
+            accountBar
             if !feed.isSearching {
                 categoryChips
             }
@@ -953,12 +1543,73 @@ struct TrapTubePlayerHomeView: View {
             content
         }
         .task {
+            authSignedIn = TrapTubeYouTubeAuth.isSignedIn
             if feed.items.isEmpty { await feed.loadHome() }
             detectedID = TrapTubeCurrentVideo.detectVideoID()
         }
         .fullScreenCover(item: $request) { request in
             TrapTubeNativePlayerView(request: request)
         }
+        .sheet(isPresented: $showSignIn, onDismiss: {
+            let nowSignedIn = TrapTubeYouTubeAuth.isSignedIn
+            if nowSignedIn != authSignedIn {
+                authSignedIn = nowSignedIn
+                Task { await feed.loadHome() }
+            }
+        }) {
+            TrapTubeSignInView()
+        }
+        .sheet(isPresented: $showProfile) {
+            TrapTubeProfileView()
+        }
+    }
+
+    private var accountBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                showSignIn = true
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: authSignedIn ? "person.crop.circle.badge.checkmark" : "person.crop.circle")
+                    Text(authSignedIn ? "Account · Signed in" : "Sign in")
+                        .lineLimit(1)
+                }
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                if authSignedIn {
+                    showProfile = true
+                } else {
+                    showSignIn = true
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.stack.person.crop")
+                    Text("My Channel")
+                        .lineLimit(1)
+                }
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(authSignedIn ? accent : Color.white.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            Text(authSignedIn ? "Signed in" : "Not signed in")
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.45))
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
     }
 
     private var searchBar: some View {
