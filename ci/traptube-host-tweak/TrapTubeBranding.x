@@ -42,8 +42,44 @@ static char TTStemStudioControllerKey;
 
 static char TTPlayerEQHookAssociationKey;
 
+// Round 17: the StemKit stream resolver constructs its own AVPlayerItems
+// inside a marked thread-local window and registers them (and the player
+// controller's AVPlayer) with TrapTubeAudioHook. These checks let every
+// hook below skip StemKit's own objects before doing any work at all -
+// no noteHookFired, no manager access, no asset accessors - because
+// Builds 173/176 parked somewhere in this synchronous hook chain during
+// the resolver's item construction and never reached play(). StemKit's
+// player attaches its EQ explicitly through its own install(on:) path;
+// host YouTube items are unaffected (the marker is only ever set inside
+// the resolver's construction window and the registry only ever holds
+// StemKit's player/items).
+static BOOL TTIsResolverItemConstruction(void) {
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL selector = NSSelectorFromString(@"isResolverItemConstruction");
+    if (!hookClass || ![hookClass respondsToSelector:selector]) return NO;
+    return ((BOOL (*)(id, SEL))objc_msgSend)(hookClass, selector);
+}
+
+static BOOL TTIsResolverOwnedItem(id item) {
+    if (!item) return NO;
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL selector = NSSelectorFromString(@"isResolverItem:");
+    if (!hookClass || ![hookClass respondsToSelector:selector]) return NO;
+    return ((BOOL (*)(id, SEL, id))objc_msgSend)(hookClass, selector, item);
+}
+
+static BOOL TTIsResolverOwnedPlayer(id player) {
+    if (!player) return NO;
+    Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
+    SEL selector = NSSelectorFromString(@"isResolverPlayer:");
+    if (!hookClass || ![hookClass respondsToSelector:selector]) return NO;
+    return ((BOOL (*)(id, SEL, id))objc_msgSend)(hookClass, selector, player);
+}
+
 static void TTAttachEQToPlayerItem(id item) {
     if (!item) return;
+    // Round 17 bypass: never run the EQ hook chain for StemKit's items.
+    if (TTIsResolverItemConstruction() || TTIsResolverOwnedItem(item)) return;
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
     SEL attachSelector = NSSelectorFromString(@"attachInBackgroundTo:");
     if (!hookClass || ![hookClass respondsToSelector:attachSelector]) return;
@@ -52,6 +88,11 @@ static void TTAttachEQToPlayerItem(id item) {
 
 static void TTAttachEQToPlayerItemWhenReady(id item) {
     if (!item) return;
+    // Round 17 bypass: the audioMix getter fires constantly while the
+    // playback pipeline builds its render graph; for StemKit's items
+    // each read used to spawn attach work that contended with the
+    // controller's explicit attach for the same item.
+    if (TTIsResolverItemConstruction() || TTIsResolverOwnedItem(item)) return;
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
     SEL attachSelector = NSSelectorFromString(@"attachWhenReadyInBackgroundTo:");
     if (!hookClass || ![hookClass respondsToSelector:attachSelector]) return;
@@ -59,7 +100,11 @@ static void TTAttachEQToPlayerItemWhenReady(id item) {
 }
 
 static void TTInstallPlayerEQHook(id player) {
-    if (!player || objc_getAssociatedObject(player, &TTPlayerEQHookAssociationKey)) return;
+    // Round 17 bypass: StemKit's own player already has the controller's
+    // explicit EQ hook installed; a second hook instance here only added
+    // synchronous install work (and a competing currentItem observer)
+    // around the resolver's items.
+    if (!player || TTIsResolverOwnedPlayer(player) || objc_getAssociatedObject(player, &TTPlayerEQHookAssociationKey)) return;
     Class hookClass = NSClassFromString(@"TrapTubeAudioHook");
     SEL initSelector = NSSelectorFromString(@"new");
     SEL installSelector = NSSelectorFromString(@"installOn:");
