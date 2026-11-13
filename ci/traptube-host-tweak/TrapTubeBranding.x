@@ -1421,7 +1421,7 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
     // cannot be read, fall back to the previous behavior and prune.
     id model = nil;
     @try {
-        if ([self respondsToSelector:@selector(model)]) model = [self valueForKey:@"model"];
+        if ([controller respondsToSelector:@selector(model)]) model = [controller valueForKey:@"model"];
     } @catch (NSException *exception) {}
     if (TTIsFeatureSettingsModel(model)) return;
     // Backstop for content populated lazily (e.g. cellsProvider sections):
