@@ -517,7 +517,7 @@ jobs:
           grep -q 'TrapTube Settings' output/branding-binary-strings.txt
           grep -q 'RubikSprayPaint-Regular' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
-          grep -q 'THIS WAS CRACKED BY A BANDIT' output/branding-binary-strings.txt
+          python3 -c "import sys; data = open('$APP/Frameworks/TrapTubeBranding.dylib', 'rb').read(); sys.exit(0 if b'THIS WAS CRACKED BY A BANDIT' in data or 'THIS WAS CRACKED BY A BANDIT'.encode('utf-16-le') in data else 1)" || { echo "VERIFY FAIL: the compiled branding dylib does not contain the bandit footer replacement text"; exit 32; }
           grep -q 'Stem Studio' output/branding-binary-strings.txt
           grep -Fq 'A 16-band graphic equalizer' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
