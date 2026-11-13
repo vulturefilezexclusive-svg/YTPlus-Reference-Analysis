@@ -1070,6 +1070,173 @@ static BOOL TTIsVolumeBoostModel(id model) {
            [title.lowercaseString containsString:@"volumeboost"];
 }
 
+// MARK: - Settings filter page-scoping (round 13)
+//
+// The removal lists in this file were written for two surfaces: the Plus
+// (YTLite/DVN) settings ROOT page and the YouTube-native settings
+// categories. Matched by title text alone they can also hit rows on YTLite
+// FEATURE pages (SponsorBlock, Player, Downloads, Shorts, ...), whose rows
+// are the features' own controls - the failure that emptied the
+// VolumeBoostYT page in rounds 3-5. The helpers below scope the filters by
+// PAGE, generalizing the old VolumeBoost-only passthrough: a model or page
+// identified as a feature page passes through unfiltered, while the root
+// pages keep the exact removal behavior above. The removal lists
+// themselves are unchanged. Keys for the removed columns (Patreon account,
+// Discord RPC) are deliberately NOT in the feature allowlist, so those
+// removals keep applying everywhere, exactly as the user requested.
+//
+// The allowlist is the YTLite feature inventory (localization key ->
+// NSUserDefaults key) recovered from YTLite.dylib - see
+// traptube-check/ytlite-re/REPORT.md section 3.
+
+// Defaults keys that appear on YTLite feature pages' own controls
+// (toggles/pickers built with cellWithTitle:...key:), never on the root
+// page's navigation/account/dev/credits rows (those are handler rows
+// without feature defaults keys).
+static NSSet<NSString *> *TTFeatureSettingsKeys(void) {
+    static NSSet<NSString *> *keys;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        keys = [NSSet setWithArray:@[
+            // Downloading (REPORT 3.1)
+            @"downloadmanager", @"replacedownloadmenu", @"postmanager",
+            @"saveprofilephoto", @"commentmanager", @"paralleldownloads",
+            @"parallelconversions",
+            // Navbar (REPORT 3.2)
+            @"nocast", @"nonotifsbutton", @"nomessagesbutton",
+            @"nosearchbutton", @"novoicesearchbutton", @"stickynavbar",
+            @"nosubbar", @"logoindex",
+            // Feed (REPORT 3.3)
+            @"noads", @"hideshorts", @"keepsubsshorts", @"hidemoretopicschip",
+            @"hidecommunityposts", @"hidemixplaylists", @"hideplaylists",
+            @"keepsubsplaylists", @"hideliveinfeed", @"hideupcominglives",
+            @"hidehorizontalfeeds", @"hideplayables", @"removemembersonly",
+            // Player (REPORT 3.4)
+            @"wifiqualityindex", @"cellqualityindex", @"ignoreautodub",
+            @"captionsifnoaudio", @"autogencaps", @"speedcontrols",
+            @"ytlmutebutton", @"ytllockbutton", @"ytlloopbutton",
+            @"ytlfullscreenbutton", @"disablepipbutton", @"hideoverlaytitle",
+            @"portraitfullscreen", @"classicquality", @"persistentprogressbar",
+            @"backgroundplayback", @"miniplayer", @"openvidsinytplus",
+            @"disableautoplay", @"autofullscreen",
+            // Shorts (REPORT 3.5)
+            @"shortsforcequality", @"shortsonlymode", @"restrictshortsportion",
+            @"shortsprogress", @"pinchtofullscreenshorts", @"shortstoregular",
+            @"removeshortsposts", @"removeshortslive", @"hideshortslogo",
+            // SponsorBlock (REPORT 3.8): the enable toggle; the sb_*
+            // category keys and sb user-ID keys are matched by pattern in
+            // TTCellIsFeatureControl below.
+            @"sponsorblock",
+            // Preferences page (REPORT 3.10)
+            @"checkupdates", @"autoclearcache"
+        ]];
+    });
+    return keys;
+}
+
+// Is this single DVN cell a YTLite feature's own control? The defaults
+// key the builder stored in the cell is the strongest per-cell signal,
+// and the only one available at filter sites that cannot see the
+// containing model (the DVNSection hooks have no model back-reference).
+static BOOL TTCellIsFeatureControl(id cell) {
+    if (!cell) return NO;
+    NSString *key = nil;
+    NSString *title = nil;
+    @try {
+        if ([cell respondsToSelector:@selector(key)]) key = [cell valueForKey:@"key"];
+        if ([cell respondsToSelector:@selector(title)]) title = [cell valueForKey:@"title"];
+    } @catch (NSException *exception) {}
+    if ([title isKindOfClass:NSString.class] &&
+        [title.lowercaseString containsString:@"volumeboost"]) return YES;
+    if (![key isKindOfClass:NSString.class] || key.length == 0) return NO;
+    NSString *value = key.lowercaseString;
+    // SponsorBlock category keys (sb_sponsor, sb_selfpromo, ...) and the
+    // SponsorBlock user-ID keys (sbPublicUserID / sbPrivateUserID).
+    if ([value hasPrefix:@"sb_"] || [value isEqualToString:@"sbpublicuserid"] ||
+        [value isEqualToString:@"sbprivateuserid"]) return YES;
+    return [TTFeatureSettingsKeys() containsObject:value];
+}
+
+// Page titles under which YTLite's builder presents its feature pages
+// (downloadingTable / navbarTable / feedTable / playerTable / shortsTable
+// / sbTable / prefsTable), plus the VolumeBoostYT page title.
+static BOOL TTFeatureSettingsTitleToken(NSString *title) {
+    if (![title isKindOfClass:NSString.class] || title.length == 0) return NO;
+    NSString *value = title.lowercaseString;
+    NSArray<NSString *> *tokens = @[
+        @"volumeboost", @"sponsorblock", @"sponsor block", @"shorts",
+        @"downloading", @"downloads", @"player", @"navbar",
+        @"navigation bar", @"feed", @"tab bar", @"tabbar", @"interface",
+        @"gestures", @"preferences"
+    ];
+    for (NSString *token in tokens) {
+        if ([value containsString:token]) return YES;
+    }
+    return NO;
+}
+
+static NSUInteger TTFeatureControlCountInSections(NSArray *sections) {
+    if (![sections isKindOfClass:NSArray.class]) return 0;
+    NSUInteger count = 0;
+    for (id section in sections) {
+        NSArray *cells = nil;
+        @try {
+            if ([section respondsToSelector:@selector(cells)]) cells = [section valueForKey:@"cells"];
+        } @catch (NSException *exception) {}
+        if (![cells isKindOfClass:NSArray.class]) continue;
+        for (id cell in cells) {
+            if (TTCellIsFeatureControl(cell)) count++;
+        }
+    }
+    return count;
+}
+
+static BOOL TTSectionsBelongToFeaturePage(NSArray *sections) {
+    // A feature page carries many keyed controls (the Player page alone
+    // has 63 rows); the settings root page's rows are navigation/account
+    // rows without feature defaults keys. Requiring more than one feature
+    // control keeps the root page on the filtered path even if a single
+    // row ever gains a key.
+    return TTFeatureControlCountInSections(sections) >= 2;
+}
+
+// The generalized feature-page test for a whole DVN model: the old
+// VolumeBoost title check, a feature-page title, or a body of sections
+// full of the feature's own keyed controls.
+static BOOL TTIsFeatureSettingsModel(id model) {
+    if (!model) return NO;
+    if (TTIsVolumeBoostModel(model)) return YES;
+    NSString *title = nil;
+    NSArray *sections = nil;
+    @try {
+        if ([model respondsToSelector:@selector(title)]) title = [model valueForKey:@"title"];
+        if ([model respondsToSelector:@selector(sections)]) sections = [model valueForKey:@"sections"];
+    } @catch (NSException *exception) {}
+    if (TTFeatureSettingsTitleToken(title)) return YES;
+    return TTSectionsBelongToFeaturePage(sections);
+}
+
+// YouTube-native settings (the YTSettingsViewController setSectionItems:
+// hook): feature-owned sections in this system are titled after the
+// feature - VolumeBoostYT is the proven case - or carry items whose
+// identifiers name the feature. Deliberately narrower than the DVN page
+// test: ordinary YouTube categories must keep today's filtering exactly.
+static BOOL TTIsNativeFeatureSettingsSection(NSString *title, NSArray *items) {
+    NSString *value = [title isKindOfClass:NSString.class] ? title.lowercaseString : @"";
+    if ([value containsString:@"volumeboost"] ||
+        [value containsString:@"sponsorblock"] ||
+        [value containsString:@"sponsor block"]) return YES;
+    for (id item in items) {
+        NSString *identifier = nil;
+        @try {
+            if ([item respondsToSelector:@selector(accessibilityIdentifier)]) identifier = [item accessibilityIdentifier];
+        } @catch (NSException *exception) {}
+        if ([identifier isKindOfClass:NSString.class] &&
+            [identifier.lowercaseString containsString:@"volumeboost"]) return YES;
+    }
+    return NO;
+}
+
 static BOOL TTIsRemovedDVNCell(id cell) {
     if (!cell) return NO;
     NSString *cellTitle = nil;
@@ -1077,6 +1244,13 @@ static BOOL TTIsRemovedDVNCell(id cell) {
         if ([cell respondsToSelector:@selector(title)]) cellTitle = [cell valueForKey:@"title"];
     } @catch (NSException *exception) {}
     if ([cellTitle.lowercaseString containsString:@"volumeboost"]) return NO;
+    // Page-scoping (round 13): a cell that IS a YTLite feature's own
+    // control - identified by its defaults key, see TTCellIsFeatureControl
+    // - is never a removal target, on whatever page it appears. This is
+    // the per-cell half of the feature-page passthrough; it also covers
+    // the DVNSection hooks below, whose sections carry no reference back
+    // to their model, so the defaults key is the strongest signal there.
+    if (TTCellIsFeatureControl(cell)) return NO;
     if (TTShouldHideDVNCellText(cellTitle)) return YES;
     NSString *key = nil;
     NSString *identifier = nil;
@@ -1148,20 +1322,26 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 
 %hook DVNTableModel
 
+// Page-scoping (round 13): every entry point below first asks whether
+// this model is a YTLite FEATURE page (TTIsFeatureSettingsModel - the
+// generalized form of the old VolumeBoost-only check). Feature pages
+// pass through unfiltered; the settings root page keeps the removal
+// filtering exactly as before.
+
 - (void)addSection:(id)section {
-    if (TTIsVolumeBoostModel(self)) { %orig; return; }
+    if (TTIsFeatureSettingsModel(self)) { %orig; return; }
     if (TTIsRemovedDVNSection(section)) return;
     TTFilterDVNSectionCells(section);
     %orig;
 }
 
 - (void)addSections:(NSArray *)sections {
-    if (TTIsVolumeBoostModel(self)) { %orig; return; }
+    if (TTIsFeatureSettingsModel(self)) { %orig; return; }
     %orig(TTFilteredDVNSections(sections));
 }
 
 - (void)setSections:(NSArray *)sections {
-    if (TTIsVolumeBoostModel(self)) { %orig; return; }
+    if (TTIsFeatureSettingsModel(self)) { %orig; return; }
     %orig(TTFilteredDVNSections(sections));
 }
 
@@ -1174,17 +1354,32 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 }
 
 + (id)modelWithTitle:(NSString *)title sections:(NSArray *)sections {
+    // No model instance exists yet at this factory, so the page test
+    // runs on the title and the sections being assembled.
+    if (TTFeatureSettingsTitleToken(title) || TTSectionsBelongToFeaturePage(sections)) {
+        return %orig(title, sections);
+    }
     return %orig(title, TTFilteredDVNSections(sections));
 }
 
 + (id)modelWithTitle:(NSString *)title header:(NSString *)header footer:(NSString *)footer sections:(NSArray *)sections {
     if (footer.length && TTIsRemovedVersionFooter(footer)) footer = nil;
+    if (TTFeatureSettingsTitleToken(title) || TTSectionsBelongToFeaturePage(sections)) {
+        return %orig(title, header, footer, sections);
+    }
     return %orig(title, header, footer, TTFilteredDVNSections(sections));
 }
 
 %end
 
 %hook DVNSection
+
+// NOTE (round 13): a DVNSection carries no reference back to its model,
+// so these hooks cannot ask which page the section belongs to. Their
+// protection for feature pages is the per-cell defaults-key test inside
+// TTIsRemovedDVNCell (TTCellIsFeatureControl): a feature's own control
+// cells are never removed here, while the root page's removal rows -
+// which carry no feature keys - are filtered exactly as before.
 
 - (void)setCells:(NSArray *)cells {
     %orig(TTFilteredDVNCells(cells));
@@ -1218,6 +1413,17 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     UIViewController *controller = (UIViewController *)self;
+    // Page-scoping (round 13): the rendered-row pruning pass matches
+    // broad title text, so it is a backstop for the Plus settings ROOT
+    // page only. On a YTLite feature page the rows are the feature's own
+    // controls and must not be pruned. The controller's model (a
+    // DVNTableModel, per the host binary) is the page identity; if it
+    // cannot be read, fall back to the previous behavior and prune.
+    id model = nil;
+    @try {
+        if ([self respondsToSelector:@selector(model)]) model = [self valueForKey:@"model"];
+    } @catch (NSException *exception) {}
+    if (TTIsFeatureSettingsModel(model)) return;
     // Backstop for content populated lazily (e.g. cellsProvider sections):
     // run the rendered-row pruning pass once the Plus table is on screen.
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1245,10 +1451,19 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 
 %hook YTSettingsViewController
 
+// Page-scoping (round 13) for this hook's pruning passes: when this
+// controller is presenting a feature-owned page in the native settings
+// system (its title names the feature - the VolumeBoostYT page is the
+// proven case), the broad rendered-text pruning must not run on it. On
+// the ordinary YouTube settings surfaces the pruning runs exactly as
+// before.
+
 - (void)viewWillAppear:(BOOL)animated {
     %orig;
     // Apply the section cleanup before the settings panel is first presented.
-    TTPruneRemovedSettingsRows(self.view);
+    if (!TTIsNativeFeatureSettingsSection(self.title, nil)) {
+        TTPruneRemovedSettingsRows(self.view);
+    }
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1256,13 +1471,16 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
     TTApplyStemStudioSurfaceToView(self.view);
     // Re-apply after each layout because the host lazily rebuilds some settings
     // rows after the initial section model has been populated.
-    TTPruneRemovedSettingsRows(self.view);
+    if (!TTIsNativeFeatureSettingsSection(self.title, nil)) {
+        TTPruneRemovedSettingsRows(self.view);
+    }
 }
 
 - (void)viewDidAppear:(BOOL)animated {
     %orig;
     // The host can insert Account/Developer/Credits content during appearance.
     // Run once more after that insertion pass so the removed groups do not remain.
+    if (TTIsNativeFeatureSettingsSection(self.title, nil)) return;
     dispatch_async(dispatch_get_main_queue(), ^{
         TTPruneRemovedSettingsRows(self.view);
     });
@@ -1274,10 +1492,13 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
                     icon:(YTIIcon *)icon
          titleDescription:(NSString *)titleDescription
             headerHidden:(BOOL)headerHidden {
-    // The VolumeBoostYT feature's own settings section must pass through
-    // untouched: its rows are titled after the feature, and the generic
-    // removal list matches those titles, which emptied the whole page.
-    if (title && [title.lowercaseString containsString:@"volumeboost"]) {
+    // Feature-owned settings sections in this native system must pass
+    // through untouched: their rows are titled after the feature, and
+    // the generic removal list matches those titles, which emptied the
+    // whole VolumeBoostYT page in rounds 3-5. Round 13 generalizes that
+    // one-off passthrough into TTIsNativeFeatureSettingsSection, which
+    // recognizes the section by its title or by its items' identifiers.
+    if (TTIsNativeFeatureSettingsSection(title, sectionItems)) {
         %orig;
         return;
     }
