@@ -44,10 +44,13 @@ struct TrapTubeResolvedPlayback {
 }
 
 enum TrapTubeStreamResolver {
-    private static let apiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
-
+    // Each InnerTube client pairs with its own public app key; sending the
+    // WEB key with the IOS/ANDROID contexts (or an outdated clientVersion)
+    // makes YouTube reject the request outright ("Precondition check
+    // failed"), which the app used to surface as an empty feed.
     private struct ClientProfile {
         let name: String
+        let apiKey: String
         let userAgent: String
         let context: [String: Any]
     }
@@ -55,18 +58,21 @@ enum TrapTubeStreamResolver {
     private static let profiles: [ClientProfile] = [
         ClientProfile(
             name: "IOS",
-            userAgent: "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X)",
-            context: ["clientName": "IOS", "clientVersion": "19.45.4",
+            apiKey: "AIzaSyB-63vPrdThhKuerbB2N_l7Kwwcxj6yUAc",
+            userAgent: "com.google.ios.youtube/20.45.3 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X)",
+            context: ["clientName": "IOS", "clientVersion": "20.45.3",
                       "deviceMake": "Apple", "deviceModel": "iPhone16,2",
                       "osName": "iPhone", "osVersion": "18.1.0", "hl": "en", "gl": "US"]),
         ClientProfile(
             name: "ANDROID",
-            userAgent: "com.google.android.youtube/19.44.38 (Linux; U; Android 14; en_US; Pixel 8) gzip",
-            context: ["clientName": "ANDROID", "clientVersion": "19.44.38",
+            apiKey: "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w",
+            userAgent: "com.google.android.youtube/20.45.38 (Linux; U; Android 14; en_US; Pixel 8) gzip",
+            context: ["clientName": "ANDROID", "clientVersion": "20.45.38",
                       "androidSdkVersion": 34, "osName": "Android", "osVersion": "14",
                       "hl": "en", "gl": "US"]),
         ClientProfile(
             name: "WEB_EMBEDDED_PLAYER",
+            apiKey: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
             userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
             context: ["clientName": "WEB_EMBEDDED_PLAYER", "clientVersion": "1.20241110.01.00",
                       "hl": "en", "gl": "US"]),
@@ -190,17 +196,21 @@ enum TrapTubeStreamResolver {
     }
 
     private static func fetchPlayerResponse(videoID: String, profile: ClientProfile) async throws -> [String: Any] {
-        guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?key=\(apiKey)&prettyPrint=false") else {
+        guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?key=\(profile.apiKey)&prettyPrint=false") else {
             throw TrapTubePlayerError.network("bad endpoint")
         }
+        var clientContext = profile.context
+        if let visitor = await TrapTubeInnerTube.visitorData() {
+            clientContext["visitorData"] = visitor
+        }
         var body: [String: Any] = [
-            "context": ["client": profile.context],
+            "context": ["client": clientContext],
             "videoId": videoID,
             "racyCheckOk": true,
             "contentCheckOk": true,
         ]
         if profile.name == "WEB_EMBEDDED_PLAYER" {
-            body["context"] = ["client": profile.context,
+            body["context"] = ["client": clientContext,
                                "thirdParty": ["embedUrl": "https://www.youtube.com/embed/\(videoID)"]]
         }
         var request = URLRequest(url: endpoint)
@@ -678,10 +688,10 @@ struct TrapTubeEqualizerPanel: View {
 
 // MARK: - Feed (Stem Studio Player tab)
 //
-// A YouTube-style home feed and search, backed by the same InnerTube
-// interface the resolver uses: browse (FEwhat_to_watch) for the
-// recommendation grid and search for queries. Signed out, recommendations
-// are YouTube's public picks; every row plays in the native player.
+// A YouTube-style feed and search, backed by the same InnerTube interface
+// the resolver uses, on the WEB client. Signed out, YouTube serves an
+// empty home grid to every client, so the home view is category searches
+// (Music first); every row plays in the native player.
 
 struct TrapTubeFeedItem: Identifiable {
     let videoID: String
@@ -693,24 +703,55 @@ struct TrapTubeFeedItem: Identifiable {
     var id: String { videoID }
 }
 
+struct TrapTubeFeedCategory: Identifiable {
+    let name: String
+    let query: String
+    var id: String { name }
+}
+
 @MainActor
 final class TrapTubeFeedModel: ObservableObject {
     @Published var items: [TrapTubeFeedItem] = []
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var isSearching = false
+    @Published var selectedCategory = "Music"
+
+    // Signed out, YouTube serves an empty home grid to every client, so the
+    // feed's home is a row of category searches (real results, WEB client)
+    // with Music first — this is a music app. Search covers everything else.
+    static let categories: [TrapTubeFeedCategory] = [
+        TrapTubeFeedCategory(name: "Music", query: "music"),
+        TrapTubeFeedCategory(name: "Gaming", query: "gaming"),
+        TrapTubeFeedCategory(name: "Podcasts", query: "podcasts"),
+        TrapTubeFeedCategory(name: "Live", query: "live streams"),
+        TrapTubeFeedCategory(name: "Comedy", query: "comedy"),
+        TrapTubeFeedCategory(name: "News", query: "news"),
+        TrapTubeFeedCategory(name: "Sports", query: "sports highlights"),
+        TrapTubeFeedCategory(name: "Tech", query: "technology"),
+    ]
+
+    var sectionTitle: String {
+        if isSearching { return "Results" }
+        return selectedCategory == "Music" ? "Popular music" : selectedCategory
+    }
 
     private var continuation: String?
     private var currentQuery: String?
     private var generation = 0
 
     func loadHome() async {
-        currentQuery = nil
+        await loadCategory(Self.categories[0])
+    }
+
+    func loadCategory(_ category: TrapTubeFeedCategory) async {
+        selectedCategory = category.name
+        currentQuery = category.query
         isSearching = false
         await load(reset: true) { token in
             token == nil
-                ? ["browseId": "FEwhat_to_watch"]
-                : ["continuation": token as Any]
+                ? ["query": category.query, "params": "EgIQAQ%3D%3D"]
+                : ["query": category.query, "continuation": token as Any]
         }
     }
 
@@ -727,15 +768,9 @@ final class TrapTubeFeedModel: ObservableObject {
     }
 
     func loadMore() async {
-        guard continuation != nil, !isLoading else { return }
-        if let query = currentQuery {
-            await load(reset: false) { token in
-                ["query": query, "continuation": token as Any]
-            }
-        } else {
-            await load(reset: false) { token in
-                ["continuation": token as Any]
-            }
+        guard continuation != nil, !isLoading, let query = currentQuery else { return }
+        await load(reset: false) { token in
+            ["query": query, "continuation": token as Any]
         }
     }
 
@@ -750,9 +785,7 @@ final class TrapTubeFeedModel: ObservableObject {
         isLoading = true
         defer { if run == generation { isLoading = false } }
         do {
-            let endpoint = (currentQuery != nil)
-                ? "https://www.youtube.com/youtubei/v1/search"
-                : "https://www.youtube.com/youtubei/v1/browse"
+            let endpoint = "https://www.youtube.com/youtubei/v1/search"
             let json = try await TrapTubeInnerTube.post(endpoint: endpoint,
                                                         body: body(continuation))
             guard run == generation else { return }
@@ -824,25 +857,70 @@ final class TrapTubeFeedModel: ObservableObject {
     }
 }
 
+actor TrapTubeVisitorDataStore {
+    private var cached: String?
+    private var fetched = false
+
+    func value() async -> String? {
+        if fetched { return cached }
+        fetched = true
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/visitor_id?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(TrapTubeInnerTube.webUserAgent, forHTTPHeaderField: "User-Agent")
+        let body: [String: Any] = ["context": ["client": TrapTubeInnerTube.webContext]]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (data, _) = try? await URLSession.shared.data(for: request),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let context = json["responseContext"] as? [String: Any],
+              let visitor = context["visitorData"] as? String else {
+            return nil
+        }
+        cached = visitor
+        return visitor
+    }
+}
+
 enum TrapTubeInnerTube {
+    // The feed and search run on the WEB client: it is the one surface that
+    // answers signed-out requests with real results. The signed-out home
+    // grid (FEwhat_to_watch) comes back empty for every client without
+    // account cookies, so the feed's home is category searches instead.
+    static let webUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+    static let webContext: [String: Any] = ["clientName": "WEB", "clientVersion": "2.20241126.01.00",
+                                            "hl": "en", "gl": "US"]
+    private static let visitorStore = TrapTubeVisitorDataStore()
+
+    static func visitorData() async -> String? {
+        await visitorStore.value()
+    }
+
     static func post(endpoint: String, body: [String: Any]) async throws -> [String: Any] {
         guard let url = URL(string: "\(endpoint)?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false") else {
             throw TrapTubePlayerError.network("bad endpoint")
         }
+        var clientContext = webContext
+        if let visitor = await visitorData() {
+            clientContext["visitorData"] = visitor
+        }
         var fullBody = body
-        fullBody["context"] = ["client": ["clientName": "IOS", "clientVersion": "19.45.4",
-                                          "deviceMake": "Apple", "deviceModel": "iPhone16,2",
-                                          "osName": "iPhone", "osVersion": "18.1.0",
-                                          "hl": "en", "gl": "US"]]
+        fullBody["context"] = ["client": clientContext]
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X)",
-                         forHTTPHeaderField: "User-Agent")
+        request.setValue(webUserAgent, forHTTPHeaderField: "User-Agent")
         request.httpBody = try JSONSerialization.data(withJSONObject: fullBody)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TrapTubePlayerError.network("unexpected response")
+        }
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            let serverMessage = ((json["error"] as? [String: Any])?["message"] as? String)
+                ?? "HTTP \(http.statusCode)"
+            throw TrapTubePlayerError.network("YouTube refused the request: \(serverMessage)")
         }
         return json
     }
@@ -866,6 +944,9 @@ struct TrapTubePlayerHomeView: View {
     var body: some View {
         VStack(spacing: 0) {
             searchBar
+            if !feed.isSearching {
+                categoryChips
+            }
             if let detectedID {
                 detectedButton(detectedID)
             }
@@ -908,6 +989,29 @@ struct TrapTubePlayerHomeView: View {
         .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    private var categoryChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(TrapTubeFeedModel.categories) { category in
+                    let selected = feed.selectedCategory == category.name
+                    Button {
+                        Task { await feed.loadCategory(category) }
+                    } label: {
+                        Text(category.name)
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(selected ? .white : Color.white.opacity(0.65))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(selected ? accent : Color.white.opacity(0.08), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 8)
+        }
     }
 
     private func detectedButton(_ videoID: String) -> some View {
@@ -961,7 +1065,7 @@ struct TrapTubePlayerHomeView: View {
         } else {
             ScrollView(showsIndicators: false) {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    Text(feed.isSearching ? "Results" : "Recommended")
+                    Text(feed.sectionTitle.uppercased())
                         .font(.caption.weight(.black)).tracking(1.5)
                         .foregroundStyle(accent)
                         .padding(.horizontal, 16)
