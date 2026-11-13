@@ -1616,7 +1616,100 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
 
 %end
 
+#pragma mark - Round 19: floating pivot bar + selected-tab glow
+
+static char TTPivotPillViewKey;
+
+// Round 19: YouTube 21.40.5's bottom bar is not a UITabBar - it is the
+// fully custom YTPivotBarView, so the mockup's floating capsule has to
+// be built inside that view. The approach is appearance-only and
+// defensive: a decorative pill (translucent charcoal, rounded ends,
+// subtle light border, soft drop shadow) is inserted BEHIND the bar's
+// item views and the bar's own full-width background is cleared, so
+// the items read as sitting on a floating capsule. No frame is ever
+// changed, the pill ignores touches, and strict size guards leave any
+// bar that does not look like the standard bottom bar (iPad side
+// layouts, mini bars, future redesigns) completely stock. If YT ever
+// renders the bar somewhere this can't follow, the result degrades to
+// the stock bar, never to broken navigation.
+static void TTApplyFloatingPillToPivotBar(YTPivotBarView *bar) {
+    if (!bar || !bar.window) return;
+    CGRect bounds = bar.bounds;
+    CGFloat width = bounds.size.width;
+    CGFloat height = bounds.size.height;
+    if (width < 260 || height < 44 || height > 120) return;
+    UIView *pill = objc_getAssociatedObject(bar, &TTPivotPillViewKey);
+    if (!pill) {
+        pill = [[UIView alloc] initWithFrame:CGRectZero];
+        pill.userInteractionEnabled = NO;
+        pill.backgroundColor = [UIColor colorWithWhite:0.13 alpha:0.92];
+        pill.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.10].CGColor;
+        pill.layer.borderWidth = 1.0;
+        pill.layer.shadowColor = UIColor.blackColor.CGColor;
+        pill.layer.shadowOpacity = 0.35;
+        pill.layer.shadowRadius = 14;
+        pill.layer.shadowOffset = CGSizeMake(0, 5);
+        objc_setAssociatedObject(bar, &TTPivotPillViewKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (bar.subviews.firstObject != pill) {
+        [bar insertSubview:pill atIndex:0];
+    }
+    CGFloat pillHeight = height - 12;
+    CGFloat pillY = 4;
+    if (pillHeight < 40) { pillHeight = height - 6; pillY = 3; }
+    pill.frame = CGRectMake(12, pillY, width - 24, pillHeight);
+    pill.layer.cornerRadius = pillHeight / 2.0;
+    bar.backgroundColor = UIColor.clearColor;
+}
+
+// Round 19: the mockup's selected tab carries a soft white halo. The
+// pivot item's selection lives on its navigationButton (a UIButton);
+// the glow is a layer shadow on the button's image view, so it follows
+// the icon's silhouette, and it is cleared the moment the item is no
+// longer selected. Shadow changes are idempotent - repeated refreshes
+// with an unchanged state do nothing.
+static void TTRefreshPivotItemGlow(YTPivotBarItemView *itemView) {
+    YTQTMButton *button = itemView.navigationButton;
+    if (!button) return;
+    CALayer *layer = button.imageView.layer ?: button.layer;
+    if (!layer) return;
+    if (button.selected) {
+        if (layer.shadowOpacity < 0.8) {
+            layer.shadowColor = UIColor.whiteColor.CGColor;
+            layer.shadowOpacity = 0.85;
+            layer.shadowRadius = 7;
+            layer.shadowOffset = CGSizeZero;
+        }
+    } else if (layer.shadowOpacity != 0) {
+        layer.shadowOpacity = 0;
+    }
+}
+
+static void TTRefreshPivotGlowsInView(UIView *root) {
+    Class itemClass = NSClassFromString(@"YTPivotBarItemView");
+    if (!itemClass || !root) return;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    while (stack.count > 0) {
+        UIView *view = stack.lastObject;
+        [stack removeLastObject];
+        if ([view isKindOfClass:itemClass]) {
+            TTRefreshPivotItemGlow((YTPivotBarItemView *)view);
+        }
+        [stack addObjectsFromArray:view.subviews];
+    }
+}
+
 %hook YTPivotBarView
+
+- (void)layoutSubviews {
+    %orig;
+    TTApplyFloatingPillToPivotBar(self);
+}
+
+- (void)didMoveToWindow {
+    %orig;
+    TTApplyFloatingPillToPivotBar(self);
+}
 
 - (void)setRenderer:(YTIPivotBarRenderer *)renderer {
     if (renderer) {
@@ -1679,6 +1772,18 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
     %orig;
 }
 
+// Round 19: this is the controller's selection-change funnel - after
+// the host updates its item states, refresh every pivot item's glow
+// on the next runloop turn (by then the buttons' selected flags are
+// final). Purely cosmetic; navigation is untouched.
+- (void)updateViewsWithSelectedPivotIdentifier:(NSString *)identifier {
+    %orig;
+    UIView *rootView = self.view;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TTRefreshPivotGlowsInView(rootView);
+    });
+}
+
 %end
 
 %hook YTAppPivotBarController
@@ -1701,6 +1806,19 @@ static NSArray *TTFilteredDVNSections(NSArray *sections) {
     %orig;
     self.navigationButton.tintColor = TTAccentColor();
     [self.navigationButton setTitleColor:TTAccentColor() forState:UIControlStateSelected];
+    // Round 19: a renderer (re)assignment is one of the moments the
+    // item's selected state may have just changed - refresh the glow
+    // now and once more after the host settles its own state update.
+    TTRefreshPivotItemGlow(self);
+    YTPivotBarItemView *itemView = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TTRefreshPivotItemGlow(itemView);
+    });
+}
+
+- (void)layoutSubviews {
+    %orig;
+    TTRefreshPivotItemGlow(self);
 }
 
 %end
