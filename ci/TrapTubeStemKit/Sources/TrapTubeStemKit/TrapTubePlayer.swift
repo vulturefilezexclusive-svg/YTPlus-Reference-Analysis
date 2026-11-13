@@ -190,8 +190,8 @@ enum TrapTubeYouTubeAuth {
         if let cookieHeader {
             request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
         }
-        if let authorizationHeader = authorizationHeader() {
-            request.setValue(authorizationHeader(), forHTTPHeaderField: "Authorization")
+        if let authValue = authorizationHeader() {
+            request.setValue(authValue, forHTTPHeaderField: "Authorization")
             request.setValue(origin, forHTTPHeaderField: "X-Origin")
         }
     }
@@ -379,6 +379,9 @@ enum TrapTubeStreamResolver {
                 // User-Agent (plus a youtube.com Referer): googlevideo
                 // rejects AVPlayer's default agent on some clients, which
                 // used to fail track loading with a bare "unknown error".
+                // The header-fields option key is written as its literal
+                // string value - the current SDK no longer exports the
+                // AVURLAssetHTTPHeaderFieldsKey constant to Swift.
                 let headers: [String: String] = [
                     "User-Agent": profile.userAgent,
                     "Referer": "https://www.youtube.com/",
@@ -392,7 +395,7 @@ enum TrapTubeStreamResolver {
                     .filter { $0.url != nil && $0.hasVideo && $0.hasAudio && $0.mime.contains("mp4") }
                     .sorted { $0.height > $1.height }
                 if let best = playableMuxed.first, let urlString = best.url, let url = URL(string: urlString) {
-                    let asset = AVURLAsset(url: url, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
+                    let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
                     let videoTracks = try await asset.loadTracks(withMediaType: .video)
                     let audioTracks = try await asset.loadTracks(withMediaType: .audio)
                     guard !videoTracks.isEmpty, !audioTracks.isEmpty else {
@@ -415,8 +418,8 @@ enum TrapTubeStreamResolver {
                 if let video = videos.first(where: { $0.height <= 720 }) ?? videos.first,
                    let audio = audios.first,
                    let videoURL = URL(string: video.url ?? ""), let audioURL = URL(string: audio.url ?? "") {
-                    let videoAsset = AVURLAsset(url: videoURL, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
-                    let audioAsset = AVURLAsset(url: audioURL, options: [AVURLAssetHTTPHeaderFieldsKey: headers])
+                    let videoAsset = AVURLAsset(url: videoURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+                    let audioAsset = AVURLAsset(url: audioURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
                     guard let videoTrack = try await videoAsset.loadTracks(withMediaType: .video).first,
                           let audioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else {
                         throw TrapTubePlayerError.noPlayableFormat
