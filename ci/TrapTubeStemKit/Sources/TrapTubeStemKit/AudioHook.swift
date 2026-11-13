@@ -13,11 +13,133 @@ public final class TrapTubeAudioHook: NSObject {
     private var attachmentTask: Task<Void, Never>?
     private weak var observedItem: AVPlayerItem?
 
+    // MARK: - Round 17: hook breadcrumbs, resolver-construction marker, identity registry
+    //
+    // Build 176 still parked between "item built" and "item set, play()
+    // called" with the EQ status frozen at the hook probe, so this round
+    // stops guessing which synchronous call in the hook chain parks and
+    // (a) records how far the hook chain got, in a store a parked thread
+    // cannot hold hostage, and (b) removes the resolver's own items from
+    // the hook chain entirely (see the marker + registry below).
+
+    /// Last hook stage, written at each attach entry point. The store is
+    /// guarded by its own lock whose critical sections are a single
+    /// string assignment plus a counter increment - the lock is never
+    /// held across any call, so no thread can park while holding it and
+    /// the player controller's heartbeat can always read the stage back.
+    private static let hookStageLock = NSLock()
+    private static var hookStageText = "none"
+    private static var hookStageCount = 0
+
+    @objc public static func noteHookStage(_ stage: String) {
+        hookStageLock.lock()
+        hookStageText = stage
+        hookStageCount += 1
+        hookStageLock.unlock()
+    }
+
+    @objc public static var lastHookStage: String {
+        hookStageLock.lock()
+        defer { hookStageLock.unlock() }
+        return "\(hookStageText) (#\(hookStageCount))"
+    }
+
+    /// Thread-local depth counter marking "the stream resolver is
+    /// constructing one of its own items right now". The resolver sets it
+    /// immediately before AVPlayerItem(asset:) and clears it immediately
+    /// after, inside the same synchronous stretch (no suspension point in
+    /// between, so the thread cannot change mid-window). Item-init hooks
+    /// run synchronously on that same thread during construction, so the
+    /// tweak can check the marker first and return without touching the
+    /// EQ manager, its locks or any asset accessor for our own items.
+    private static let constructionDepthKey = "TrapTube.ResolverItemConstructionDepth"
+
+    @objc public static func beginResolverItemConstruction() {
+        let dictionary = Thread.current.threadDictionary
+        let depth = (dictionary[constructionDepthKey] as? NSNumber)?.intValue ?? 0
+        dictionary[constructionDepthKey] = NSNumber(value: depth + 1)
+        noteHookStage("resolverConstructionBegin")
+    }
+
+    @objc public static func endResolverItemConstruction() {
+        let dictionary = Thread.current.threadDictionary
+        let depth = (dictionary[constructionDepthKey] as? NSNumber)?.intValue ?? 0
+        if depth <= 1 {
+            dictionary.removeObject(forKey: constructionDepthKey)
+        } else {
+            dictionary[constructionDepthKey] = NSNumber(value: depth - 1)
+        }
+        noteHookStage("resolverConstructionEnd")
+    }
+
+    @objc public static func isResolverItemConstruction() -> Bool {
+        ((Thread.current.threadDictionary[constructionDepthKey] as? NSNumber)?.intValue ?? 0) > 0
+    }
+
+    /// Identity registry for the player and items the StemKit player
+    /// creates itself. The tweak's instance-scoped hooks (setAudioMix:,
+    /// the audioMix getter, AVPlayerLayer setPlayer:, AVPlayer install
+    /// hooks) check membership and skip StemKit's own objects, whose EQ
+    /// is attached explicitly by the player controller's install(on:)
+    /// path instead. Entries are weak: a stale identifier whose object
+    /// died reads as "not registered", so a reused ObjectIdentifier can
+    /// never produce a false positive. The lock's critical sections are
+    /// single dictionary operations - never held across a call.
+    private final class WeakItemBox {
+        weak var item: AVPlayerItem?
+        init(_ item: AVPlayerItem) { self.item = item }
+    }
+    private final class WeakPlayerBox {
+        weak var player: AVPlayer?
+        init(_ player: AVPlayer) { self.player = player }
+    }
+    private static let resolverRegistryLock = NSLock()
+    private static var resolverItems: [ObjectIdentifier: WeakItemBox] = [:]
+    private static var resolverPlayers: [ObjectIdentifier: WeakPlayerBox] = [:]
+
+    @objc public static func registerResolverItem(_ item: AVPlayerItem) {
+        resolverRegistryLock.lock()
+        resolverItems[ObjectIdentifier(item)] = WeakItemBox(item)
+        resolverRegistryLock.unlock()
+    }
+
+    @objc public static func isResolverItem(_ item: AVPlayerItem) -> Bool {
+        resolverRegistryLock.lock()
+        defer { resolverRegistryLock.unlock() }
+        let identifier = ObjectIdentifier(item)
+        guard let box = resolverItems[identifier] else { return false }
+        guard let registered = box.item else {
+            resolverItems.removeValue(forKey: identifier)
+            return false
+        }
+        return registered === item
+    }
+
+    @objc public static func registerResolverPlayer(_ player: AVPlayer) {
+        resolverRegistryLock.lock()
+        resolverPlayers[ObjectIdentifier(player)] = WeakPlayerBox(player)
+        resolverRegistryLock.unlock()
+    }
+
+    @objc public static func isResolverPlayer(_ player: AVPlayer) -> Bool {
+        resolverRegistryLock.lock()
+        defer { resolverRegistryLock.unlock() }
+        let identifier = ObjectIdentifier(player)
+        guard let box = resolverPlayers[identifier] else { return false }
+        guard let registered = box.player else {
+            resolverPlayers.removeValue(forKey: identifier)
+            return false
+        }
+        return registered === player
+    }
+
     /// Creator-agnostic entry point: called whenever an AVPlayerItem comes
     /// into existence or receives an audio mix, whoever created it. The
     /// manager de-dupes per item, so repeated calls are cheap no-ops.
     @objc public static func attachInBackground(to item: AVPlayerItem) {
+        noteHookStage("attachEntered")
         TrapTubeEQManager.shared.noteHookFired("player item")
+        noteHookStage("noteHookFiredDone")
         // Round 16: attach is strictly fire-and-forget. This entry point is
         // called synchronously from the AVPlayerItem creation hooks -
         // including inside the stream resolver's AVPlayerItem(asset:)
@@ -43,20 +165,24 @@ public final class TrapTubeAudioHook: NSObject {
             }
             _ = await TrapTubeEQManager.shared.attachWhenReady(to: item)
         }
+        noteHookStage("attachSpawned")
     }
 
     /// Async-only attach for very hot call sites (the audioMix getter hook),
     /// where a synchronous attach could re-enter itself.
     @objc public static func attachWhenReadyInBackground(to item: AVPlayerItem) {
+        noteHookStage("whenReadyEntered")
         Task {
             let attached = await TrapTubeEQManager.shared.attachWhenReady(to: item)
             if attached {
                 NSLog("[TrapTube EQ] Attached audio processing tap via item-creation path")
             }
         }
+        noteHookStage("whenReadySpawned")
     }
 
     @objc public func install(on player: AVPlayer) {
+        Self.noteHookStage("installEntered")
         TrapTubeEQManager.shared.noteHookFired("player")
         invalidate()
         self.player = player
@@ -67,6 +193,7 @@ public final class TrapTubeAudioHook: NSObject {
                 self.observeCurrentItem(observedPlayer.currentItem)
             }
         }
+        Self.noteHookStage("installDone")
     }
 
     private func observeCurrentItem(_ item: AVPlayerItem?) {
