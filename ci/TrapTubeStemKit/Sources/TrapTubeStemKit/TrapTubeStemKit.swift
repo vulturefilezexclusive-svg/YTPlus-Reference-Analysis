@@ -547,7 +547,12 @@ private struct TrapTubeStemStudioView: View {
                 model.error = error.localizedDescription
             }
         }
-        .onAppear { model.refresh() }
+        .onAppear {
+            model.refresh()
+            // Round 19: build the EQ manager (and its audio engine
+            // graph) the moment Stem Studio opens, not at first attach.
+            TrapTubeEQManager.prewarm()
+        }
     }
 
     private var playerPage: some View {
