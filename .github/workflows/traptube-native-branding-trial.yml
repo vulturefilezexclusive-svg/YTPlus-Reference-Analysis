@@ -23,6 +23,8 @@ jobs:
   build:
     runs-on: xcode-27
     timeout-minutes: 60
+    permissions:
+      contents: write
     steps:
       - name: Checkout TrapTube host integration
         uses: actions/checkout@v4
@@ -487,3 +489,27 @@ jobs:
             output/branding-binary-strings.txt
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish IPA as a direct-download GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          IPAS=(output/*.ipa)
+          if [ "${#IPAS[@]}" -ne 1 ]; then
+            echo "RELEASE PUBLISH FAIL: expected exactly one built .ipa under output/, found ${#IPAS[@]}"
+            ls -la output || true
+            exit 31
+          fi
+          IPA_PATH="${IPAS[0]}"
+          IPA_NAME="$(basename "$IPA_PATH")"
+          echo "Publishing $IPA_PATH as a release asset"
+          TAG="traptube-build-${{ github.run_number }}"
+          gh release create "$TAG" --prerelease \
+            --title "TrapTube build ${{ github.run_number }}" \
+            --notes "Direct-download TrapTube IPA from workflow run ${{ github.run_id }} (commit ${{ github.sha }}). This asset is the raw .ipa, not the artifact zip." \
+            || echo "Release $TAG already exists; uploading the asset to it instead."
+          gh release upload "$TAG" "$IPA_PATH" --clobber
+          echo "Direct download: https://github.com/${{ github.repository }}/releases/download/$TAG/$IPA_NAME"
