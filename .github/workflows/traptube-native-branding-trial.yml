@@ -477,6 +477,24 @@ jobs:
           grep -Fq 'reasonForWaitingToPlay' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'playback started, time advancing' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           test "$(sed -n '/let resolved = try await/,/self.player.play()/p' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift | grep -c 'await')" -eq 1 || { echo "VERIFY FAIL: the span from the resolver's return to play() must contain exactly one await (the resolve itself) - playback must never suspend on EQ work"; exit 29; }
+          grep -Fq 'Round 17: hook breadcrumbs' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'beginResolverItemConstruction' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'isResolverItemConstruction' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'registerResolverItem' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'registerResolverPlayer' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'noteHookStage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'TrapTubeAudioHook.beginResolverItemConstruction()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeAudioHook.registerResolverItem(item)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'item init begin' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'startLoadHeartbeat' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'still awaiting resolve' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'resolve returned, item status' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TTIsResolverItemConstruction' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTIsResolverOwnedItem' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTIsResolverOwnedPlayer' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'isResolverItem:' ci/traptube-host-tweak/TrapTubeBranding.x
+          test "$(grep -c 'TrapTubeAudioHook.beginResolverItemConstruction()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 2 || { echo "VERIFY FAIL: both resolver item constructions (muxed and composition) must run inside the resolver-item marker window"; exit 30; }
+          test "$(grep -c 'TrapTubeAudioHook.registerResolverItem(item)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 2 || { echo "VERIFY FAIL: both resolver item constructions (muxed and composition) must register the finished item with the hook bypass"; exit 30; }
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
