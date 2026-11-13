@@ -435,6 +435,20 @@ jobs:
           grep -Fq '"Hip-Hop"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq '"Clarity"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           if grep -Fq "This is TrapTube's own player" ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift; then echo "VERIFY FAIL: the stale player disclaimer text is still present"; exit 26; fi
+          grep -Fq 'TTIsFeatureSettingsModel' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTCellIsFeatureControl' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTSectionsBelongToFeaturePage' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTIsNativeFeatureSettingsSection' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTFeatureSettingsKeys' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'sponsorblock' ci/traptube-host-tweak/TrapTubeBranding.x
+          if grep -Fq 'TTIsVolumeBoostModel(self)' ci/traptube-host-tweak/TrapTubeBranding.x; then echo "VERIFY FAIL: settings filters still use the VolumeBoost-only page check instead of the generalized feature-page scoping"; exit 27; fi
+          grep -Fq 'struct TrapTubeSponsorSegment' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'enum TrapTubeSponsorBlock' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'sponsor.ajay.app/api/skipSegments' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'skippedCategories' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'checkSponsorSegments' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'skipNotice' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Skipped sponsor' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
