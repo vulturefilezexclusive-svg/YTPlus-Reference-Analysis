@@ -99,12 +99,23 @@ struct TrapTubeChannelProfile {
     }
 }
 
+/// Mutable bag for the recursive account-JSON extraction in
+/// TrapTubeYouTubeAuth (kept at file scope so the extractor can be a
+/// plain static function).
+private struct TrapTubeAccountFields {
+    var channelID: String?
+    var handle: String?
+    var accountName: String?
+    var titleNearChannelID: String?
+}
+
 enum TrapTubeYouTubeAuth {
     private static let cookieKey = "TrapTube.YouTube.CookieHeader"
     private static let sapisidKey = "TrapTube.YouTube.SAPISID"
     private static let channelIDKey = "TrapTube.YouTube.ChannelID"
     private static let channelTitleKey = "TrapTube.YouTube.ChannelTitle"
     private static let channelHandleKey = "TrapTube.YouTube.ChannelHandle"
+    private static let staleKey = "TrapTube.YouTube.SessionStale"
     static let origin = "https://www.youtube.com"
 
     static var cookieHeader: String? {
@@ -118,6 +129,19 @@ enum TrapTubeYouTubeAuth {
     }
 
     static var isSignedIn: Bool { sapisid != nil || cookieHeader != nil }
+
+    /// Set when YouTube answers an authenticated request with 401/403:
+    /// the saved session is stale and the UI should say so (and prompt a
+    /// fresh sign-in) instead of silently retrying forever (Round 14).
+    static var isSessionStale: Bool { UserDefaults.standard.bool(forKey: staleKey) }
+
+    static func noteAuthStatus(_ status: Int) {
+        if status == 401 || status == 403 {
+            UserDefaults.standard.set(true, forKey: staleKey)
+        } else if status == 200 {
+            UserDefaults.standard.removeObject(forKey: staleKey)
+        }
+    }
 
     static var cachedProfile: TrapTubeChannelProfile? {
         guard let title = UserDefaults.standard.string(forKey: channelTitleKey), !title.isEmpty else {
@@ -135,34 +159,52 @@ enum TrapTubeYouTubeAuth {
     /// when this returns false.
     @discardableResult
     static func store(cookies: [HTTPCookie]) -> Bool {
-        let relevant = cookies.filter {
-            $0.domain.contains("youtube.com") || $0.domain.contains("google.com")
-        }
-        var sapisidValue: String?
-        var sawLoginCookie = false
-        for cookie in relevant {
-            if cookie.name == "SAPISID" || cookie.name == "__Secure-3PAPISID" {
-                sapisidValue = cookie.value
+        // Round 14 hardening. The old code built the Cookie header from
+        // every youtube.com AND google.com cookie (a browser never sends
+        // google.com cookies to youtube.com, and duplicate names could
+        // appear) and picked the SAPISID value by cookie-array order -
+        // whichever of SAPISID / __Secure-3PAPISID happened to come last
+        // in WKHTTPCookieStore's unordered list won. Now: the header is
+        // exactly the youtube.com cookie set, one value per name, and
+        // the SAPISID value is chosen by a fixed priority.
+        let youtubeCookies = cookies.filter { $0.domain.contains("youtube.com") }
+        let googleCookies = cookies.filter { $0.domain.contains("google.com") }
+        func sapisidValue(in list: [HTTPCookie]) -> String? {
+            for name in ["__Secure-3PAPISID", "SAPISID", "__Secure-1PAPISID"] {
+                if let cookie = list.first(where: { $0.name == name && !$0.value.isEmpty }) {
+                    return cookie.value
+                }
             }
-            if cookie.name == "LOGIN_INFO" || cookie.name == "__Secure-3PAPISID" {
-                sawLoginCookie = true
-            }
+            return nil
         }
-        guard sapisidValue != nil || sawLoginCookie else { return false }
-        let header = relevant
-            .filter { !$0.value.isEmpty }
-            .map { "\($0.name)=\($0.value)" }
-            .joined(separator: "; ")
+        let sapisid = sapisidValue(in: youtubeCookies) ?? sapisidValue(in: googleCookies)
+        let sawLoginCookie = (youtubeCookies + googleCookies).contains {
+            $0.name == "LOGIN_INFO" || $0.name == "__Secure-3PAPISID"
+        }
+        guard sapisid != nil || sawLoginCookie else { return false }
+        // One value per cookie name, first occurrence wins. The
+        // youtube.com set is what a browser sends to youtubei; the
+        // google.com set is only a fallback for a capture that somehow
+        // contains no youtube.com cookies at all.
+        func headerValue(from list: [HTTPCookie]) -> String {
+            var seenNames = Set<String>()
+            return list.filter { !$0.value.isEmpty }.compactMap { cookie in
+                seenNames.insert(cookie.name).inserted ? "\(cookie.name)=\(cookie.value)" : nil
+            }.joined(separator: "; ")
+        }
+        var header = headerValue(from: youtubeCookies)
+        if header.isEmpty { header = headerValue(from: googleCookies) }
         guard !header.isEmpty else { return false }
         UserDefaults.standard.set(header, forKey: cookieKey)
-        if let sapisidValue {
-            UserDefaults.standard.set(sapisidValue, forKey: sapisidKey)
+        if let sapisid {
+            UserDefaults.standard.set(sapisid, forKey: sapisidKey)
         }
+        UserDefaults.standard.removeObject(forKey: staleKey)
         return true
     }
 
     static func signOut() {
-        for key in [cookieKey, sapisidKey, channelIDKey, channelTitleKey, channelHandleKey] {
+        for key in [cookieKey, sapisidKey, channelIDKey, channelTitleKey, channelHandleKey, staleKey] {
             UserDefaults.standard.removeObject(forKey: key)
         }
     }
@@ -194,94 +236,242 @@ enum TrapTubeYouTubeAuth {
         if let authValue = authorizationHeader() {
             request.setValue(authValue, forHTTPHeaderField: "Authorization")
             request.setValue(origin, forHTTPHeaderField: "X-Origin")
+            // The web client sends its account index on every
+            // authenticated call; the account endpoints expect it.
+            request.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
         }
     }
 
-    /// Fetches the signed-in account's own channel through authenticated
-    /// InnerTube calls. Tries the account-menu endpoint first, then the
-    /// account browse page, parsing both defensively: any unexpected JSON
-    /// shape just yields nil instead of a crash or a guessed identity.
+    /// Outcome of a My Channel fetch: the profile when one could be
+    /// read, plus the last HTTP status/detail seen, so the sheet can
+    /// show real evidence on failure instead of "try Refresh"
+    /// (Round 14).
+    struct ChannelFetchOutcome {
+        let profile: TrapTubeChannelProfile?
+        let lastStatus: Int?
+        let lastDetail: String
+    }
+
     static func fetchMyChannel() async -> TrapTubeChannelProfile? {
-        guard isSignedIn else { return nil }
-        if let json = try? await TrapTubeInnerTube.post(
-            endpoint: "https://www.youtube.com/youtubei/v1/account/getAccountMenu",
-            body: [:]),
-           let profile = parseChannelProfile(from: json) {
-            cache(profile: profile)
-            return profile
+        await fetchMyChannelDetailed().profile
+    }
+
+    /// Fetches the signed-in account's own channel, trying in order:
+    /// (i) account/getAccountMenu on the WEB client, (ii) browse
+    /// FEaccount on the WEB client, (iii) an authenticated scrape of
+    /// the /feed/you page HTML, whose embedded data carries the
+    /// account's own channel metadata. The Round 11 version stopped at
+    /// two `try?`-swallowed calls whose parser never saw the renderer
+    /// shapes these endpoints actually answer with, so a signed-in user
+    /// got "couldn't read your channel details" with no evidence why.
+    static func fetchMyChannelDetailed() async -> ChannelFetchOutcome {
+        guard isSignedIn else {
+            return ChannelFetchOutcome(profile: nil, lastStatus: nil,
+                                       lastDetail: "not signed in")
         }
-        if let json = try? await TrapTubeInnerTube.post(
-            endpoint: "https://www.youtube.com/youtubei/v1/browse",
-            body: ["browseId": "FEaccount"]),
-           let profile = parseChannelProfile(from: json) {
-            cache(profile: profile)
-            return profile
+        var lastStatus: Int?
+        var lastDetail = "no attempt was made"
+
+        let attempts: [(name: String, endpoint: String, body: [String: Any])] = [
+            ("account menu", "https://www.youtube.com/youtubei/v1/account/getAccountMenu", [:]),
+            ("account page", "https://www.youtube.com/youtubei/v1/browse", ["browseId": "FEaccount"]),
+        ]
+        for attempt in attempts {
+            switch await TrapTubeInnerTube.postAccount(endpoint: attempt.endpoint, body: attempt.body) {
+            case .success(let json):
+                lastStatus = 200
+                if let profile = parseChannelProfile(from: json) {
+                    cache(profile: profile)
+                    return ChannelFetchOutcome(profile: profile, lastStatus: 200,
+                                               lastDetail: attempt.name)
+                }
+                lastDetail = "\(attempt.name): YouTube answered 200 but the response held no readable channel identity"
+                NSLog("[TrapTube Account] %@ answered 200 with no parseable identity", attempt.name)
+            case .failure(let status, let detail):
+                if let status { lastStatus = status }
+                lastDetail = "\(attempt.name): \(detail)"
+                NSLog("[TrapTube Account] %@ failed: %@", attempt.name, detail)
+            }
         }
-        return nil
+
+        if let page = await fetchAccountPageHTML() {
+            lastStatus = page.status
+            if let profile = parseChannelProfile(fromHTML: page.html) {
+                cache(profile: profile)
+                return ChannelFetchOutcome(profile: profile, lastStatus: page.status,
+                                           lastDetail: "account page HTML")
+            }
+            lastDetail = "account page HTML (HTTP \(page.status)): no channel identity found in the page"
+        } else {
+            lastDetail = "account page HTML: the page request failed before any response"
+        }
+        return ChannelFetchOutcome(profile: nil, lastStatus: lastStatus, lastDetail: lastDetail)
+    }
+
+    /// Authenticated GET of the "You" page for the HTML scrape variant.
+    /// Cookies only - this is a plain page load, not an InnerTube call.
+    private static func fetchAccountPageHTML() async -> (html: String, status: Int)? {
+        guard let url = URL(string: "https://www.youtube.com/feed/you") else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue(TrapTubeInnerTube.webUserAgent, forHTTPHeaderField: "User-Agent")
+        if let cookieHeader {
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard let html = String(data: data, encoding: .utf8) else { return nil }
+            return (html, status)
+        } catch {
+            NSLog("[TrapTube Account] /feed/you page fetch failed: %@",
+                  TrapTubeErrorFormatting.describe(error))
+            return nil
+        }
+    }
+
+    /// Extracts the account identity from a signed-in page's HTML. The
+    /// embedded initial data for the account's own channel pairs
+    /// "externalId" (the UC id) with "vanityChannelUrl" (the @handle)
+    /// in its channel metadata, and the account header carries
+    /// "accountName" / "channelHandleText".
+    static func parseChannelProfile(fromHTML html: String) -> TrapTubeChannelProfile? {
+        func firstMatch(_ pattern: String, in text: String) -> String? {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  match.numberOfRanges > 1,
+                  let range = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[range])
+        }
+        let channelID = firstMatch(#""externalId"\s*:\s*"(UC[A-Za-z0-9_-]{22})""#, in: html)
+        var handle = firstMatch(#""vanityChannelUrl"\s*:\s*"https?:\\/\\/www\.youtube\.com\\/(@[A-Za-z0-9_.\-]+)""#, in: html)
+        if handle == nil {
+            handle = firstMatch(#""channelHandleText"\s*:\s*\{\s*"runs"\s*:\s*\[\s*\{\s*"text"\s*:\s*"(@[A-Za-z0-9_.\-]+)""#, in: html)
+        }
+        var title = firstMatch(#""accountName"\s*:\s*\{\s*"simpleText"\s*:\s*"([^"]{1,80})""#, in: html)
+        if title == nil, let channelID, let idRange = html.range(of: channelID) {
+            // The metadata block pairs "title" with the externalId:
+            // search the window around the id instead of the whole page
+            // (the page is full of other channels' titles).
+            let lower = html.index(idRange.lowerBound, offsetBy: -800, limitedBy: html.startIndex) ?? html.startIndex
+            let upper = html.index(idRange.upperBound, offsetBy: 800, limitedBy: html.endIndex) ?? html.endIndex
+            title = firstMatch(#""title"\s*:\s*"([^"]{1,80})""#, in: String(html[lower..<upper]))
+        }
+        guard channelID != nil || handle != nil else { return nil }
+        return TrapTubeChannelProfile(channelID: channelID ?? "",
+                                      title: title ?? "Your channel",
+                                      handle: handle)
     }
 
     static func parseChannelProfile(from json: [String: Any]) -> TrapTubeChannelProfile? {
-        var channelID: String?
-        var handle: String?
-        var accountName: String?
-        var titleNearChannelID: String?
-
-        func textValue(_ node: Any?) -> String? {
-            guard let dict = node as? [String: Any] else { return nil }
-            if let simple = dict["simpleText"] as? String { return simple }
-            if let runs = dict["runs"] as? [[String: Any]] {
-                let joined = runs.compactMap { $0["text"] as? String }.joined()
-                return joined.isEmpty ? nil : joined
-            }
-            return nil
+        // Identity is collected globally first, then from any
+        // accountItem subtrees (the FEaccount channel-switcher rows);
+        // scoped values win, since the global tree of an account page
+        // can also mention other channels.
+        var global = TrapTubeAccountFields()
+        collectAccountFields(json, into: &global)
+        var subtrees: [Any] = []
+        collectAccountItemSubtrees(json, into: &subtrees)
+        var scoped = TrapTubeAccountFields()
+        for subtree in subtrees {
+            collectAccountFields(subtree, into: &scoped)
         }
-
-        func walk(_ node: Any) {
-            if let dict = node as? [String: Any] {
-                if let id = dict["channelId"] as? String,
-                   id.hasPrefix("UC"), id.count >= 20 {
-                    if channelID == nil { channelID = id }
-                    if titleNearChannelID == nil {
-                        titleNearChannelID = textValue(dict["title"]) ?? textValue(dict["name"])
-                    }
-                }
-                if let canonical = dict["canonicalBaseUrl"] as? String,
-                   canonical.hasPrefix("/@"), handle == nil {
-                    handle = String(canonical.dropFirst())
-                }
-                if let vanity = dict["vanityChannelUrl"] as? String,
-                   let atRange = vanity.range(of: "/@"), handle == nil {
-                    handle = String(vanity[atRange.upperBound...])
-                }
-                if accountName == nil {
-                    if let name = textValue(dict["accountName"]) {
-                        accountName = name
-                    } else if let nameString = dict["accountName"] as? String, !nameString.isEmpty {
-                        accountName = nameString
-                    }
-                }
-                if handle == nil {
-                    if let handleString = dict["handle"] as? String, handleString.hasPrefix("@") {
-                        handle = String(handleString.dropFirst())
-                    } else if let handleText = textValue(dict["handle"]), handleText.hasPrefix("@") {
-                        handle = String(handleText.dropFirst())
-                    } else if let channelHandle = dict["channelHandle"] as? String,
-                              channelHandle.hasPrefix("@") {
-                        handle = String(channelHandle.dropFirst())
-                    }
-                }
-                for value in dict.values { walk(value) }
-            } else if let array = node as? [Any] {
-                for value in array { walk(value) }
-            }
-        }
-        walk(json)
-
+        let channelID = scoped.channelID ?? global.channelID
+        let handle = scoped.handle ?? global.handle
+        let accountName = scoped.accountName ?? global.accountName
+        let titleNearChannelID = scoped.titleNearChannelID ?? global.titleNearChannelID
         guard channelID != nil || handle != nil || accountName != nil else { return nil }
         return TrapTubeChannelProfile(
             channelID: channelID ?? "",
             title: accountName ?? titleNearChannelID ?? "Your channel",
             handle: handle.map { "@\($0)" })
+    }
+
+    private static func accountTextValue(_ node: Any?) -> String? {
+        guard let dict = node as? [String: Any] else { return nil }
+        if let simple = dict["simpleText"] as? String { return simple }
+        if let content = dict["content"] as? String { return content }
+        if let runs = dict["runs"] as? [[String: Any]] {
+            let joined = runs.compactMap { $0["text"] as? String }.joined()
+            return joined.isEmpty ? nil : joined
+        }
+        return nil
+    }
+
+    private static func collectAccountFields(_ node: Any, into found: inout TrapTubeAccountFields) {
+        if let dict = node as? [String: Any] {
+            if let id = dict["channelId"] as? String,
+               id.hasPrefix("UC"), id.count >= 20 {
+                if found.channelID == nil { found.channelID = id }
+                if found.titleNearChannelID == nil {
+                    found.titleNearChannelID = accountTextValue(dict["title"]) ?? accountTextValue(dict["name"])
+                }
+            }
+            // The "Your channel" entry of the account menu carries the
+            // UC id as a browse endpoint id, not a "channelId" key -
+            // the Round 11 parser never looked here, which is one
+            // reason My Channel came back empty. This extractor only
+            // ever runs on account-surface responses, whose UC browse
+            // ids belong to the signed-in account.
+            if let browse = dict["browseId"] as? String,
+               browse.hasPrefix("UC"), browse.count >= 20,
+               found.channelID == nil {
+                found.channelID = browse
+            }
+            if let canonical = dict["canonicalBaseUrl"] as? String,
+               canonical.hasPrefix("/@"), found.handle == nil {
+                found.handle = String(canonical.dropFirst())
+            }
+            if let vanity = dict["vanityChannelUrl"] as? String,
+               let atRange = vanity.range(of: "/@"), found.handle == nil {
+                found.handle = String(vanity[atRange.upperBound...])
+            }
+            if found.accountName == nil {
+                if let name = accountTextValue(dict["accountName"]) {
+                    found.accountName = name
+                } else if let nameString = dict["accountName"] as? String, !nameString.isEmpty {
+                    found.accountName = nameString
+                }
+            }
+            // Current FEaccount header shape: pageHeaderRenderer whose
+            // view model's title is the account name.
+            if found.accountName == nil,
+               let viewModel = dict["pageHeaderViewModel"] as? [String: Any],
+               let titleNode = viewModel["title"] as? [String: Any],
+               let dynamic = titleNode["dynamicTextViewModel"] as? [String: Any],
+               let name = accountTextValue(dynamic["text"]) {
+                found.accountName = name
+            }
+            if found.handle == nil {
+                if let handleString = dict["handle"] as? String, handleString.hasPrefix("@") {
+                    found.handle = String(handleString.dropFirst())
+                } else if let handleText = accountTextValue(dict["handle"]), handleText.hasPrefix("@") {
+                    found.handle = String(handleText.dropFirst())
+                } else if let channelHandle = dict["channelHandle"] as? String,
+                          channelHandle.hasPrefix("@") {
+                    found.handle = String(channelHandle.dropFirst())
+                } else if let handleText = accountTextValue(dict["channelHandleText"]),
+                          handleText.hasPrefix("@") {
+                    // activeAccountHeaderRenderer / accountItem carry
+                    // the handle in this text node in current shapes.
+                    found.handle = String(handleText.dropFirst())
+                }
+            }
+            for value in dict.values { collectAccountFields(value, into: &found) }
+        } else if let array = node as? [Any] {
+            for value in array { collectAccountFields(value, into: &found) }
+        }
+    }
+
+    private static func collectAccountItemSubtrees(_ node: Any, into list: inout [Any]) {
+        if let dict = node as? [String: Any] {
+            if let item = dict["accountItem"] {
+                list.append(item)
+            }
+            for value in dict.values { collectAccountItemSubtrees(value, into: &list) }
+        } else if let array = node as? [Any] {
+            for value in array { collectAccountItemSubtrees(value, into: &list) }
+        }
     }
 }
 
@@ -346,6 +536,28 @@ enum TrapTubeStreamResolver {
             }
         }
         return nil
+    }
+
+    /// Hard ceiling for a whole resolution (every profile's request
+    /// plus its track loads). Round 14: on Build 169 a degraded
+    /// response left the player sheet on an endless spinner because
+    /// resolve() simply never came back - racing it against this
+    /// deadline guarantees a terminal failure surfaces in the UI with
+    /// a reason (and moves the EQ status off "attaching...") instead.
+    static func resolveWithTimeout(videoID: String, seconds: Double = 45) async throws -> TrapTubeResolvedPlayback {
+        try await withThrowingTaskGroup(of: TrapTubeResolvedPlayback.self) { group in
+            group.addTask { try await resolve(videoID: videoID) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw TrapTubePlayerError.network(
+                    "YouTube took too long to hand over this video (over \(Int(seconds)) seconds) - check the connection and try again")
+            }
+            guard let result = try await group.next() else {
+                throw TrapTubePlayerError.network("Playback resolution ended without a result")
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     static func resolve(videoID: String) async throws -> TrapTubeResolvedPlayback {
@@ -515,9 +727,16 @@ enum TrapTubeStreamResolver {
         }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(profile.userAgent, forHTTPHeaderField: "User-Agent")
-        TrapTubeYouTubeAuth.applyAuth(to: &request)
+        // Round 14: NO auth headers on playback resolution, ever. These
+        // signed-out client profiles are the proven Build J/K path -
+        // they only ever carried the web session because Round 11
+        // attached Cookie + SAPISIDHASH here too, and playback broke
+        // on Build 169 the moment a session existed on the device.
+        // Auth belongs to the account/feed surfaces only, never to
+        // stream resolution.
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -835,7 +1054,7 @@ final class TrapTubePlayerController: ObservableObject {
                 // resolve() now builds and validates the AVPlayerItem
                 // itself, per client profile, so a success here means a
                 // real item exists and the EQ hook can observe it.
-                let resolved = try await TrapTubeStreamResolver.resolve(videoID: videoID)
+                let resolved = try await TrapTubeStreamResolver.resolveWithTimeout(videoID: videoID)
                 guard !Task.isCancelled else { return }
                 self.title = resolved.title
                 self.author = resolved.author
@@ -1633,8 +1852,17 @@ final class TrapTubeFeedModel: ObservableObject {
         defer { if run == generation { isLoading = false } }
         do {
             let endpoint = "https://www.youtube.com/youtubei/v1/search"
-            let json = try await TrapTubeInnerTube.post(endpoint: endpoint,
-                                                        body: body(continuation))
+            let requestBody = body(continuation)
+            // A response is only usable if the parser can pull at
+            // least one video or a continuation token out of it;
+            // anything else retries signed out inside postFeed.
+            let json = try await TrapTubeInnerTube.postFeed(endpoint: endpoint, body: requestBody) { candidate in
+                var probeItems: [TrapTubeFeedItem] = []
+                var probeSeen = Set<String>()
+                var probeToken: String?
+                Self.collect(node: candidate, items: &probeItems, seen: &probeSeen, continuation: &probeToken)
+                return !probeItems.isEmpty || probeToken != nil
+            }
             guard run == generation else { return }
             var seen = Set(items.map { $0.videoID })
             var found: [TrapTubeFeedItem] = []
@@ -1716,6 +1944,7 @@ actor TrapTubeVisitorDataStore {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(TrapTubeInnerTube.webUserAgent, forHTTPHeaderField: "User-Agent")
         let body: [String: Any] = ["context": ["client": TrapTubeInnerTube.webContext]]
@@ -1745,7 +1974,21 @@ enum TrapTubeInnerTube {
         await visitorStore.value()
     }
 
-    static func post(endpoint: String, body: [String: Any]) async throws -> [String: Any] {
+    /// Result of an account-surface POST: HTTP errors are data, not
+    /// exceptions, so the caller can show the status as evidence.
+    enum AccountPostResult {
+        case success([String: Any])
+        case failure(status: Int?, detail: String)
+    }
+
+    /// One InnerTube POST on the WEB client. Returns the parsed JSON
+    /// and the HTTP status; throws only on transport/parse failure so
+    /// each caller decides what an HTTP error means (Round 14). This
+    /// is also the ONLY place auth headers are attached to an
+    /// InnerTube request.
+    private static func performPost(endpoint: String, body: [String: Any],
+                                    authenticated: Bool,
+                                    accountHeaders: Bool = false) async throws -> (json: [String: Any], status: Int) {
         guard let url = URL(string: "\(endpoint)?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8&prettyPrint=false") else {
             throw TrapTubePlayerError.network("bad endpoint")
         }
@@ -1757,20 +2000,110 @@ enum TrapTubeInnerTube {
         fullBody["context"] = ["client": clientContext]
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        request.timeoutInterval = 20
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(webUserAgent, forHTTPHeaderField: "User-Agent")
-        TrapTubeYouTubeAuth.applyAuth(to: &request)
+        if accountHeaders {
+            // The headers the real web client sends to the account
+            // surfaces alongside the session.
+            request.setValue("1", forHTTPHeaderField: "X-Youtube-Client-Name")
+            request.setValue((webContext["clientVersion"] as? String) ?? "",
+                             forHTTPHeaderField: "X-Youtube-Client-Version")
+            request.setValue(TrapTubeYouTubeAuth.origin, forHTTPHeaderField: "Origin")
+            request.setValue(TrapTubeYouTubeAuth.origin + "/", forHTTPHeaderField: "Referer")
+        }
+        if authenticated {
+            TrapTubeYouTubeAuth.applyAuth(to: &request)
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: fullBody)
         let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if authenticated {
+            TrapTubeYouTubeAuth.noteAuthStatus(status)
+        }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TrapTubePlayerError.network("unexpected response")
         }
-        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            let serverMessage = ((json["error"] as? [String: Any])?["message"] as? String)
-                ?? "HTTP \(http.statusCode)"
-            throw TrapTubePlayerError.network("YouTube refused the request: \(serverMessage)")
+        return (json, status)
+    }
+
+    private static func httpErrorMessage(_ json: [String: Any], status: Int) -> String {
+        ((json["error"] as? [String: Any])?["message"] as? String) ?? "HTTP \(status)"
+    }
+
+    static func post(endpoint: String, body: [String: Any]) async throws -> [String: Any] {
+        // Round 14: when signed in, an authenticated request that
+        // YouTube refuses is retried as the identical signed-out
+        // request before any error surfaces. The signed-out WEB path
+        // is the proven one (it has carried the feed since Build I),
+        // so being signed in must never make a surface worse than
+        // being signed out.
+        if TrapTubeYouTubeAuth.isSignedIn {
+            do {
+                let attempt = try await performPost(endpoint: endpoint, body: body, authenticated: true)
+                if attempt.status == 200 { return attempt.json }
+                NSLog("[TrapTube InnerTube] Authenticated request answered HTTP %ld; retrying signed out: %@",
+                      attempt.status, endpoint)
+            } catch {
+                NSLog("[TrapTube InnerTube] Authenticated request failed (%@); retrying signed out: %@",
+                      TrapTubeErrorFormatting.describe(error), endpoint)
+            }
         }
-        return json
+        let attempt = try await performPost(endpoint: endpoint, body: body, authenticated: false)
+        guard attempt.status == 200 else {
+            throw TrapTubePlayerError.network(
+                "YouTube refused the request: \(httpErrorMessage(attempt.json, status: attempt.status))")
+        }
+        return attempt.json
+    }
+
+    /// Feed/search variant of post(): a 200 whose payload parses to
+    /// nothing usable also counts as a failed attempt, so a signed-in
+    /// response shape the parser can't read falls back to the
+    /// signed-out request instead of an empty feed.
+    static func postFeed(endpoint: String, body: [String: Any],
+                         isUsable: ([String: Any]) -> Bool) async throws -> [String: Any] {
+        var lastJSON: [String: Any]?
+        var lastError: Error?
+        let attempts = TrapTubeYouTubeAuth.isSignedIn ? [true, false] : [false]
+        for authenticated in attempts {
+            do {
+                let attempt = try await performPost(endpoint: endpoint, body: body,
+                                                    authenticated: authenticated)
+                guard attempt.status == 200 else {
+                    lastError = TrapTubePlayerError.network(
+                        "YouTube refused the request: \(httpErrorMessage(attempt.json, status: attempt.status))")
+                    continue
+                }
+                if isUsable(attempt.json) { return attempt.json }
+                lastJSON = attempt.json
+                NSLog("[TrapTube InnerTube] Response (authenticated: %@) held nothing usable; falling back: %@",
+                      authenticated ? "yes" : "no", endpoint)
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastJSON { return lastJSON }
+        throw lastError ?? TrapTubePlayerError.network("request failed")
+    }
+
+    /// Account-surface POST (getAccountMenu / FEaccount): signed-in
+    /// only, with the web client's account headers, and the HTTP
+    /// status preserved for the caller instead of thrown away - the
+    /// Round 11 version swallowed it with `try?`, leaving My Channel
+    /// with nothing to show but "try Refresh".
+    static func postAccount(endpoint: String, body: [String: Any]) async -> AccountPostResult {
+        do {
+            let attempt = try await performPost(endpoint: endpoint, body: body,
+                                                authenticated: true, accountHeaders: true)
+            if attempt.status == 200 {
+                return .success(attempt.json)
+            }
+            return .failure(status: attempt.status,
+                            detail: "YouTube answered HTTP \(attempt.status): \(httpErrorMessage(attempt.json, status: attempt.status))")
+        } catch {
+            return .failure(status: nil, detail: TrapTubeErrorFormatting.describe(error))
+        }
     }
 }
 
@@ -2010,11 +2343,26 @@ struct TrapTubeProfileView: View {
         guard !isLoading else { return }
         isLoading = true
         defer { isLoading = false }
-        if let fetched = await TrapTubeYouTubeAuth.fetchMyChannel() {
+        let outcome = await TrapTubeYouTubeAuth.fetchMyChannelDetailed()
+        if let fetched = outcome.profile {
             profile = fetched
             message = nil
         } else if profile == nil {
-            message = "We couldn't read your channel details from YouTube yet. You're still signed in - try Refresh in a moment."
+            // Fail honestly, with the evidence: the last HTTP status
+            // and what was tried, so a failure is diagnosable instead
+            // of an endless "try Refresh" (Round 14).
+            var text = "We couldn't read your channel details from YouTube."
+            if let status = outcome.lastStatus {
+                text += " Last answer from YouTube: HTTP \(status) - \(outcome.lastDetail)."
+            } else {
+                text += " \(outcome.lastDetail)."
+            }
+            if TrapTubeYouTubeAuth.isSessionStale {
+                text += " YouTube is rejecting the saved sign-in (401/403) - sign out of the Player and sign in again."
+            } else {
+                text += " You're still signed in - try Refresh in a moment."
+            }
+            message = text
         }
     }
 }
@@ -2027,6 +2375,7 @@ struct TrapTubePlayerHomeView: View {
     @State private var showSignIn = false
     @State private var showProfile = false
     @State private var authSignedIn = TrapTubeYouTubeAuth.isSignedIn
+    @State private var authStale = TrapTubeYouTubeAuth.isSessionStale
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -2051,6 +2400,7 @@ struct TrapTubePlayerHomeView: View {
         }
         .task {
             authSignedIn = TrapTubeYouTubeAuth.isSignedIn
+            authStale = TrapTubeYouTubeAuth.isSessionStale
             if feed.items.isEmpty { await feed.loadHome() }
             detectedID = TrapTubeCurrentVideo.detectVideoID()
         }
@@ -2058,6 +2408,7 @@ struct TrapTubePlayerHomeView: View {
             TrapTubeNativePlayerView(request: request)
         }
         .sheet(isPresented: $showSignIn, onDismiss: {
+            authStale = TrapTubeYouTubeAuth.isSessionStale
             let nowSignedIn = TrapTubeYouTubeAuth.isSignedIn
             if nowSignedIn != authSignedIn {
                 authSignedIn = nowSignedIn
@@ -2066,7 +2417,10 @@ struct TrapTubePlayerHomeView: View {
         }) {
             TrapTubeSignInView()
         }
-        .sheet(isPresented: $showProfile) {
+        .sheet(isPresented: $showProfile, onDismiss: {
+            authStale = TrapTubeYouTubeAuth.isSessionStale
+            authSignedIn = TrapTubeYouTubeAuth.isSignedIn
+        }) {
             TrapTubeProfileView()
         }
     }
@@ -2110,9 +2464,9 @@ struct TrapTubePlayerHomeView: View {
             }
             .buttonStyle(.plain)
 
-            Text(authSignedIn ? "Signed in" : "Not signed in")
+            Text(authSignedIn ? (authStale ? "Sign-in expired" : "Signed in") : "Not signed in")
                 .font(.caption)
-                .foregroundStyle(Color.white.opacity(0.45))
+                .foregroundStyle(authStale && authSignedIn ? accent : Color.white.opacity(0.45))
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 16)
