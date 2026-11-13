@@ -499,6 +499,22 @@ jobs:
           grep -Fq 'isResolverItem:' ci/traptube-host-tweak/TrapTubeBranding.x
           test "$(grep -c 'TrapTubeAudioHook.beginResolverItemConstruction()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 2 || { echo "VERIFY FAIL: both resolver item constructions (muxed and composition) must run inside the resolver-item marker window"; exit 30; }
           test "$(grep -c 'TrapTubeAudioHook.registerResolverItem(item)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 2 || { echo "VERIFY FAIL: both resolver item constructions (muxed and composition) must register the finished item with the hook bypass"; exit 30; }
+          grep -Fq 'Round 19: attachment truth is what is on the item NOW' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'validatedAttachment' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'public static func prewarm()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'TrapTubeEQManager.prewarm()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeEQManager.prewarm()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'revalidateAttachment' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'attachImmediately' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'self.hook.attachImmediately(to: resolved.item)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'timeControlStatus' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'gobackward.15' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'goforward.15' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'dottedWaveform' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'func toggleMute()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TTApplyFloatingPillToPivotBar' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTRefreshPivotItemGlow' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTRefreshPivotGlowsInView' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
