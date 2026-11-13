@@ -623,9 +623,27 @@ enum TrapTubeStreamResolver {
                     guard !videoTracks.isEmpty, !audioTracks.isEmpty else {
                         throw TrapTubePlayerError.noPlayableFormat
                     }
+                    // Round 17: bracket the item construction itself.
+                    // Builds 173/176 stalled somewhere between the old
+                    // "item built" step (which fired BEFORE the item
+                    // existed) and resolve() returning, so the Diag trail
+                    // could not separate "the AVPlayerItem initializer /
+                    // its creation hooks park" from "the return path
+                    // parks". "item init begin" now fires immediately
+                    // before construction and "item built" immediately
+                    // after it. The construction also runs inside the
+                    // resolver-item marker window and the finished item
+                    // is registered, so the host EQ hook chain skips our
+                    // own items entirely (the controller attaches the EQ
+                    // explicitly after play()); see TrapTubeAudioHook.
+                    onStep?("\(profile.name): item init begin (muxed \(best.height)p)")
+                    TrapTubeAudioHook.beginResolverItemConstruction()
+                    let item = AVPlayerItem(asset: asset)
+                    TrapTubeAudioHook.endResolverItemConstruction()
+                    TrapTubeAudioHook.registerResolverItem(item)
                     onStep?("\(profile.name): item built (muxed \(best.height)p, tracks validated)")
                     return TrapTubeResolvedPlayback(title: title, author: author,
-                                                    item: AVPlayerItem(asset: asset),
+                                                    item: item,
                                                     profileName: profile.name)
                 }
 
@@ -670,9 +688,16 @@ enum TrapTubeStreamResolver {
                     }
                     try compVideo.insertTimeRange(videoRange, of: videoTrack, at: .zero)
                     try compAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+                    // Round 17: same construction bracket + resolver
+                    // marker/registration as the muxed path above.
+                    onStep?("\(profile.name): item init begin (composition \(video.height)p)")
+                    TrapTubeAudioHook.beginResolverItemConstruction()
+                    let item = AVPlayerItem(asset: composition)
+                    TrapTubeAudioHook.endResolverItemConstruction()
+                    TrapTubeAudioHook.registerResolverItem(item)
                     onStep?("\(profile.name): item built (composition \(video.height)p + audio, tracks validated)")
                     return TrapTubeResolvedPlayback(title: title, author: author,
-                                                    item: AVPlayerItem(asset: composition),
+                                                    item: item,
                                                     profileName: profile.name)
                 }
                 failures.append("\(profile.name): formats were present but none were directly playable")
@@ -982,6 +1007,17 @@ final class TrapTubePlayerController: ObservableObject {
     private var watchdogTask: Task<Void, Never>?
     private var playbackStartNoted = false
 
+    // Round 17 heartbeat: an independent detached task that reports the
+    // load's state at 3s/6s/10s while load() is in flight. It shares no
+    // executor with the resolver or its task group, so its milestones
+    // land even when the resolver is parked - and each one carries the
+    // EQ hook chain's last recorded stage, which separates "parked
+    // inside item construction / the hook" from "parked in the return
+    // path" on a single screenshot.
+    private var heartbeatTask: Task<Void, Never>?
+    private var heartbeatResolveReturned = false
+    private weak var heartbeatItem: AVPlayerItem?
+
     /// Append one milestone to the diagnostics trail (keeps the most
     /// recent few so the line stays compact and readable).
     func noteDiagnostic(_ step: String) {
@@ -1002,6 +1038,12 @@ final class TrapTubePlayerController: ObservableObject {
     private var lastSkippedSegmentEnd: Double = -1
 
     init() {
+        // Round 17: register our own player with the hook bypass BEFORE
+        // installing the explicit EQ hook, so the tweak's AVPlayer /
+        // AVPlayerLayer install hooks skip this player (its EQ comes
+        // from this controller's install(on:) alone) instead of adding
+        // a second hook instance's synchronous work around our items.
+        TrapTubeAudioHook.registerResolverPlayer(player)
         hook.install(on: player)
         pipDelegate.onDidStart = { [weak self] in
             DispatchQueue.main.async { [weak self] in
@@ -1051,6 +1093,9 @@ final class TrapTubePlayerController: ObservableObject {
                 if time.seconds > 0.05, !self.playbackStartNoted {
                     self.playbackStartNoted = true
                     self.noteDiagnostic("playback started, time advancing")
+                    // The load is proven alive; the heartbeat's job is done.
+                    self.heartbeatTask?.cancel()
+                    self.heartbeatTask = nil
                 }
                 if let itemDuration = self.player.currentItem?.duration.seconds,
                    itemDuration.isFinite {
@@ -1077,6 +1122,10 @@ final class TrapTubePlayerController: ObservableObject {
         watchdogTask?.cancel()
         watchdogTask = nil
         playbackStartNoted = false
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        heartbeatResolveReturned = false
+        heartbeatItem = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         isLoading = true
@@ -1095,6 +1144,7 @@ final class TrapTubePlayerController: ObservableObject {
             guard let self else { return }
             self.sponsorSegments = await TrapTubeSponsorBlock.fetchSegments(videoID: videoID)
         }
+        startLoadHeartbeat()
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -1105,6 +1155,8 @@ final class TrapTubePlayerController: ObservableObject {
                     DispatchQueue.main.async { self?.noteDiagnostic(step) }
                 }
                 guard !Task.isCancelled else { return }
+                self.heartbeatResolveReturned = true
+                self.heartbeatItem = resolved.item
                 // Round 16 ordering invariant: from here to play() the
                 // sequence is purely synchronous - milestone, item in,
                 // play() - with no suspension on any EQ work in between
@@ -1122,6 +1174,8 @@ final class TrapTubePlayerController: ObservableObject {
                 self.startLoadWatchdog(for: resolved.item)
             } catch {
                 guard !Task.isCancelled else { return }
+                self.heartbeatTask?.cancel()
+                self.heartbeatTask = nil
                 self.isLoading = false
                 self.noteDiagnostic("LOAD FAILED: \(TrapTubeErrorFormatting.describe(error))")
                 self.errorMessage = TrapTubeErrorFormatting.playbackFailure(error)
@@ -1134,6 +1188,48 @@ final class TrapTubePlayerController: ObservableObject {
                     "Playback failed before EQ could attach - \(TrapTubeErrorFormatting.describe(error))")
                 NSLog("[TrapTube Player] Load failed for %@: %@", videoID,
                       TrapTubeErrorFormatting.describe(error))
+            }
+        }
+    }
+
+    /// Round 17 heartbeat: while a load is in flight, report its state
+    /// at 3s, 6s and 10s from a detached task that shares no executor
+    /// with the resolver, its task group or the load task - so the
+    /// milestones are written even when the resolver never returns.
+    /// Each line carries the EQ hook chain's last recorded stage (see
+    /// TrapTubeAudioHook.noteHookStage): "still awaiting resolve" plus
+    /// a stage of resolverConstructionBegin with no matching End means
+    /// the park is inside item construction or the creation hooks;
+    /// both brackets present but the load still awaiting means the park
+    /// is in the return/delivery path. Once the resolve has returned,
+    /// the lines report the item's live status instead.
+    private func startLoadHeartbeat() {
+        heartbeatTask?.cancel()
+        heartbeatTask = Task.detached { [weak self] in
+            var elapsed = 0
+            for target in [3, 6, 10] {
+                let delta = target - elapsed
+                elapsed = target
+                try? await Task.sleep(nanoseconds: UInt64(delta) * 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    let stage = TrapTubeAudioHook.lastHookStage
+                    if !self.heartbeatResolveReturned {
+                        self.noteDiagnostic("HB \(target)s: still awaiting resolve, hook stage \(stage)")
+                    } else if let item = self.heartbeatItem {
+                        let status: String
+                        switch item.status {
+                        case .unknown: status = "unknown"
+                        case .readyToPlay: status = "readyToPlay"
+                        case .failed: status = "failed"
+                        @unknown default: status = "other(\(item.status.rawValue))"
+                        }
+                        self.noteDiagnostic("HB \(target)s: resolve returned, item status \(status), hook stage \(stage)")
+                    } else {
+                        self.noteDiagnostic("HB \(target)s: resolve returned, no item, hook stage \(stage)")
+                    }
+                }
             }
         }
     }
