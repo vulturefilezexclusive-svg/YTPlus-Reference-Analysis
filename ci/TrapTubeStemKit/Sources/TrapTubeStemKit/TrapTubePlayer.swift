@@ -544,9 +544,10 @@ enum TrapTubeStreamResolver {
     /// resolve() simply never came back - racing it against this
     /// deadline guarantees a terminal failure surfaces in the UI with
     /// a reason (and moves the EQ status off "attaching...") instead.
-    static func resolveWithTimeout(videoID: String, seconds: Double = 45) async throws -> TrapTubeResolvedPlayback {
+    static func resolveWithTimeout(videoID: String, seconds: Double = 45,
+                                   onStep: ((String) -> Void)? = nil) async throws -> TrapTubeResolvedPlayback {
         try await withThrowingTaskGroup(of: TrapTubeResolvedPlayback.self) { group in
-            group.addTask { try await resolve(videoID: videoID) }
+            group.addTask { try await resolve(videoID: videoID, onStep: onStep) }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
                 throw TrapTubePlayerError.network(
@@ -560,16 +561,22 @@ enum TrapTubeStreamResolver {
         }
     }
 
-    static func resolve(videoID: String) async throws -> TrapTubeResolvedPlayback {
+    // Round 15 diagnostics: onStep reports each milestone of the
+    // resolution (profile attempt, response summary, item built, or the
+    // real per-profile failure) to the player UI, so a screenshot of the
+    // player IS the diagnosis instead of another round of guessing.
+    static func resolve(videoID: String, onStep: ((String) -> Void)? = nil) async throws -> TrapTubeResolvedPlayback {
         var sawCipher = false
         var lastPlayability: String?
         var failures: [String] = []
         for profile in profiles {
             do {
+                onStep?("\(profile.name): requesting")
                 let json = try await fetchPlayerResponse(videoID: videoID, profile: profile)
                 if let playability = json["playabilityStatus"] as? [String: Any],
                    let status = playability["status"] as? String, status != "OK" {
                     lastPlayability = (playability["reason"] as? String) ?? status
+                    onStep?("\(profile.name): playability \(status) - \(lastPlayability ?? status)")
                     continue
                 }
                 guard let streaming = json["streamingData"] as? [String: Any] else {
@@ -582,6 +589,8 @@ enum TrapTubeStreamResolver {
 
                 let muxed = formatList(streaming["formats"])
                 let adaptive = formatList(streaming["adaptiveFormats"])
+                let directCount = (muxed + adaptive).filter { $0.url != nil }.count
+                onStep?("\(profile.name): playability OK, \(muxed.count) muxed + \(adaptive.count) adaptive, \(directCount) direct URLs")
                 if muxed.isEmpty && adaptive.isEmpty { continue }
                 if muxed.allSatisfy({ $0.url == nil }) && adaptive.allSatisfy({ $0.url == nil }) {
                     sawCipher = true
@@ -614,6 +623,7 @@ enum TrapTubeStreamResolver {
                     guard !videoTracks.isEmpty, !audioTracks.isEmpty else {
                         throw TrapTubePlayerError.noPlayableFormat
                     }
+                    onStep?("\(profile.name): item built (muxed \(best.height)p, tracks validated)")
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: AVPlayerItem(asset: asset),
                                                     profileName: profile.name)
@@ -660,6 +670,7 @@ enum TrapTubeStreamResolver {
                     }
                     try compVideo.insertTimeRange(videoRange, of: videoTrack, at: .zero)
                     try compAudio.insertTimeRange(audioRange, of: audioTrack, at: .zero)
+                    onStep?("\(profile.name): item built (composition \(video.height)p + audio, tracks validated)")
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: AVPlayerItem(asset: composition),
                                                     profileName: profile.name)
@@ -670,6 +681,7 @@ enum TrapTubeStreamResolver {
                 // for this profile: record the real error and try the next
                 // client instead of treating the first failure as final.
                 failures.append("\(profile.name): \(TrapTubeErrorFormatting.describe(error))")
+                onStep?("\(profile.name): FAILED \(TrapTubeErrorFormatting.describe(error))")
                 NSLog("[TrapTube Player] Profile %@ failed: %@", profile.name,
                       TrapTubeErrorFormatting.describe(error))
                 continue
@@ -955,6 +967,22 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var duration: Double = 0
     @Published var rate: Float = 1.0
 
+    // Round 15 diagnostics: a compact, always-visible trail of the
+    // load's milestones (last resolver step, per-profile outcome, item
+    // status/error) rendered under the EQ status line in the player, so
+    // a screenshot of a failed load carries its own diagnosis.
+    @Published var diagnosticsLine: String = "Diag: idle"
+    private var diagSteps: [String] = []
+
+    /// Append one milestone to the diagnostics trail (keeps the most
+    /// recent few so the line stays compact and readable).
+    func noteDiagnostic(_ step: String) {
+        diagSteps.append(step)
+        if diagSteps.count > 3 { diagSteps.removeFirst(diagSteps.count - 3) }
+        diagnosticsLine = "Diag: " + diagSteps.joined(separator: " > ")
+        NSLog("[TrapTube Player] Diag: %@", step)
+    }
+
     // SponsorBlock state: segments for the current video (fetched on
     // load, never on the playback critical path), the transient skip
     // notice the view renders as a pill, and a guard against re-firing
@@ -1038,6 +1066,8 @@ final class TrapTubePlayerController: ObservableObject {
         errorMessage = nil
         title = ""
         author = ""
+        diagSteps = []
+        diagnosticsLine = "Diag: load \(videoID) started"
         // SponsorBlock resets with the video; the fetch runs parallel
         // to stream resolution and can only ever add skips, never block.
         sponsorBlockTask?.cancel()
@@ -1054,8 +1084,11 @@ final class TrapTubePlayerController: ObservableObject {
                 // resolve() now builds and validates the AVPlayerItem
                 // itself, per client profile, so a success here means a
                 // real item exists and the EQ hook can observe it.
-                let resolved = try await TrapTubeStreamResolver.resolveWithTimeout(videoID: videoID)
+                let resolved = try await TrapTubeStreamResolver.resolveWithTimeout(videoID: videoID) { [weak self] step in
+                    DispatchQueue.main.async { self?.noteDiagnostic(step) }
+                }
                 guard !Task.isCancelled else { return }
+                self.noteDiagnostic("resolved via \(resolved.profileName), item set, play() called")
                 self.title = resolved.title
                 self.author = resolved.author
                 self.observeItemStatus(resolved.item)
@@ -1065,11 +1098,15 @@ final class TrapTubePlayerController: ObservableObject {
             } catch {
                 guard !Task.isCancelled else { return }
                 self.isLoading = false
+                self.noteDiagnostic("LOAD FAILED: \(TrapTubeErrorFormatting.describe(error))")
                 self.errorMessage = TrapTubeErrorFormatting.playbackFailure(error)
                 // No item ever existed, so no EQ attach could start: say
                 // so plainly instead of leaving the status line sitting
-                // on a stale "attaching..." from the hook probe.
-                TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
+                // on a stale "attaching..." from the hook probe. Round 15:
+                // the EQ status line carries the same failure evidence
+                // as the diagnostics line.
+                TrapTubeEQManager.shared.setAttachmentStatus(
+                    "Playback failed before EQ could attach - \(TrapTubeErrorFormatting.describe(error))")
                 NSLog("[TrapTube Player] Load failed for %@: %@", videoID,
                       TrapTubeErrorFormatting.describe(error))
             }
@@ -1083,19 +1120,30 @@ final class TrapTubePlayerController: ObservableObject {
     private func observeItemStatus(_ item: AVPlayerItem) {
         itemStatusObservation?.invalidate()
         itemStatusObservation = item.observe(\.status, options: [.new]) { [weak self, weak item] _, _ in
-            guard let item, item.status == .failed else { return }
+            guard let item else { return }
+            if item.status == .readyToPlay {
+                DispatchQueue.main.async { [weak self] in
+                    self?.noteDiagnostic("item readyToPlay")
+                }
+                return
+            }
+            guard item.status == .failed else { return }
             let itemError = item.error
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 if let itemError {
+                    self.noteDiagnostic("ITEM FAILED: \(TrapTubeErrorFormatting.describe(itemError))")
                     self.errorMessage = TrapTubeErrorFormatting.playbackFailure(itemError)
                     NSLog("[TrapTube Player] Item failed after creation: %@",
                           TrapTubeErrorFormatting.describe(itemError))
+                    TrapTubeEQManager.shared.setAttachmentStatus(
+                        "Playback failed before EQ could attach - \(TrapTubeErrorFormatting.describe(itemError))")
                 } else {
+                    self.noteDiagnostic("ITEM FAILED: status .failed with no error object")
                     self.errorMessage = "Playback failed (AVPlayerItem status became .failed with no error object)"
+                    TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
                 }
                 self.isLoading = false
-                TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
             }
         }
     }
@@ -1458,6 +1506,16 @@ struct TrapTubeNativePlayerView: View {
             }
             .font(.caption.weight(.semibold))
             .foregroundStyle(Color.white.opacity(0.65))
+
+            // Round 15 diagnostics line: always visible in the player
+            // sheet, directly under the EQ status, so any screenshot of
+            // a failed load shows how far resolution got and the real
+            // per-profile / item error.
+            Text(controller.diagnosticsLine)
+                .font(.caption2.monospaced())
+                .foregroundStyle(Color.white.opacity(0.55))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
 
             VStack(spacing: 4) {
                 Slider(value: Binding(
