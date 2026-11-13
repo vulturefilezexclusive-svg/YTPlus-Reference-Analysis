@@ -539,8 +539,22 @@ jobs:
           grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
+          grep -Fq 'final class TrapTubeGhostAudio' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'downloadWithRemint' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'AVAudioConverter' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'GHOST (STREAMED' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TAP (FALLBACK)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'fetchGhostAudioSource' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTube.NativePlayer.AudioPath' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'switchAudioPath' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'final class TrapTubeMiniPlayerStore' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'proxy.size.width' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'installedMutableMix' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'makeTapParameters' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 're-attached at' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'TrapTubeEQReattachBreadcrumb' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits settings and the version footer replaced with the bandit credit line, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits settings and the version footer replaced with the bandit credit line, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, preserved original YTLite dylib, Round 20 width-pinned Stem Studio player with a minimize button and retained mini player, Ghost Tier 1 dual-path audio (streamed/file/tap fallback) with the Ghost/Tap A/B in the EQ panel, and seamless in-place EQ re-attach with a position breadcrumb."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
