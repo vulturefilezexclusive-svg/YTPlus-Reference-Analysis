@@ -119,9 +119,54 @@ public final class TrapTubeEQManager: NSObject {
         UserDefaults.standard.set(enabled, forKey: "TrapTube.EQ.Enabled")
     }
 
+    /// Round 19: attachment truth is what is on the item NOW, not what
+    /// was true when the tap was installed. The pre-Round-19 check only
+    /// asked "does a record exist for this item?", and every retry path
+    /// (the readyToPlay retry, the audioMix KVO, attachWhenReady) trusts
+    /// that answer - so when anything replaced or reset the item's
+    /// audioMix after installation (AVFoundation rebuilding the mix
+    /// around a pause/stop, the fullscreen controller's handoff, a PiP
+    /// restore), the tap was silently gone while the record kept saying
+    /// "attached" and no path ever re-installed it. Validation compares
+    /// the record against the item's LIVE mix: identity with the
+    /// installed mix, or - because a live mix can be a copy that still
+    /// carries our tap - any tap processor present in the current mix
+    /// (this manager is the only tap installer in the app, and the
+    /// foreign-tap guard in attach() refuses to install alongside one,
+    /// so a tap on an item with a record is ours). A record whose tap
+    /// is gone from the live mix is stale: it is pruned here so the
+    /// next attach starts clean. Call with attachmentLock held.
+    private func validatedAttachment(for item: AVPlayerItem) -> AttachmentRecord? {
+        let itemID = ObjectIdentifier(item)
+        guard let record = attachmentRecords[itemID], record.item === item else { return nil }
+        let liveMix = item.audioMix
+        if liveMix === record.installedMix {
+            if record.installedMix.inputParameters.contains(where: { $0.audioTapProcessor != nil }) {
+                return record
+            }
+        } else if let liveMix,
+                  liveMix.inputParameters.contains(where: { $0.audioTapProcessor != nil }) {
+            return record
+        }
+        // The installed mix was displaced and the live mix carries no
+        // tap: drop the stale record WITHOUT touching item.audioMix
+        // (that mix belongs to whoever installed it now).
+        attachmentRecords.removeValue(forKey: itemID)
+        NSLog("[TrapTube EQ] Attachment record was stale (tap no longer on the item's audio mix); pruned for re-attach")
+        return nil
+    }
+
     public func isAttached(to item: AVPlayerItem) -> Bool {
         attachmentLock.lock(); defer { attachmentLock.unlock() }
-        return attachmentRecords[ObjectIdentifier(item)]?.item === item
+        return validatedAttachment(for: item) != nil
+    }
+
+    /// Round 19: build the shared manager - and with it the AVAudioEngine
+    /// graph its init constructs and prepares - ahead of the first
+    /// attach, so that one-time cost is paid while the user is still
+    /// browsing the feed instead of inside the first tap-to-sound path.
+    public static func prewarm() {
+        _ = shared
     }
 
     public var attachmentStatus: String {
@@ -160,7 +205,7 @@ public final class TrapTubeEQManager: NSObject {
     /// This avoids the synchronous empty-track race when YouTube replaces items.
     public func attachWhenReady(to item: AVPlayerItem) async -> Bool {
         attachmentLock.lock()
-        let alreadyAttached = attachmentRecords[ObjectIdentifier(item)]?.item === item
+        let alreadyAttached = validatedAttachment(for: item) != nil
         attachmentLock.unlock()
         if alreadyAttached { return true }
 
@@ -202,7 +247,10 @@ public final class TrapTubeEQManager: NSObject {
         attachmentLock.lock()
         defer { attachmentLock.unlock() }
         let itemID = ObjectIdentifier(item)
-        if attachmentRecords[itemID]?.item === item { return true }
+        // Round 19: a record alone is not proof - validate against the
+        // item's live mix (this also prunes a displaced record so the
+        // install below starts from the mix that is actually there).
+        if validatedAttachment(for: item) != nil { return true }
         setAttachmentStatus("Installing the EQ tap on this stream...")
 
         let originalMix = item.audioMix
