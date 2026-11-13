@@ -988,6 +988,7 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published var isPlaying = false
+    @Published var isMuted = false
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
     @Published var rate: Float = 1.0
@@ -1171,6 +1172,12 @@ final class TrapTubePlayerController: ObservableObject {
                 self.isLoading = false
                 self.player.play()
                 self.noteDiagnostic("item set, play() called")
+                // Round 19: land the EQ tap NOW, while the resolver's
+                // validated tracks are still loaded, instead of waiting
+                // for the hook's KVO round-trip and async track load.
+                // Strictly after play(), outside the construction
+                // window, and the span above stays suspension-free.
+                self.hook.attachImmediately(to: resolved.item)
                 self.startLoadWatchdog(for: resolved.item)
             } catch {
                 guard !Task.isCancelled else { return }
@@ -1356,6 +1363,15 @@ final class TrapTubePlayerController: ObservableObject {
         isPlaying = player.timeControlStatus == .playing
     }
 
+    /// Mute toggle for the player card's speaker button. The EQ tap sits
+    /// post-effects on the item's mix, so muting the player does not
+    /// disturb attachment - and the hook's play-state revalidation
+    /// covers the resume side exactly like a pause/play cycle.
+    func toggleMute() {
+        player.isMuted.toggle()
+        isMuted = player.isMuted
+    }
+
     func skip(by seconds: Double) {
         let target = max(0, currentTime + seconds)
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
@@ -1536,11 +1552,15 @@ struct TrapTubeNativePlayerView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 0) {
-                header
-                videoArea
-                controls
+                topBar
+                videoCard
+                titleBlock
+                eqStrip
+                transportRow
+                statusBlock
                 Spacer(minLength: 0)
             }
+            .padding(.horizontal, 20)
         }
         .preferredColorScheme(.dark)
         .onAppear {
@@ -1563,18 +1583,11 @@ struct TrapTubeNativePlayerView: View {
         }
     }
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
-                    .font(.headline.weight(.bold)).foregroundStyle(.white)
-                    .lineLimit(2)
-                if !controller.author.isEmpty {
-                    Text(controller.author)
-                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.6))
-                        .lineLimit(1)
-                }
-            }
+    /// Round 19 restyle: the mockup's player has no title header - the
+    /// title lives under the video card - so the top row is just the
+    /// sheet's close button, kept because the screen still needs one.
+    private var topBar: some View {
+        HStack {
             Spacer()
             Button { dismiss() } label: {
                 Image(systemName: "xmark")
@@ -1585,81 +1598,304 @@ struct TrapTubeNativePlayerView: View {
             }
             .buttonStyle(.plain)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 12)
     }
 
-    private var videoArea: some View {
-        ZStack {
-            TrapTubePlayerLayerView(player: controller.player,
-                                    onLayerAvailable: { controller.registerPlayerLayer($0) })
-            VStack {
-                Spacer()
-                HStack(spacing: 8) {
-                    Spacer()
-                    Button { controller.togglePictureInPicture() } label: {
-                        Image(systemName: controller.isPictureInPictureActive ? "pip.exit" : "pip.enter")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 38, height: 38)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    Button { controller.presentFullscreen() } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 38, height: 38)
-                            .background(.ultraThinMaterial, in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.trailing, 10)
-                .padding(.bottom, 10)
-            }
-            if let notice = controller.skipNotice {
-                VStack {
-                    Spacer()
-                    HStack {
-                        HStack(spacing: 5) {
-                            Image(systemName: "forward.end.fill")
-                                .font(.system(size: 10, weight: .bold))
-                            Text(notice)
-                                .font(.caption.weight(.semibold))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
-                        Spacer()
-                    }
-                    .padding(.leading, 10)
-                    .padding(.bottom, 10)
-                }
-                .transition(.opacity)
-            }
-            if controller.isLoading {
-                ProgressView().tint(.white).scaleEffect(1.3)
-            }
-            if let message = controller.errorMessage {
-                VStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.title2).foregroundStyle(accent)
-                    Text(message)
-                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.85))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 24)
-                }
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
+                .font(.system(size: 25, weight: .bold))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if !controller.author.isEmpty {
+                Text(controller.author)
+                    .font(.system(size: 16))
+                    .foregroundStyle(Color.white.opacity(0.5))
+                    .lineLimit(1)
             }
         }
-        .aspectRatio(16 / 9, contentMode: .fit)
-        .background(Color.black)
-        .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
+        .padding(.top, 20)
     }
 
-    private var controls: some View {
-        VStack(spacing: 14) {
+    /// Round 19 restyle: the video sits in a charcoal card like the
+    /// mockup - rounded video, then the in-card strip (speaker, the red
+    /// scrubber, fullscreen), then the time labels, all inside the
+    /// card's padding. PiP keeps a glass button at the video's top
+    /// right; the SponsorBlock pill moved to the top left so it never
+    /// collides with the scrub strip.
+    private var videoCard: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                TrapTubePlayerLayerView(player: controller.player,
+                                        onLayerAvailable: { controller.registerPlayerLayer($0) })
+                VStack {
+                    HStack(spacing: 8) {
+                        if let notice = controller.skipNotice {
+                            HStack(spacing: 5) {
+                                Image(systemName: "forward.end.fill")
+                                    .font(.system(size: 10, weight: .bold))
+                                Text(notice)
+                                    .font(.caption.weight(.semibold))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                            .transition(.opacity)
+                        }
+                        Spacer()
+                        Button { controller.togglePictureInPicture() } label: {
+                            Image(systemName: controller.isPictureInPictureActive ? "pip.exit" : "pip.enter")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 38, height: 38)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(10)
+                    Spacer()
+                }
+                if controller.isLoading {
+                    ProgressView().tint(.white).scaleEffect(1.3)
+                }
+                if let message = controller.errorMessage {
+                    VStack(spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.title2).foregroundStyle(accent)
+                        Text(message)
+                            .font(.subheadline).foregroundStyle(Color.white.opacity(0.85))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                    }
+                }
+            }
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .background(Color.black)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
+
+            HStack(spacing: 12) {
+                Button { controller.toggleMute() } label: {
+                    Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+                scrubber
+                Button { controller.presentFullscreen() } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 2)
+
+            HStack {
+                Text(timeLabel(scrubbing ? scrubTime : controller.currentTime))
+                Spacer()
+                Text(timeLabel(controller.duration))
+            }
+            .font(.system(size: 13).monospacedDigit())
+            .foregroundStyle(Color.white.opacity(0.55))
+            .padding(.horizontal, 4)
+        }
+        .padding(10)
+        .background(Color(white: 0.09), in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22)
+            .stroke(Color.white.opacity(0.06), lineWidth: 1))
+    }
+
+    /// The mockup's thin in-card scrubber: gray track, red played
+    /// portion, red knob. It really seeks - drag (or tap) updates the
+    /// scrub position, release commits the seek.
+    private var scrubber: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+            let displayTime = scrubbing ? scrubTime : controller.currentTime
+            let fraction = controller.duration > 0
+                ? min(1, max(0, displayTime / controller.duration)) : 0
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.white.opacity(0.25)).frame(height: 4)
+                Capsule().fill(accent)
+                    .frame(width: width * CGFloat(fraction), height: 4)
+                Circle().fill(accent).frame(width: 13, height: 13)
+                    .offset(x: width * CGFloat(fraction) - 6.5)
+            }
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        scrubbing = true
+                        let dragFraction = min(1, max(0, value.location.x / width))
+                        scrubTime = Double(dragFraction) * max(controller.duration, 1)
+                    }
+                    .onEnded { value in
+                        let dragFraction = min(1, max(0, value.location.x / width))
+                        controller.seek(to: Double(dragFraction) * max(controller.duration, 1))
+                        scrubbing = false
+                    }
+            )
+        }
+        .frame(height: 24)
+    }
+
+    /// True only when the EQ status line says the tap is on the stream;
+    /// the EQ strip's waveform tint keys off this so the strip reflects
+    /// real attachment instead of decorating unconditionally.
+    private var eqIsAttached: Bool {
+        streamStatus == "Attached to the playing stream"
+    }
+
+    /// The mockup's full-width EQ strip: audio-lines icon + "EQ" label
+    /// on the left, a dotted waveform across the rest. Tapping opens
+    /// the EQ sheet (presets + 16 bands). The waveform is a fixed
+    /// decorative pattern (this path has no live analyser); its TINT is
+    /// the honest part - accent while the tap is attached, dim gray
+    /// while it is not.
+    private var eqStrip: some View {
+        Button { showEQ = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 19, weight: .semibold))
+                Text("EQ")
+                    .font(.system(size: 16, weight: .semibold))
+                dottedWaveform
+                    .frame(maxWidth: .infinity)
+                    .clipped()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color.white.opacity(0.35))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 54)
+            .background(Color(white: 0.1), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14)
+                .stroke(Color.white.opacity(0.05), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 18)
+    }
+
+    private var dottedWaveform: some View {
+        HStack(alignment: .center, spacing: 3.5) {
+            ForEach(Array(Self.waveformBarHeights.enumerated()), id: \.offset) { _, height in
+                Capsule()
+                    .fill(eqIsAttached ? accent : Color.white.opacity(0.35))
+                    .frame(width: 2.5, height: height)
+            }
+        }
+        .frame(height: 26)
+    }
+
+    private static let waveformBarHeights: [CGFloat] = [
+        6, 11, 17, 9, 14, 22, 12, 7, 16, 20, 10, 5, 13, 19, 8, 15,
+        23, 11, 6, 17, 12, 21, 9, 14, 7, 18, 10, 16, 5, 13, 20, 8,
+        15, 11, 19, 6, 12, 17, 9, 14
+    ]
+
+    /// The mockup's transport row: speed, -15s, the big red play/pause
+    /// button, +15s, EQ, and SETTINGS. SETTINGS is a menu of real
+    /// player actions (fullscreen, PiP, the EQ enable switch, reset to
+    /// flat) rather than a dead gear.
+    private var transportRow: some View {
+        HStack(alignment: .center, spacing: 4) {
+            Menu {
+                ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
+                    Button("\(speed, specifier: "%g")x") { controller.setRate(Float(speed)) }
+                }
+            } label: {
+                Text("\(controller.rate, specifier: "%g")x")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 52, height: 44)
+            }
+            Spacer()
+            transportButton(symbol: "gobackward.15", caption: "15 SEC") {
+                controller.skip(by: -15)
+            }
+            Spacer()
+            Button { controller.togglePlayPause() } label: {
+                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 27, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 70, height: 70)
+                    .background(accent, in: Circle())
+                    .shadow(color: accent.opacity(0.35), radius: 12, y: 4)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            transportButton(symbol: "goforward.15", caption: "15 SEC") {
+                controller.skip(by: 15)
+            }
+            Spacer()
+            transportButton(symbol: "slider.horizontal.3", caption: "EQ") {
+                showEQ = true
+            }
+            Spacer()
+            Menu {
+                Button { controller.presentFullscreen() } label: {
+                    Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                }
+                Button { controller.togglePictureInPicture() } label: {
+                    Label("Picture in Picture", systemImage: "pip.enter")
+                }
+                Divider()
+                Button {
+                    TrapTubeEQManager.shared.setEQEnabled(!TrapTubeEQManager.shared.isEQEnabled)
+                } label: {
+                    Label(TrapTubeEQManager.shared.isEQEnabled ? "Disable EQ" : "Enable EQ",
+                          systemImage: "waveform")
+                }
+                Button { TrapTubeEQManager.shared.resetAll() } label: {
+                    Label("Reset EQ to Flat", systemImage: "arrow.counterclockwise")
+                }
+            } label: {
+                VStack(spacing: 5) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 24))
+                    Text("SETTINGS")
+                        .font(.system(size: 10, weight: .semibold))
+                        .tracking(0.4)
+                }
+                .foregroundStyle(.white)
+                .frame(width: 58)
+            }
+        }
+        .padding(.top, 22)
+    }
+
+    private func transportButton(symbol: String, caption: String,
+                                 action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: symbol)
+                    .font(.system(size: 24))
+                Text(caption)
+                    .font(.system(size: 10, weight: .semibold))
+                    .tracking(0.4)
+            }
+            .foregroundStyle(.white)
+            .frame(width: 58)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The EQ status line and the Round 15 diagnostics line, kept
+    /// visible under the transport row: they are the only on-device
+    /// evidence of what attach did, so the restyle moves them but
+    /// never hides them.
+    private var statusBlock: some View {
+        VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Image(systemName: "waveform")
                 Text("EQ stream status")
@@ -1671,84 +1907,13 @@ struct TrapTubeNativePlayerView: View {
             .font(.caption.weight(.semibold))
             .foregroundStyle(Color.white.opacity(0.65))
 
-            // Round 15 diagnostics line: always visible in the player
-            // sheet, directly under the EQ status, so any screenshot of
-            // a failed load shows how far resolution got and the real
-            // per-profile / item error.
             Text(controller.diagnosticsLine)
                 .font(.caption2.monospaced())
                 .foregroundStyle(Color.white.opacity(0.55))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-
-            VStack(spacing: 4) {
-                Slider(value: Binding(
-                        get: { scrubbing ? scrubTime : controller.currentTime },
-                        set: { newValue in if scrubbing { scrubTime = newValue } }),
-                       in: 0...max(controller.duration, 1)) { editing in
-                    if editing {
-                        scrubbing = true
-                        scrubTime = controller.currentTime
-                    } else {
-                        controller.seek(to: scrubTime)
-                        scrubbing = false
-                    }
-                }
-                .tint(accent)
-                HStack {
-                    Text(timeLabel(scrubbing ? scrubTime : controller.currentTime))
-                    Spacer()
-                    Text(timeLabel(controller.duration))
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(Color.white.opacity(0.55))
-            }
-
-            HStack {
-                Menu {
-                    ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 2.0], id: \.self) { speed in
-                        Button("\(speed, specifier: "%g")x") { controller.setRate(Float(speed)) }
-                    }
-                } label: {
-                    Text("\(controller.rate, specifier: "%g")x")
-                        .font(.subheadline.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 52, height: 40)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
-                Spacer()
-                Button { controller.skip(by: -10) } label: {
-                    Image(systemName: "gobackward.10")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.white)
-                }
-                Button { controller.togglePlayPause() } label: {
-                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 26))
-                        .foregroundStyle(.white)
-                        .frame(width: 64, height: 64)
-                        .background(accent, in: Circle())
-                }
-                Button { controller.skip(by: 10) } label: {
-                    Image(systemName: "goforward.10")
-                        .font(.system(size: 24))
-                        .foregroundStyle(.white)
-                }
-                Spacer()
-                Button { showEQ = true } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 52, height: 40)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
-                .buttonStyle(.plain)
-            }
         }
-        .padding(16)
-        .ttGlassCard(cornerRadius: 20)
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
+        .padding(.top, 18)
     }
 
     private func timeLabel(_ seconds: Double) -> String {
@@ -2621,6 +2786,10 @@ struct TrapTubePlayerHomeView: View {
             content
         }
         .task {
+            // Round 19: pay the EQ manager's one-time engine-graph
+            // construction now, while the user browses the feed, so the
+            // first attach doesn't carry it.
+            TrapTubeEQManager.prewarm()
             authSignedIn = TrapTubeYouTubeAuth.isSignedIn
             authStale = TrapTubeYouTubeAuth.isSessionStale
             if feed.items.isEmpty { await feed.loadHome() }
