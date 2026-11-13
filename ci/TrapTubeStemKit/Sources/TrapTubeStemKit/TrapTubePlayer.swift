@@ -593,8 +593,12 @@ struct TrapTubeEqualizerPanel: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
+                    Text("A 16-band graphic equalizer with bass boost and master gain.")
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                }
                 Spacer()
                 Button("Done") { dismiss() }
                     .font(.subheadline.weight(.bold)).foregroundStyle(accent)
