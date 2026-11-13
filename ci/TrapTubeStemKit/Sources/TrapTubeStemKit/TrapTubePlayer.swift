@@ -577,6 +577,93 @@ enum TrapTubeCurrentVideo {
     }
 }
 
+// MARK: - SponsorBlock (skip-only, in our native player)
+//
+// YTLite ships its own SponsorBlock engine for the host player (REPORT
+// section 3.8/3.9: SBManager, sb_* category keys). Our native player is
+// the proven playback path in this build, so it gets its own small
+// client for the same public SponsorBlock API: fetch the segments for a
+// video, and skip the categories YTLite users expect skipped. Skip-only
+// this round - no submit/vote/whitelist.
+
+struct TrapTubeSponsorSegment {
+    let category: String
+    let start: Double
+    let end: Double
+}
+
+enum TrapTubeSponsorBlock {
+    /// Categories requested from the API - the category set YTLite
+    /// models (sb_sponsor, sb_selfpromo, sb_interaction, sb_intro,
+    /// sb_outro, sb_preview, sb_music_offtopic, sb_filler).
+    static let requestedCategories = [
+        "sponsor", "selfpromo", "interaction", "intro",
+        "outro", "preview", "filler", "music_offtopic"
+    ]
+
+    /// Categories this player skips automatically. Mirrors the
+    /// headline skip behavior; the rest are fetched (so the data model
+    /// matches YTLite's) but left playing this round.
+    static let skippedCategories: Set<String> = ["sponsor", "selfpromo"]
+
+    /// Notice text for a skipped segment's category.
+    static func skipNotice(for category: String) -> String {
+        switch category {
+        case "selfpromo": return "Skipped self-promo"
+        default: return "Skipped sponsor"
+        }
+    }
+
+    /// Fetch segments for a video from the public SponsorBlock API.
+    /// Every failure (offline, 404 = no segments, malformed body) is
+    /// logged and yields an empty list: SponsorBlock must never block,
+    /// delay or error playback.
+    static func fetchSegments(videoID: String) async -> [TrapTubeSponsorSegment] {
+        var components = URLComponents(string: "https://sponsor.ajay.app/api/skipSegments")
+        let categoriesJSON = "[" + requestedCategories.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+        components?.queryItems = [
+            URLQueryItem(name: "videoID", value: videoID),
+            URLQueryItem(name: "categories", value: categoriesJSON)
+        ]
+        guard let url = components?.url else {
+            NSLog("[TrapTube SponsorBlock] Could not build skipSegments URL for %@", videoID)
+            return []
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                // 404 is the API's "no segments for this video" answer.
+                if http.statusCode != 404 {
+                    NSLog("[TrapTube SponsorBlock] skipSegments returned HTTP %ld for %@",
+                          http.statusCode, videoID)
+                }
+                return []
+            }
+            guard let list = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+                NSLog("[TrapTube SponsorBlock] Unexpected skipSegments response shape for %@", videoID)
+                return []
+            }
+            var segments: [TrapTubeSponsorSegment] = []
+            for entry in list {
+                guard let category = entry["category"] as? String,
+                      let range = entry["segment"] as? [Double],
+                      range.count == 2, range[1] > range[0] else { continue }
+                segments.append(TrapTubeSponsorSegment(category: category,
+                                                       start: range[0], end: range[1]))
+            }
+            segments.sort { $0.start < $1.start }
+            NSLog("[TrapTube SponsorBlock] %ld segment(s) for %@ (%ld skippable)",
+                  segments.count, videoID,
+                  segments.filter { skippedCategories.contains($0.category) }.count)
+            return segments
+        } catch {
+            NSLog("[TrapTube SponsorBlock] Segment fetch failed for %@: %@",
+                  videoID, TrapTubeErrorFormatting.describe(error))
+            return []
+        }
+    }
+}
+
 // MARK: - Player controller
 
 /// Delegate bridge for AVPictureInPictureController. Kept as its own
@@ -649,6 +736,16 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var duration: Double = 0
     @Published var rate: Float = 1.0
 
+    // SponsorBlock state: segments for the current video (fetched on
+    // load, never on the playback critical path), the transient skip
+    // notice the view renders as a pill, and a guard against re-firing
+    // a skip while its seek is still landing.
+    @Published var skipNotice: String?
+    private var sponsorSegments: [TrapTubeSponsorSegment] = []
+    private var sponsorBlockTask: Task<Void, Never>?
+    private var skipNoticeTask: Task<Void, Never>?
+    private var lastSkippedSegmentEnd: Double = -1
+
     init() {
         hook.install(on: player)
         pipDelegate.onDidStart = { [weak self] in
@@ -699,6 +796,7 @@ final class TrapTubePlayerController: ObservableObject {
                     self.duration = itemDuration
                 }
                 self.isPlaying = self.player.timeControlStatus == .playing
+                self.checkSponsorSegments()
             }
     }
 
@@ -721,6 +819,16 @@ final class TrapTubePlayerController: ObservableObject {
         errorMessage = nil
         title = ""
         author = ""
+        // SponsorBlock resets with the video; the fetch runs parallel
+        // to stream resolution and can only ever add skips, never block.
+        sponsorBlockTask?.cancel()
+        sponsorSegments = []
+        lastSkippedSegmentEnd = -1
+        skipNotice = nil
+        sponsorBlockTask = Task { [weak self] in
+            guard let self else { return }
+            self.sponsorSegments = await TrapTubeSponsorBlock.fetchSegments(videoID: videoID)
+        }
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -770,6 +878,43 @@ final class TrapTubePlayerController: ObservableObject {
                 self.isLoading = false
                 TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
             }
+        }
+    }
+
+    // MARK: SponsorBlock skipping
+
+    /// Runs from the periodic time observer (0.25s cadence): when the
+    /// playhead is inside a skippable segment, seek to its end and flash
+    /// the notice. Only while actually playing - a paused playhead parked
+    /// inside a segment (e.g. by scrubbing) is left alone.
+    private func checkSponsorSegments() {
+        guard player.timeControlStatus == .playing, !sponsorSegments.isEmpty else { return }
+        let now = currentTime
+        if lastSkippedSegmentEnd >= 0, now >= lastSkippedSegmentEnd {
+            lastSkippedSegmentEnd = -1
+        }
+        guard let segment = sponsorSegments.first(where: {
+            TrapTubeSponsorBlock.skippedCategories.contains($0.category) &&
+            now >= $0.start && now < $0.end
+        }) else { return }
+        // The seek lands asynchronously; don't re-fire for the same
+        // segment while the playhead is still inside it.
+        if segment.end == lastSkippedSegmentEnd { return }
+        lastSkippedSegmentEnd = segment.end
+        NSLog("[TrapTube SponsorBlock] Skipping %@ segment %.1f-%.1fs",
+              segment.category, segment.start, segment.end)
+        showSkipNotice(for: segment.category)
+        player.seek(to: CMTime(seconds: segment.end, preferredTimescale: 600),
+                    toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    private func showSkipNotice(for category: String) {
+        skipNotice = TrapTubeSponsorBlock.skipNotice(for: category)
+        skipNoticeTask?.cancel()
+        skipNoticeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.skipNotice = nil
         }
     }
 
@@ -880,10 +1025,17 @@ final class TrapTubePlayerController: ObservableObject {
         if isPictureInPictureActive || pipController?.isPictureInPictureActive == true {
             Self.retainedForPictureInPicture = self
             loadTask?.cancel()
+            sponsorBlockTask?.cancel()
             NSLog("[TrapTube Player] View dismissed during PiP; session retained until PiP stops")
             return
         }
         loadTask?.cancel()
+        sponsorBlockTask?.cancel()
+        sponsorBlockTask = nil
+        skipNoticeTask?.cancel()
+        skipNoticeTask = nil
+        sponsorSegments = []
+        skipNotice = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         pipController?.delegate = nil
@@ -1034,6 +1186,28 @@ struct TrapTubeNativePlayerView: View {
                 .padding(.trailing, 10)
                 .padding(.bottom, 10)
             }
+            if let notice = controller.skipNotice {
+                VStack {
+                    Spacer()
+                    HStack {
+                        HStack(spacing: 5) {
+                            Image(systemName: "forward.end.fill")
+                                .font(.system(size: 10, weight: .bold))
+                            Text(notice)
+                                .font(.caption.weight(.semibold))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                        Spacer()
+                    }
+                    .padding(.leading, 10)
+                    .padding(.bottom, 10)
+                }
+                .transition(.opacity)
+            }
             if controller.isLoading {
                 ProgressView().tint(.white).scaleEffect(1.3)
             }
@@ -1050,6 +1224,7 @@ struct TrapTubeNativePlayerView: View {
         }
         .aspectRatio(16 / 9, contentMode: .fit)
         .background(Color.black)
+        .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
     }
 
     private var controls: some View {
