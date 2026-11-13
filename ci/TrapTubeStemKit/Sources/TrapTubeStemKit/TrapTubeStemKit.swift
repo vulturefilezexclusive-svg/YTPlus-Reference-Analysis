@@ -505,8 +505,7 @@ extension View {
 private struct TrapTubeStemStudioView: View {
     @StateObject private var model = TrapTubeStemModel()
     @State private var showImporter = false
-    @State private var selectedPage = 1
-    @State private var streamStatus = "Not attached yet"
+    @State private var selectedPage = 0
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -520,18 +519,16 @@ private struct TrapTubeStemStudioView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                pageButton("Equalizer", page: 0, symbol: "slider.horizontal.3")
-                pageButton("Stem Separation", page: 1, symbol: "waveform")
-                pageButton("Player", page: 2, symbol: "play.circle.fill")
+                pageButton("Stem Separation", page: 0, symbol: "waveform")
+                pageButton("Player", page: 1, symbol: "play.circle.fill")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .background(.ultraThinMaterial)
 
             TabView(selection: $selectedPage) {
-                equalizerPage.tag(0)
-                stemSeparationPage.tag(1)
-                playerPage.tag(2)
+                stemSeparationPage.tag(0)
+                playerPage.tag(1)
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
         }
@@ -554,84 +551,7 @@ private struct TrapTubeStemStudioView: View {
     }
 
     private var playerPage: some View {
-        ScrollView {
-            TrapTubePlayerHomeView()
-                .padding(18)
-        }
-    }
-
-    private var equalizerPage: some View {
-        let manager = TrapTubeEQManager.shared
-        return ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("TRAPTUBE EQUALIZER")
-                        .font(.system(size: 12, weight: .black, design: .rounded))
-                        .tracking(2.2).foregroundStyle(accent)
-                    Text("Shape your sound")
-                        .font(.system(size: 28, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("A 16-band graphic equalizer with bass boost and master gain.")
-                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Toggle("Equalizer enabled", isOn: Binding(
-                        get: { manager.isEQEnabled },
-                        set: { manager.setEQEnabled($0) }
-                    ))
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                    .tint(accent)
-                    HStack {
-                        Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                        Spacer()
-                        Text(streamStatus)
-                            .font(.caption.weight(.bold)).foregroundStyle(accent)
-                    }
-                    .onAppear { streamStatus = manager.attachmentStatus }
-                    .onReceive(NotificationCenter.default.publisher(
-                        for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
-                        if let status = note.userInfo?["status"] as? String { streamStatus = status }
-                    }
-                    Button("Reset EQ to flat") { manager.resetAll() }
-                        .font(.subheadline.weight(.bold)).foregroundStyle(accent)
-                }
-                .padding(16)
-                .ttGlassCard(cornerRadius: 18)
-
-                VStack(alignment: .leading, spacing: 16) {
-                    TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
-                                        range: 0...20, suffix: " dB") { manager.setBassBoost($0) }
-                    TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
-                                        range: 0...200, suffix: "%") { manager.setMasterGainPercent($0) }
-                }
-                .padding(16)
-                .ttGlassCard(cornerRadius: 18)
-
-                VStack(alignment: .leading, spacing: 14) {
-                    Text("16-BAND EQUALIZER").font(.caption.weight(.black))
-                        .tracking(1.5).foregroundStyle(accent)
-                    ForEach(Array(TrapTubeEQManager.frequencies.enumerated()), id: \.offset) { index, frequency in
-                        let label = frequency >= 1000
-                            ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
-                               ? "\(Int(frequency / 1000)) kHz"
-                               : String(format: "%.1f kHz", frequency / 1000))
-                            : "\(Int(frequency)) Hz"
-                        TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
-                                            range: -12...12, suffix: " dB") {
-                            manager.setBandGain($0, at: index)
-                        }
-                    }
-                }
-                .padding(16)
-                .ttGlassCard(cornerRadius: 18)
-
-                Text("EQ applies to TrapTube-owned audio and player items that accept an audio-processing tap. Protected or custom-rendered streams may not expose a processable audio path.")
-                    .font(.caption).foregroundStyle(Color.white.opacity(0.45))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(18)
-        }
+        TrapTubePlayerHomeView()
     }
 
     private var stemSeparationPage: some View {
@@ -818,7 +738,7 @@ private struct TrapTubeStemStudioView: View {
 }
 
 
-private struct TrapTubeEQSliderRow: View {
+struct TrapTubeEQSliderRow: View {
     let title: String
     let range: ClosedRange<Float>
     let suffix: String
