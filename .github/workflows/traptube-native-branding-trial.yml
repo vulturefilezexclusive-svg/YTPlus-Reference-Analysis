@@ -390,6 +390,10 @@ jobs:
           grep -Fq 'traptube plus: 6.0~b2' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'traptube plus preferences' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TTIsRemovedVersionFooter' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'THIS WAS CRACKED BY A BANDIT 😤' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq 'TTVersionFooterReplacementText' ci/traptube-host-tweak/TrapTubeBranding.x
+          grep -Fq '%orig(TTVersionFooterReplacementText())' ci/traptube-host-tweak/TrapTubeBranding.x
+          if grep -Fq 'TTIsRemovedVersionFooter(footer)) footer = nil' ci/traptube-host-tweak/TrapTubeBranding.x; then echo "VERIFY FAIL: the version footer must be replaced with the bandit credit line, not nil'd out"; exit 31; fi
           grep -Fq 'initWithItems' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'attachInBackgroundTo:' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'playerItemWithAsset' ci/traptube-host-tweak/TrapTubeBranding.x
@@ -513,13 +517,14 @@ jobs:
           grep -q 'TrapTube Settings' output/branding-binary-strings.txt
           grep -q 'RubikSprayPaint-Regular' output/branding-binary-strings.txt
           grep -q 'HOSTILE YOUTUBE TAKEOVER' output/branding-binary-strings.txt
+          grep -q 'THIS WAS CRACKED BY A BANDIT' output/branding-binary-strings.txt
           grep -q 'Stem Studio' output/branding-binary-strings.txt
           grep -Fq 'A 16-band graphic equalizer' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -q 'Set the TrapTube accent color' output/branding-binary-strings.txt
           test -s "$APP/logo_youtube_2024_q4_color60x60@2x.png"
           test -s "$APP/logo_youtube_2024_q4_color76x76@2x~ipad.png"
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits/version settings, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits settings and the version footer replaced with the bandit credit line, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers, TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, and preserved original YTLite dylib."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
