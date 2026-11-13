@@ -974,6 +974,14 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var diagnosticsLine: String = "Diag: idle"
     private var diagSteps: [String] = []
 
+    // Round 16 watchdog: started the moment play() is called; if the
+    // item still isn't readyToPlay 10s later it appends the item/player
+    // state that distinguishes a stalled item pipeline from a stalled
+    // resolver (Build 173's screenshot proved the resolver healthy and
+    // the park downstream of it).
+    private var watchdogTask: Task<Void, Never>?
+    private var playbackStartNoted = false
+
     /// Append one milestone to the diagnostics trail (keeps the most
     /// recent few so the line stays compact and readable).
     func noteDiagnostic(_ step: String) {
@@ -1038,6 +1046,12 @@ final class TrapTubePlayerController: ObservableObject {
             queue: .main) { [weak self] time in
                 guard let self else { return }
                 self.currentTime = time.seconds.isFinite ? time.seconds : 0
+                // Round 16: prove playback actually started (the playhead
+                // advancing is the one signal no stall can fake).
+                if time.seconds > 0.05, !self.playbackStartNoted {
+                    self.playbackStartNoted = true
+                    self.noteDiagnostic("playback started, time advancing")
+                }
                 if let itemDuration = self.player.currentItem?.duration.seconds,
                    itemDuration.isFinite {
                     self.duration = itemDuration
@@ -1060,6 +1074,9 @@ final class TrapTubePlayerController: ObservableObject {
                   TrapTubeErrorFormatting.describe(error))
         }
         loadTask?.cancel()
+        watchdogTask?.cancel()
+        watchdogTask = nil
+        playbackStartNoted = false
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
         isLoading = true
@@ -1088,13 +1105,21 @@ final class TrapTubePlayerController: ObservableObject {
                     DispatchQueue.main.async { self?.noteDiagnostic(step) }
                 }
                 guard !Task.isCancelled else { return }
-                self.noteDiagnostic("resolved via \(resolved.profileName), item set, play() called")
+                // Round 16 ordering invariant: from here to play() the
+                // sequence is purely synchronous - milestone, item in,
+                // play() - with no suspension on any EQ work in between
+                // (the workflow verifies this span stays suspension-
+                // free). EQ attach reaches this item only through the
+                // fire-and-forget hook paths, never through this path.
+                self.noteDiagnostic("resolved via \(resolved.profileName)")
                 self.title = resolved.title
                 self.author = resolved.author
                 self.observeItemStatus(resolved.item)
                 self.player.replaceCurrentItem(with: resolved.item)
                 self.isLoading = false
                 self.player.play()
+                self.noteDiagnostic("item set, play() called")
+                self.startLoadWatchdog(for: resolved.item)
             } catch {
                 guard !Task.isCancelled else { return }
                 self.isLoading = false
@@ -1110,6 +1135,47 @@ final class TrapTubePlayerController: ObservableObject {
                 NSLog("[TrapTube Player] Load failed for %@: %@", videoID,
                       TrapTubeErrorFormatting.describe(error))
             }
+        }
+    }
+
+    /// Round 16 watchdog: if the item play() was called on still isn't
+    /// readyToPlay 10s later, append its full state to the Diag line -
+    /// item status + error, the player's timeControlStatus and
+    /// reasonForWaitingToPlay, which asset kind the resolver produced,
+    /// and whether an EQ audioMix is sitting on the item - so the next
+    /// screenshot names the stalled stage instead of just "spinner".
+    private func startLoadWatchdog(for item: AVPlayerItem) {
+        watchdogTask?.cancel()
+        watchdogTask = Task { [weak self, weak item] in
+            try? await Task.sleep(nanoseconds: 10_000_000_000)
+            guard !Task.isCancelled, let self, let item else { return }
+            guard item.status != .readyToPlay else { return }
+            let itemStatus: String
+            switch item.status {
+            case .unknown: itemStatus = "unknown"
+            case .failed: itemStatus = "failed"
+            case .readyToPlay: itemStatus = "readyToPlay"
+            @unknown default: itemStatus = "other(\(item.status.rawValue))"
+            }
+            let itemError = item.error.map { TrapTubeErrorFormatting.describe($0) } ?? "none"
+            let controlStatus: String
+            switch self.player.timeControlStatus {
+            case .paused: controlStatus = "paused"
+            case .playing: controlStatus = "playing"
+            case .waitingToPlayAtSpecifiedRate: controlStatus = "waitingToPlay"
+            @unknown default: controlStatus = "other"
+            }
+            let waitingReason = self.player.reasonForWaitingToPlay?.rawValue ?? "none"
+            let assetKind: String
+            if item.asset is AVURLAsset {
+                assetKind = "AVURLAsset"
+            } else if item.asset is AVMutableComposition {
+                assetKind = "AVMutableComposition"
+            } else {
+                assetKind = String(describing: type(of: item.asset))
+            }
+            let mixState = item.audioMix != nil ? "audioMix assigned" : "no audioMix"
+            self.noteDiagnostic("WATCHDOG 10s: item \(itemStatus), error \(itemError), player \(controlStatus), reasonForWaitingToPlay \(waitingReason), asset \(assetKind), \(mixState)")
         }
     }
 
@@ -1297,6 +1363,8 @@ final class TrapTubePlayerController: ObservableObject {
             return
         }
         loadTask?.cancel()
+        watchdogTask?.cancel()
+        watchdogTask = nil
         sponsorBlockTask?.cancel()
         sponsorBlockTask = nil
         skipNoticeTask?.cancel()
