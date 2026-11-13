@@ -470,6 +470,13 @@ jobs:
           grep -Fq 'item readyToPlay' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'ITEM FAILED' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'onStep' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Round 16: attach is strictly fire-and-forget' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/AudioHook.swift
+          grep -Fq 'Round 16 watchdog' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'startLoadWatchdog' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'WATCHDOG 10s' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'reasonForWaitingToPlay' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'playback started, time advancing' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          test "$(sed -n '/let resolved = try await/,/self.player.play()/p' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift | grep -c 'await')" -eq 1 || { echo "VERIFY FAIL: the span from the resolver's return to play() must contain exactly one await (the resolve itself) - playback must never suspend on EQ work"; exit 29; }
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
