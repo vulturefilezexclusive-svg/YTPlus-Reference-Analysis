@@ -412,6 +412,17 @@ jobs:
           grep -Fq 'TrapTubeEqualizerPanel' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'FEwhat_to_watch' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'youtubei/v1/search' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'AVURLAssetHTTPHeaderFieldsKey' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'allProfilesFailed' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeErrorFormatting' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Playback failed before EQ could attach' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'observeItemStatus' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeYouTubeAuth' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'SAPISIDHASH' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeSignInView' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'TrapTubeProfileView' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'getAccountMenu' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'My Channel' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'kAudioUnitSubType_RemoteIO' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'TrapTube.EQ.OutputStatus' ci/traptube-host-tweak/TrapTubeBranding.x
           grep -Fq 'switched to the standard HTDemucs model' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
