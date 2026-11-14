@@ -296,7 +296,7 @@ static void TTShowStemStudio(YTPivotBarViewController *pivot) {
         controller = [[UIViewController alloc] init];
         controller.view.backgroundColor = [UIColor colorWithRed:0.025 green:0.025 blue:0.035 alpha:1];
         UILabel *label = [[UILabel alloc] init];
-        label.text = @"Stem Studio is unavailable";
+        label.text = @"EQ is unavailable";
         label.textColor = UIColor.whiteColor;
         label.font = [UIFont systemFontOfSize:20 weight:UIFontWeightBold];
         label.translatesAutoresizingMaskIntoConstraints = NO;
@@ -306,7 +306,7 @@ static void TTShowStemStudio(YTPivotBarViewController *pivot) {
             [label.centerYAnchor constraintEqualToAnchor:controller.view.centerYAnchor]
         ]];
     }
-    controller.title = @"Stem Studio";
+    controller.title = @"EQ";
     objc_setAssociatedObject(controller, &TTStemStudioControllerKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (navigation) {
         [navigation pushViewController:controller animated:YES];
@@ -1726,7 +1726,7 @@ static void TTRefreshPivotGlowsInView(UIView *root) {
             id stem = nil;
             if (rendererClass && [rendererClass respondsToSelector:factory]) {
                 stem = ((id (*)(id, SEL, id, id, NSInteger))objc_msgSend)(
-                    rendererClass, factory, @"FEwhat_to_watch", @"Stem Studio", YT_AUDIO
+                    rendererClass, factory, @"FEwhat_to_watch", @"EQ", YT_AUDIO
                 );
             }
             if (!stem) {
