@@ -544,7 +544,8 @@ private struct TrapTubeStemStudioView: View {
                     }
                     .padding(.horizontal, 16)
 
-                    TrapTubeEQPlayerSection(onOpenEQ: { showEQPanel = true },
+                    TrapTubeEQPlayerSection(controller: miniStore.controller,
+                                            onOpenEQ: { showEQPanel = true },
                                             onReopen: { if let saved = miniStore.request { reopenRequest = saved } })
                         .padding(.horizontal, 16)
 
@@ -714,7 +715,16 @@ private struct TrapTubeStemStudioView: View {
 /// designed stage prompting a pick from the feed below, not
 /// leftover settings space.
 private struct TrapTubeEQPlayerSection: View {
-    @ObservedObject private var store = TrapTubeMiniPlayerStore.shared
+    /// Round 28: the session controller is PASSED IN by the
+    /// tab root - the very same observed value that drives
+    /// the mini bar pinned below - instead of the section
+    /// keeping its own independent subscription to the
+    /// store. One observation now feeds both renderings, so
+    /// the section's live card and the mini bar can never
+    /// disagree about whether a session exists (Build 228:
+    /// the section showed its "Nothing playing yet" stage
+    /// over a mini bar that was showing the live session).
+    let controller: TrapTubePlayerController?
     let onOpenEQ: () -> Void
     let onReopen: () -> Void
 
@@ -737,14 +747,14 @@ private struct TrapTubeEQPlayerSection: View {
                         .foregroundStyle(.white)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                if store.controller != nil {
+                if controller != nil {
                     Text("LIVE").font(.caption2.weight(.black)).tracking(1.2)
                         .foregroundStyle(.black)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(accent, in: Capsule())
                 }
             }
-            if let controller = store.controller {
+            if let controller {
                 TrapTubeEQPlayerLiveCard(controller: controller, onOpenEQ: onOpenEQ, onReopen: onReopen)
             } else {
                 emptyStage
