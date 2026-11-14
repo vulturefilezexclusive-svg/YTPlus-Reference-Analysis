@@ -299,7 +299,7 @@ final class TrapTubeGhostAudio {
     /// instantiation lands - milliseconds after init - and the
     /// chain simply runs without the limiter stage until then;
     /// wireChain inserts it the moment it arrives.
-    private var dynamicsUnit: AVAudioUnit?
+    private var dynamicsUnit: AVAudioUnitEffect?
 
     private var connected = false
     private var graphFormat: AVAudioFormat?
@@ -383,9 +383,9 @@ final class TrapTubeGhostAudio {
             componentManufacturer: kAudioUnitManufacturer_Apple,
             componentFlags: 0,
             componentFlagsMask: 0)
-        AVAudioUnit.instantiate(with: description, options: [.loadInProcess]) { [weak self] unit, _ in
+        AVAudioUnit.instantiate(with: description, options: []) { [weak self] unit, _ in
             DispatchQueue.main.async {
-                guard let self, let unit else { return }
+                guard let self, let unit = unit as? AVAudioUnitEffect else { return }
                 self.dynamicsUnit = unit
                 self.engine.attach(unit)
                 self.applyParameters()
@@ -416,13 +416,14 @@ final class TrapTubeGhostAudio {
 
     /// The limiter: a protective ceiling, not a compressor sound.
     /// The generically-created DynamicsProcessor unit is set
-    /// through its AUAudioUnit parameter tree - the addresses are
-    /// the classic kDynamicsProcessor_* parameter IDs (threshold
-    /// 0, headroom 1, expansion ratio 2, expansion threshold 3,
-    /// attack 4, release 5, master gain 6). Threshold -1 dB with
-    /// 1 dB of headroom puts the effective ceiling at 0 dBFS,
-    /// attack 1 ms, release 150 ms, no expansion, neutral master
-    /// gain: it catches peaks (EQ boosts and reverb tails
+    /// through its AUAudioUnit parameter tree using the raw
+    /// parameter IDs from AudioUnitParameters.h (the
+    /// kDynamicsProcessor_* constants are not surfaced to Swift):
+    /// threshold 0, headroom 1, expansion ratio 2, expansion
+    /// threshold 3, attack 4, release 5, master gain 6. Threshold
+    /// -1 dB with 1 dB of headroom puts the effective ceiling at
+    /// 0 dBFS, attack 1 ms, release 150 ms, no expansion, neutral
+    /// master gain: it catches peaks (EQ boosts and reverb tails
     /// included) without pumping on typical content. Bypass
     /// follows the persisted limiter toggle.
     private func configureDynamicsUnit() {
@@ -431,13 +432,13 @@ final class TrapTubeGhostAudio {
         func set(_ id: AUParameterAddress, _ value: AUValue) {
             tree?.parameter(withAddress: id)?.setValue(value, originator: nil)
         }
-        set(AUParameterAddress(kDynamicsProcessor_ThresholdParam), -1)
-        set(AUParameterAddress(kDynamicsProcessor_HeadRoomParam), 1)
-        set(AUParameterAddress(kDynamicsProcessor_ExpansionRatioParam), 1)
-        set(AUParameterAddress(kDynamicsProcessor_ExpansionThresholdParam), -80)
-        set(AUParameterAddress(kDynamicsProcessor_AttackTimeParam), 0.001)
-        set(AUParameterAddress(kDynamicsProcessor_ReleaseTimeParam), 0.15)
-        set(AUParameterAddress(kDynamicsProcessor_MasterGainParam), 0)
+        set(0, -1)     // kDynamicsProcessor_ThresholdParam
+        set(1, 1)      // kDynamicsProcessor_HeadRoomParam
+        set(2, 1)      // kDynamicsProcessor_ExpansionRatioParam
+        set(3, -80)    // kDynamicsProcessor_ExpansionThresholdParam
+        set(4, 0.001)  // kDynamicsProcessor_AttackTimeParam
+        set(5, 0.15)   // kDynamicsProcessor_ReleaseTimeParam
+        set(6, 0)      // kDynamicsProcessor_MasterGainParam
         unit.bypass = !fxLimiterEnabled
     }
 
