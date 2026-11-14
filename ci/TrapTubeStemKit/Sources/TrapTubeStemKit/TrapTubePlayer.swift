@@ -1229,6 +1229,110 @@ enum TrapTubeNowPlaying {
     }
 }
 
+// MARK: - Round 30: diagnostics export
+
+/// Composes the Share diagnostics text file: the full Diag trail
+/// unrolled one step per line, the live session state, and the
+/// EQ/FX settings - everything a screenshot of the one-line Diag
+/// cannot carry. The EQ tab's Share diagnostics button writes it
+/// to a temp .txt and hands it to the iOS share sheet.
+enum TrapTubeDiagnosticsExport {
+
+    static func text(controller: TrapTubePlayerController?) -> String {
+        var lines: [String] = []
+        lines.append("TrapTube diagnostics export")
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime]
+        lines.append("Exported: \(stamp.string(from: Date()))")
+        let info = Bundle.main.infoDictionary
+        let hostVersion = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let hostBuild = info?["CFBundleVersion"] as? String ?? "?"
+        lines.append("Host app: YouTube \(hostVersion) (\(hostBuild))")
+        lines.append("iOS: \(UIDevice.current.systemVersion) · Device: \(deviceModel)")
+        lines.append("")
+
+        if let controller {
+            lines.append("SESSION")
+            lines.append("Title: \(controller.title.isEmpty ? "-" : controller.title)")
+            lines.append("Author: \(controller.author.isEmpty ? "-" : controller.author)")
+            lines.append("Video ID: \(controller.sessionRequest?.videoID ?? "-")")
+            lines.append("State: \(controller.playbackStateLine) · playing: \(controller.isPlaying ? "yes" : "no")")
+            lines.append(String(format: "Position: %.1f / %.1f s", controller.currentTime, controller.duration))
+            lines.append("Audio path: \(controller.pathStatusText.isEmpty ? "-" : controller.pathStatusText)")
+            var ghostLine = "Ghost feed: \(controller.ghostFeed)"
+            if let drift = controller.ghostDriftMs { ghostLine += " · drift \(drift) ms" }
+            if let seconds = controller.ghostAudioSeconds {
+                ghostLine += String(format: " · audio at %.1f s", seconds)
+            }
+            lines.append(ghostLine)
+            lines.append("Tap fallback: \(controller.usingTapFallback ? "yes" : "no")")
+            lines.append("Ghost failure: \(controller.ghost.lastFailureReason ?? controller.ghostFailureShort ?? "-")")
+            if let error = controller.errorMessage { lines.append("Error: \(error)") }
+            lines.append("")
+            lines.append("DIAG TRAIL (oldest first, newest last)")
+            let trail = controller.diagTrailSnapshot
+            if trail.isEmpty {
+                lines.append("(no steps recorded)")
+            } else {
+                for (index, step) in trail.enumerated() {
+                    lines.append("\(index + 1). \(step)")
+                }
+            }
+            lines.append("")
+        } else {
+            lines.append("SESSION")
+            lines.append("No player session yet - play a video, reproduce the issue, then share again.")
+            lines.append("")
+        }
+
+        let eq = TrapTubeEQManager.shared
+        let fx = TrapTubeFXSettings.shared
+        lines.append("EQ / FX")
+        let preset = UserDefaults.standard.string(forKey: "TrapTube.EQ.Preset") ?? "Custom"
+        lines.append("Preset: \(preset) · EQ enabled: \(eq.isEQEnabled ? "yes" : "no") · Tap attach: \(eq.attachmentStatus)")
+        let bands = TrapTubeEQManager.frequencies.enumerated().map { index, freq in
+            "\(Int(freq))Hz \(String(format: "%+.1f", Double(eq.bandGain(at: index))))"
+        }.joined(separator: ", ")
+        lines.append("Bands (dB): \(bands)")
+        lines.append(String(format: "Bass: %+.1f dB · Master: %.0f%% · Headroom comp: %+.1f dB",
+                            Double(eq.bassBoostDecibels), Double(eq.masterGainPercent),
+                            Double(eq.headroomCompensationDB)))
+        lines.append("Reverb: \(fx.reverbPreset.displayName) · Mix: \(Int(fx.reverbMix))% · Limiter: \(fx.limiterEnabled ? "on" : "off")")
+        if let limiter = fx.ghostLimiterAvailability {
+            lines.append("Ghost limiter available: \(limiter ? "yes" : "no")")
+        }
+        lines.append(String(format: "Width: %.0f%% · Crossfeed: %.0f%% · Balance: %+.2f",
+                            Double(fx.widthPercent), Double(fx.crossfeedPercent), Double(fx.balance)))
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Writes the export text to a timestamped temp .txt and
+    /// returns its URL for the share sheet; nil only if the
+    /// write itself fails.
+    static func write(controller: TrapTubePlayerController?) -> URL? {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TrapTube-Diagnostics-\(formatter.string(from: Date())).txt")
+        do {
+            try text(controller: controller).write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
+    private static var deviceModel: String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let mirror = Mirror(reflecting: systemInfo.machine)
+        return mirror.children.reduce("") { partial, child in
+            guard let value = child.value as? Int8, value != 0 else { return partial }
+            return partial + String(UnicodeScalar(UInt8(value)))
+        }
+    }
+}
+
 @MainActor
 final class TrapTubePlayerController: ObservableObject {
     let player = AVPlayer()
@@ -1515,6 +1619,11 @@ final class TrapTubePlayerController: ObservableObject {
         diagnosticsLine = "Diag: " + diagSteps.joined(separator: " > ")
         NSLog("[TrapTube Player] Diag: %@", step)
     }
+
+    /// Round 30: the recorded Diag trail (oldest first) for the
+    /// Share diagnostics export - the same steps diagnosticsLine
+    /// joins into one line, unrolled one per line for reading.
+    var diagTrailSnapshot: [String] { diagSteps }
 
     // SponsorBlock state: segments for the current video (fetched on
     // load, never on the playback critical path), the transient skip
