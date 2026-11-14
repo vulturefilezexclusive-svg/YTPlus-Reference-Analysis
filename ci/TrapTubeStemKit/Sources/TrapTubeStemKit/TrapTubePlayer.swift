@@ -1119,10 +1119,23 @@ private final class TrapTubePiPDelegateBridge: NSObject, AVPictureInPictureContr
 // no queue (feed taps and searches load single videos), and
 // claiming transport buttons that do nothing would be worse than
 // not claiming them.
+@MainActor
 enum TrapTubeNowPlaying {
-    static let stampKey = "TrapTubeNowPlayingVideoID"
+    nonisolated static let stampKey = "TrapTubeNowPlayingVideoID"
     private static weak var activeController: TrapTubePlayerController?
     private static var commandsInstalled = false
+
+    /// Synchronous, any-thread pre-check for the command handlers
+    /// below: does the panel's current content carry this
+    /// session's stamp key at all? Only publishNowPlayingInfo
+    /// writes that key, so its presence means the panel belongs
+    /// to a TrapTube session; its absence means the host (or
+    /// nobody) owns the panel and the command is not ours to
+    /// answer. The dispatched handler re-verifies the stamp
+    /// against the live controller on the main actor.
+    nonisolated static func panelIsOurs() -> Bool {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[stampKey] != nil
+    }
 
     static func claim(by controller: TrapTubePlayerController) {
         activeController = controller
@@ -1160,38 +1173,38 @@ enum TrapTubeNowPlaying {
         commandsInstalled = true
         let center = MPRemoteCommandCenter.shared()
         center.playCommand.addTarget { _ in
-            guard let controller = liveController() else { return .commandFailed }
-            DispatchQueue.main.async { controller.remotePlay() }
+            guard panelIsOurs() else { return .commandFailed }
+            Task { @MainActor in liveController()?.remotePlay() }
             return .success
         }
         center.pauseCommand.addTarget { _ in
-            guard let controller = liveController() else { return .commandFailed }
-            DispatchQueue.main.async { controller.remotePause() }
+            guard panelIsOurs() else { return .commandFailed }
+            Task { @MainActor in liveController()?.remotePause() }
             return .success
         }
         center.togglePlayPauseCommand.addTarget { _ in
-            guard let controller = liveController() else { return .commandFailed }
-            DispatchQueue.main.async { controller.remoteTogglePlayPause() }
+            guard panelIsOurs() else { return .commandFailed }
+            Task { @MainActor in liveController()?.remoteTogglePlayPause() }
             return .success
         }
         center.changePlaybackPositionCommand.addTarget { event in
-            guard let controller = liveController(),
+            guard panelIsOurs(),
                   let positionEvent = event as? MPChangePlaybackPositionCommandEvent
             else { return .commandFailed }
             let position = positionEvent.positionTime
-            DispatchQueue.main.async { controller.remoteSeek(to: position) }
+            Task { @MainActor in liveController()?.remoteSeek(to: position) }
             return .success
         }
         center.skipForwardCommand.preferredIntervals = [15]
         center.skipForwardCommand.addTarget { _ in
-            guard let controller = liveController() else { return .commandFailed }
-            DispatchQueue.main.async { controller.remoteSkip(by: 15) }
+            guard panelIsOurs() else { return .commandFailed }
+            Task { @MainActor in liveController()?.remoteSkip(by: 15) }
             return .success
         }
         center.skipBackwardCommand.preferredIntervals = [15]
         center.skipBackwardCommand.addTarget { _ in
-            guard let controller = liveController() else { return .commandFailed }
-            DispatchQueue.main.async { controller.remoteSkip(by: -15) }
+            guard panelIsOurs() else { return .commandFailed }
+            Task { @MainActor in liveController()?.remoteSkip(by: -15) }
             return .success
         }
     }
