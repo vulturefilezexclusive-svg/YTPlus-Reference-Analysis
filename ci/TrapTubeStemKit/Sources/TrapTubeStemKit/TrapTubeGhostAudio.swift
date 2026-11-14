@@ -459,6 +459,34 @@ final class TrapTubeGhostAudio {
     /// most recent first, capped at two (current + previous).
     private var exportKeepIDs: [String] = []
 
+    // MARK: Round 27: export windows + engine notes
+    //
+    // The exported feed no longer extracts a whole long video
+    // before the first sample can play. It works in windows:
+    // ~180 s of audio beginning 2 s before the playhead the
+    // window was requested for. The extracted file's frame 0
+    // is media time exportWindowStart and the window covers
+    // [exportWindowStart, exportWindowEnd); a legacy Build 223
+    // full-range cache file is simply the window that starts
+    // at 0. primeFile takes the window start so the anchor it
+    // sets (primeOffset) stays on the MEDIA timeline the sync
+    // loop compares against the video.
+    private(set) var exportWindowStart: TimeInterval = 0
+    private(set) var exportWindowEnd: TimeInterval = 0
+    /// A next-window prefetch extraction is in flight.
+    private var exportPrefetchInFlight = false
+    /// Engine notes the controller mirrors into the player's
+    /// Diag line (window extractions, prefetches) - successes
+    /// the failure trail never sees.
+    var onDiagnosticNote: ((String) -> Void)?
+
+    /// The exported feed's current window, for the
+    /// controller's prefetch trigger.
+    var exportWindow: (start: TimeInterval, end: TimeInterval)? {
+        guard feed == .exported, exportedFileURL != nil else { return nil }
+        return (exportWindowStart, exportWindowEnd)
+    }
+
     // MARK: Round 24: failure reasons
     //
     // Before this round a Ghost failure reached the user as the
@@ -772,7 +800,7 @@ final class TrapTubeGhostAudio {
             lastEngagedStage = 2
             return .sameAsset
         }
-        if await primeExport(startAt: position()) {
+        if await primeExport(position: position) {
             lastEngagedStage = 3
             return .exported
         }
@@ -1066,54 +1094,150 @@ final class TrapTubeGhostAudio {
     // AVAssetReader creation, which export never attempts.
     // Extracted files are cached per videoID under Caches, so
     // a replay or a re-prime of the same video skips the
-    // extraction entirely; at most the current and previous
-    // videos' files are kept.
+    // extraction entirely. Round 27 made the extraction
+    // WINDOWED (~180 s from just behind the playhead, next
+    // window prefetched in the background), so time-to-first-
+    // audio no longer scales with the video's length - on
+    // Build 223 a 22:42 video's whole-file extraction was
+    // also what left the prime anchored seconds in the past.
+
+    /// Round 27: the window length, and how far behind the
+    /// playhead a window starts (the preroll that lets a prime
+    /// land mid-window instead of at its very edge).
+    private static let exportWindowLength: TimeInterval = 180
+    private static let exportWindowPreroll: TimeInterval = 2
 
     private static var exportCacheDirectory: URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("TrapTubeGhostExport", isDirectory: true)
     }
 
-    private static func exportCacheURL(videoID: String) -> URL {
-        exportCacheDirectory.appendingPathComponent("\(videoID).m4a")
+    /// Round 27: windowed cache files are named
+    /// "<videoID>@<windowStartMilliseconds>.m4a". The Build 223
+    /// full-range file keeps its plain "<videoID>.m4a" name and
+    /// reads as the window starting at 0, so it satisfies any
+    /// window it covers.
+    private static func exportCacheURL(videoID: String, windowStart: TimeInterval) -> URL {
+        exportCacheDirectory
+            .appendingPathComponent("\(videoID)@\(Int((windowStart * 1000).rounded())).m4a")
     }
 
-    /// Marks a video's cache file as worth keeping and prunes
-    /// the cache directory back to the two most recent.
+    /// Bounds the cache directory: the four most recently
+    /// modified window files stay (the live window, its
+    /// prefetched successor, the previous video's pair);
+    /// anything older is deleted. A file the live pump holds
+    /// open survives deletion on this platform - the pump's
+    /// captured AVAudioFile is unaffected.
     private func noteExportEngaged(videoID: String) {
-        exportKeepIDs.removeAll { $0 == videoID }
-        exportKeepIDs.insert(videoID, at: 0)
-        exportKeepIDs = Array(exportKeepIDs.prefix(2))
-        let keep = Set(exportKeepIDs.map { "\($0).m4a" })
-        guard let entries = try? FileManager.default.contentsOfDirectory(
-            at: Self.exportCacheDirectory, includingPropertiesForKeys: nil) else { return }
-        for entry in entries where !keep.contains(entry.lastPathComponent) {
-            try? FileManager.default.removeItem(at: entry)
+        exportKeepIDs = [videoID]
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: Self.exportCacheDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let sorted = entries.sorted { a, b in
+            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            return da > db
+        }
+        for entry in sorted.dropFirst(4) {
+            try? fm.removeItem(at: entry)
         }
     }
 
-    private func primeExport(startAt: TimeInterval) async -> Bool {
+    /// A cached window (or the legacy full-range file) whose
+    /// span covers the anchor with at least a second of runway
+    /// left: the file URL plus its media-timeline window.
+    private func cachedExportWindow(videoID: String, covering anchor: TimeInterval)
+        -> (url: URL, start: TimeInterval, end: TimeInterval)? {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: Self.exportCacheDirectory, includingPropertiesForKeys: nil) else { return nil }
+        var best: (url: URL, start: TimeInterval, end: TimeInterval)?
+        for entry in entries {
+            let name = entry.lastPathComponent
+            let start: TimeInterval
+            if name == "\(videoID).m4a" {
+                start = 0
+            } else if name.hasPrefix("\(videoID)@"), name.hasSuffix(".m4a"),
+                      let millis = Double(String(name.dropFirst(videoID.count + 1).dropLast(4))) {
+                start = millis / 1000
+            } else {
+                continue
+            }
+            guard let file = try? AVAudioFile(forReading: entry),
+                  file.processingFormat.sampleRate > 0 else { continue }
+            let end = start + Double(file.length) / file.processingFormat.sampleRate
+            guard anchor >= start, anchor < end - 1 else { continue }
+            if best == nil || end > best!.end { best = (entry, start, end) }
+        }
+        return best
+    }
+
+    /// Stage 3 entry: serve the window covering the CURRENT
+    /// playhead from cache when one exists; otherwise extract
+    /// it (see extractExportWindow). The position provider is
+    /// consulted at prime time, never at ladder time: the
+    /// Build 223 prime passed a value captured when Stage 3
+    /// was ENTERED, the (whole-file) extraction then ran for
+    /// many seconds while the video played on, and the pump
+    /// anchored itself that many seconds in the past.
+    private func primeExport(position: () -> TimeInterval) async -> Bool {
         guard let cloneSource else {
             recordFailure(route: "export",
                           cause: "no clone descriptor to extract from",
                           short: "export: no descriptor")
             return false
         }
-        // Cache first: a previous extraction of this video
-        // feeds instantly, with no media-stack work at all.
-        if let videoID = currentVideoID {
-            let cached = Self.exportCacheURL(videoID: videoID)
-            if FileManager.default.fileExists(atPath: cached.path) {
-                exportedFileURL = cached
-                if primeFile(localURL: cached, startAt: startAt, feedKind: .exported, route: "export") {
-                    noteExportEngaged(videoID: videoID)
-                    NSLog("[TrapTube Ghost] export feed: cache hit for %@", videoID)
-                    return true
-                }
-                // primeFile recorded why the cached file would
-                // not pump; fall through to a fresh extraction.
+        let anchor = position()
+        if let videoID = currentVideoID,
+           let hit = cachedExportWindow(videoID: videoID, covering: anchor) {
+            exportedFileURL = hit.url
+            exportWindowStart = hit.start
+            exportWindowEnd = hit.end
+            if primeFile(localURL: hit.url, startAt: anchor, feedKind: .exported,
+                         route: "export", windowStart: hit.start) {
+                noteExportEngaged(videoID: videoID)
+                NSLog("[TrapTube Ghost] export feed: cache hit for %@ (window %.0f-%.0f)",
+                      videoID, hit.start, hit.end)
+                return true
             }
+            // primeFile recorded why the cached file would not
+            // pump; fall through to a fresh extraction.
         }
+        return await extractExportWindow(cloneSource: cloneSource, anchor: anchor,
+                                         position: position, prime: true)
+    }
+
+    /// Round 27: background prefetch of the window beginning
+    /// at `start` (the live window's end), so the boundary
+    /// switch primes from cache instead of waiting on the
+    /// media stack. Fire-and-forget; a no-op when a prefetch
+    /// is already running or the window is already cached.
+    func prefetchExportWindow(startingAt start: TimeInterval) {
+        guard !exportPrefetchInFlight, let cloneSource,
+              let videoID = currentVideoID else { return }
+        if cachedExportWindow(videoID: videoID, covering: start + 1) != nil { return }
+        exportPrefetchInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            _ = await self.extractExportWindow(
+                cloneSource: cloneSource,
+                anchor: start + Self.exportWindowPreroll, position: nil, prime: false)
+            self.exportPrefetchInFlight = false
+        }
+    }
+
+    /// Extracts the window of audio beginning one preroll
+    /// before `anchor` (~180 s, or to the end of the media)
+    /// and caches it under the video's window slot. With
+    /// prime == true the extracted window is also primed - at
+    /// the LIVE playhead re-read at completion, never at the
+    /// anchor the extraction started from. With prime == false
+    /// (prefetch) the file is only cached.
+    private func extractExportWindow(cloneSource: CloneSource, anchor: TimeInterval,
+                                     position: (() -> TimeInterval)?,
+                                     prime: Bool) async -> Bool {
         let asset = AVURLAsset(url: cloneSource.url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": cloneSource.headers
         ])
@@ -1129,8 +1253,33 @@ final class TrapTubeGhostAudio {
                           short: "export composition failed")
             return false
         }
+        let windowStart: TimeInterval
+        let windowEnd: TimeInterval
         do {
-            let range = try await track.load(.timeRange)
+            let fullRange = try await track.load(.timeRange)
+            let mediaEnd = (fullRange.start + fullRange.duration).seconds
+            // Short media is one whole window; otherwise the
+            // window begins one preroll before the anchor
+            // (clamped at 0) and runs ~180 s or to the end of
+            // the media.
+            windowStart = mediaEnd <= Self.exportWindowLength
+                ? 0 : max(0, anchor - Self.exportWindowPreroll)
+            windowEnd = min(mediaEnd, windowStart + Self.exportWindowLength)
+            guard windowEnd > windowStart else {
+                // The anchor sits at/past the end of the
+                // audio. For a prefetch that is a benign no-op
+                // (nothing beyond the end to cache); for a real
+                // prime it is an honest failure.
+                if prime {
+                    recordFailure(route: "export",
+                                  cause: "the requested position is past the end of the audio",
+                                  short: "export past end")
+                }
+                return false
+            }
+            let range = CMTimeRange(
+                start: fullRange.start + CMTime(seconds: windowStart, preferredTimescale: 600),
+                duration: CMTime(seconds: windowEnd - windowStart, preferredTimescale: 600))
             try compTrack.insertTimeRange(range, of: track, at: .zero)
         } catch {
             recordFailure(route: "export",
@@ -1146,7 +1295,7 @@ final class TrapTubeGhostAudio {
             return false
         }
         // Stage to a unique temp file; only a completed export
-        // is moved into the video's cache slot.
+        // is moved into the video's window cache slot.
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("tt-ghost-export-\(UUID().uuidString).m4a")
         session.outputURL = staging
@@ -1166,7 +1315,7 @@ final class TrapTubeGhostAudio {
         }
         var finalURL = staging
         if let videoID = currentVideoID {
-            let cached = Self.exportCacheURL(videoID: videoID)
+            let cached = Self.exportCacheURL(videoID: videoID, windowStart: windowStart)
             try? FileManager.default.createDirectory(at: cached.deletingLastPathComponent(),
                                                      withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: cached)
@@ -1174,14 +1323,31 @@ final class TrapTubeGhostAudio {
                 finalURL = cached
             }
         }
+        onDiagnosticNote?("ghost export window [\(Self.fmtSeconds(windowStart))–\(Self.fmtSeconds(windowEnd))]")
+        guard prime else {
+            NSLog("[TrapTube Ghost] export prefetch cached window %.0f-%.0f for %@",
+                  windowStart, windowEnd, currentVideoID ?? "unknown video")
+            return true
+        }
         exportedFileURL = finalURL
-        guard primeFile(localURL: finalURL, startAt: startAt, feedKind: .exported, route: "export") else {
+        exportWindowStart = windowStart
+        exportWindowEnd = windowEnd
+        // The prime position is re-read NOW, at completion:
+        // the extraction may have taken seconds while the
+        // video played on (the Build 223 stale-anchor defect).
+        let live = position?() ?? anchor
+        guard primeFile(localURL: finalURL, startAt: live, feedKind: .exported,
+                        route: "export", windowStart: windowStart) else {
             return false
         }
         if let videoID = currentVideoID { noteExportEngaged(videoID: videoID) }
-        NSLog("[TrapTube Ghost] export feed: extraction completed for %@",
-              currentVideoID ?? "unknown video")
+        NSLog("[TrapTube Ghost] export feed: window %.0f-%.0f extracted for %@",
+              windowStart, windowEnd, currentVideoID ?? "unknown video")
         return true
+    }
+
+    private static func fmtSeconds(_ value: TimeInterval) -> String {
+        String(format: "%.1f", value)
     }
 
     private func primeFileRoute(source: Source, position: () -> TimeInterval) async -> Bool {
@@ -1229,7 +1395,8 @@ final class TrapTubeGhostAudio {
     /// remaining a distinct feed (.exported) with its own
     /// failure attribution.
     private func primeFile(localURL: URL, startAt: TimeInterval,
-                           feedKind: Feed = .file, route: String = "file") -> Bool {
+                           feedKind: Feed = .file, route: String = "file",
+                           windowStart: TimeInterval = 0) -> Bool {
         guard let file = try? AVAudioFile(forReading: localURL) else {
             recordFailure(route: route, cause: "the local file could not be opened as audio",
                           short: "file open failed")
@@ -1260,12 +1427,19 @@ final class TrapTubeGhostAudio {
         node.stop()
         loadedFile = file
         audioDuration = Double(file.length) / format.sampleRate
-        primeOffset = min(max(startAt, 0), audioDuration)
+        // Round 27: windowStart is the media time of the
+        // file's frame 0 (0 for whole-file feeds). The prime
+        // lands at the MEDIA position startAt - the file-local
+        // position startAt - windowStart - and primeOffset,
+        // the anchor position() reports, stays on the media
+        // timeline.
+        let localStart = min(max(startAt - windowStart, 0), audioDuration)
+        primeOffset = windowStart + localStart
         scheduledFrames = 0
         streamEnded = false
         stallReported = false
         lastBufferAt = Date()
-        let startFrame = AVAudioFramePosition(primeOffset * format.sampleRate)
+        let startFrame = AVAudioFramePosition(localStart * format.sampleRate)
         guard startFrame < file.length else {
             recordFailure(route: route, cause: "the requested position is past the end of the audio",
                           short: "position past end")
@@ -1301,6 +1475,21 @@ final class TrapTubeGhostAudio {
             guard let self else { return }
             while !Task.isCancelled, self.feedGeneration == generation,
                   self.feed == pumpFeed, self.loadedFile === pumpFile {
+                // Round 27: never schedule into a paused node.
+                // While the user has the video paused the node
+                // renders nothing, but the position clock is
+                // host-derived - an ungated pump keeps feeding
+                // the queue against it, can drain the whole
+                // file (setting streamEnded at EOF, which used
+                // to veto the sync loop's hard resync), and
+                // leaves the resume anchor corrupt. Idling here
+                // keeps the pause state exactly where the prime
+                // left it; the controller's resume resync
+                // re-bases the feed at the live position.
+                if !self.desiredPlaying {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
+                }
                 if self.scheduledAhead() > 3.5 {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     continue
@@ -1361,6 +1550,13 @@ final class TrapTubeGhostAudio {
                 if pumpReader.status == .completed {
                     self.streamEnded = true
                     return
+                }
+                // Round 27: same pause discipline as the file
+                // pump - do not consume the reader into a
+                // paused node's queue.
+                if !self.desiredPlaying {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    continue
                 }
                 if self.scheduledAhead() > 3.5 {
                     try? await Task.sleep(nanoseconds: 100_000_000)
@@ -1623,20 +1819,31 @@ final class TrapTubeGhostAudio {
             if await primeSameAsset(startAt: position) {
                 lastEngagedStage = 2
                 ok = true
-            } else if await primeExport(startAt: position) {
+            } else if await primeExport(position: { position }) {
                 lastEngagedStage = 3
                 ok = true
             } else {
                 ok = false
             }
         case .exported:
-            // The extracted file is still on disk: re-prime it
-            // directly. If it vanished, Stage 3 rebuilds it.
-            if let exportedFileURL {
+            // Round 27: windows. A target inside the live
+            // window re-primes the same file at its local
+            // offset; a target outside it (a seek past the
+            // window's end, an exhausted window) goes back
+            // through Stage 3, which serves the covering
+            // window from cache - the prefetched next window
+            // makes that instant - or extracts it.
+            if let exportedFileURL,
+               position >= exportWindowStart, position < exportWindowEnd {
                 ok = primeFile(localURL: exportedFileURL, startAt: position,
-                               feedKind: .exported, route: "export")
+                               feedKind: .exported, route: "export",
+                               windowStart: exportWindowStart)
+                // A vanished/pruned cache file is not a dead
+                // end: Stage 3 re-serves or re-extracts the
+                // covering window.
+                if !ok { ok = await primeExport(position: { position }) }
             } else {
-                ok = await primeExport(startAt: position)
+                ok = await primeExport(position: { position })
             }
             if ok { lastEngagedStage = 3 }
         case .file:
@@ -1685,5 +1892,7 @@ final class TrapTubeGhostAudio {
         lastEngagedStage = nil
         currentVideoID = nil
         exportedFileURL = nil
+        exportWindowStart = 0
+        exportWindowEnd = 0
     }
 }
