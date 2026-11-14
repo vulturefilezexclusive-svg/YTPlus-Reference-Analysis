@@ -1271,6 +1271,11 @@ enum TrapTubeDiagnosticsExport {
             lines.append(ghostLine)
             lines.append("Tap fallback: \(controller.usingTapFallback ? "yes" : "no")")
             lines.append("Ghost failure: \(controller.ghost.lastFailureReason ?? controller.ghostFailureShort ?? "-")")
+            lines.append("Ghost engine: \(controller.ghost.diagnosticsSnapshot)")
+            lines.append("Video transport: \(controller.transportSnapshot)")
+            let session = AVAudioSession.sharedInstance()
+            let routes = session.currentRoute.outputs.map { $0.portType.rawValue }.joined(separator: ", ")
+            lines.append("Audio session: \(session.category.rawValue) · route \(routes.isEmpty ? "none" : routes) · system volume \(String(format: "%.2f", session.outputVolume)) · other audio playing: \(session.isOtherAudioPlaying ? "yes" : "no")")
             if let error = controller.errorMessage { lines.append("Error: \(error)") }
             lines.append("")
             lines.append("DIAG TRAIL (oldest first, newest last)")
@@ -2580,6 +2585,36 @@ final class TrapTubePlayerController: ObservableObject {
     /// the video's position. While AVPlayer waits on the network the
     /// ghost node waits with it. The manager's EQ state is re-applied
     /// every tick, so EQ panel changes land live on the ghost unit.
+    /// Round 31 candidate: the video item's transport state in one
+    /// phrase (timeControlStatus, the waiting reason, the item's own
+    /// status). The sync loop breadcrumbs every change of it, so a
+    /// video that stops on its own names the moment and the state.
+    private func transportDescription(for item: AVPlayerItem) -> String {
+        let state: String
+        switch player.timeControlStatus {
+        case .playing: state = "playing"
+        case .paused: state = "paused"
+        case .waitingToPlayAtSpecifiedRate:
+            let reason = player.reasonForWaitingToPlay?.rawValue ?? "unspecified"
+            state = "waiting (\(reason))"
+        @unknown default: state = "unknown"
+        }
+        let itemState: String
+        switch item.status {
+        case .readyToPlay: itemState = "item ready"
+        case .failed: itemState = "item FAILED"
+        case .unknown: itemState = "item not ready"
+        @unknown default: itemState = "item unknown"
+        }
+        return "\(state), \(itemState)"
+    }
+
+    /// The same phrase for the Share diagnostics export.
+    var transportSnapshot: String {
+        guard let item = player.currentItem else { return "no item" }
+        return transportDescription(for: item)
+    }
+
     private func startSyncLoop(item: AVPlayerItem) {
         syncTask?.cancel()
         lastHardResync = Date.distantPast
@@ -2587,6 +2622,8 @@ final class TrapTubePlayerController: ObservableObject {
         ghostSilentStrikes = 0
         ghostAudioSeconds = nil
         var waitingOnVideo = false
+        var pausedOnVideo = false
+        var lastTransport = ""
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 200_000_000)
@@ -2597,6 +2634,59 @@ final class TrapTubePlayerController: ObservableObject {
                 // so reverb/limiter edits land live on the units
                 // (the buffer effects read the store directly).
                 self.ghost.applyFXSettings()
+                // Round 31 candidate: changes of the video's
+                // transport state are breadcrumbed - but only the
+                // transitions that carry new information (into or
+                // out of paused, or an item-state change). Waiting
+                // entries/exits are already covered by the stall
+                // lines below, and waiting-reason churn during a
+                // flapping network would otherwise evict the
+                // resolver/Ghost ladder steps from the 30-step
+                // trail the diagnostics export preserves.
+                let transport = self.transportDescription(for: item)
+                if transport != lastTransport {
+                    let itemStateChanged = transport.components(separatedBy: ", ").last
+                        != lastTransport.components(separatedBy: ", ").last
+                    if !lastTransport.isEmpty,
+                       transport.hasPrefix("paused") || lastTransport.hasPrefix("paused")
+                           || itemStateChanged {
+                        self.noteDiagnostic("video transport: \(lastTransport) → \(transport)")
+                    }
+                    lastTransport = transport
+                }
+                // Round 31 candidate: the VIDEO is the master clock.
+                // Before this, only the transport buttons, an audio
+                // interruption and a buffering stall told Ghost to
+                // pause; a video item that paused ON ITS OWN left the
+                // exported file rendering ahead of a frozen picture
+                // (device log: video 52.3 s, audio 101.2 s, drift
+                // 48904 ms, with no resync ever attempted because the
+                // drift guard below only acts while playing).
+                if self.player.timeControlStatus == .paused {
+                    if !pausedOnVideo {
+                        pausedOnVideo = true
+                        if self.ghost.isDesiredPlaying {
+                            self.ghost.setDesiredPlaying(false)
+                            self.noteDiagnostic("ghost paused: the video item paused without the transport buttons")
+                        }
+                    }
+                } else if pausedOnVideo, self.player.timeControlStatus == .playing {
+                    pausedOnVideo = false
+                    // This branch already resumes rendering and
+                    // re-bases; the waiting-exit block below must
+                    // not fire a second resync for the same
+                    // recovery on the next tick.
+                    waitingOnVideo = false
+                    if !self.ghost.isDesiredPlaying {
+                        // An involuntary pause ended; no resume
+                        // button re-based the feed, so re-base it
+                        // here at the video's exact position.
+                        self.ghost.setDesiredPlaying(true)
+                        self.noteDiagnostic("ghost resumes with the video - re-basing at the video position")
+                        await self.hardResyncGhost()
+                        continue
+                    }
+                }
                 if self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
                     if !waitingOnVideo {
                         waitingOnVideo = true
