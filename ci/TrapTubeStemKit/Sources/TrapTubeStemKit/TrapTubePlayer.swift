@@ -1347,8 +1347,9 @@ final class TrapTubePlayerController: ObservableObject {
         switch ghostFeed {
         case .none:
             return loadedVideoID == nil ? "" : "GHOST STARTING..."
-        case .sameAsset, .streamed, .file:
+        case .sameAsset, .streamed, .file, .exported:
             var text = ghostFeed == .file ? "GHOST (FILE)"
+                : ghostFeed == .exported ? "GHOST (EXPORT)"
                 : ghostFeed == .sameAsset ? "GHOST (SAME-ASSET)" : "GHOST (STREAMED)"
             if !TrapTubeEQManager.shared.isEQEnabled { text += " · EQ OFF" }
             if let ghostDriftMs {
@@ -1733,6 +1734,26 @@ final class TrapTubePlayerController: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self.heartbeatResolveReturned = true
                 self.heartbeatItem = resolved.item
+                // Round 26, Stage 1: prime-before-play. The Ghost
+                // same-asset reader is built and started on its
+                // clone NOW, while no player holds the item yet,
+                // so a refusal here cannot be contention with a
+                // running player; the attempt's asset facts are
+                // recorded either way, and when this does not
+                // engage, startGhost runs the ladder on from
+                // Stage 2. This sits BEFORE the resolved
+                // milestone on purpose: the milestone-to-play()
+                // span below stays free of suspension, exactly
+                // as Round 16 requires - the only suspensions in
+                // this whole stretch are the resolve itself and
+                // this one prime, both of them ours, neither of
+                // them EQ hook work.
+                if self.audioPath == .ghost {
+                    let primed = await self.ghost.preparePrePlay(clone: resolved.ghostClone, startAt: 0)
+                    self.noteDiagnostic(primed
+                        ? "ghost prime timing: pre-play - reader started before play()"
+                        : "ghost prime timing: pre-play did not engage - post-play ladder follows")
+                }
                 // Round 16 ordering invariant: from here to play() the
                 // sequence is purely synchronous - milestone, item in,
                 // play() - with no suspension on any EQ work in between
@@ -2156,7 +2177,7 @@ final class TrapTubePlayerController: ObservableObject {
             // along - it is the same-asset feed's whole input
             // (see the engine). The item itself is handed over
             // only as the identity this start belongs to.
-            let feed = await self.ghost.start(source: source, clone: clone) { [weak self] in
+            let feed = await self.ghost.start(source: source, clone: clone, videoID: self.loadedVideoID) { [weak self] in
                 self?.player.currentTime().seconds ?? 0
             }
             guard !Task.isCancelled, self.player.currentItem === item else { return }
@@ -2168,7 +2189,15 @@ final class TrapTubePlayerController: ObservableObject {
             self.ghostFeed = feed
             self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
             self.ghost.setMuted(self.isMuted)
-            self.noteDiagnostic("ghost live (\(feed == .file ? "file" : feed == .sameAsset ? "same-asset" : "streamed"))")
+            // Round 26: the live note names the ladder stage
+            // that owns the feed, so a screenshot separates a
+            // Stage 1 pre-play engagement from a Stage 3
+            // extraction at a glance.
+            let feedName = feed == .file ? "file"
+                : feed == .exported ? "export"
+                : feed == .sameAsset ? "same-asset" : "streamed"
+            let stageNote = self.ghost.lastEngagedStage.map { ", stage \($0)" } ?? ""
+            self.noteDiagnostic("ghost live (\(feedName)\(stageNote))")
             self.startSyncLoop(item: item)
         }
     }
@@ -2216,7 +2245,15 @@ final class TrapTubePlayerController: ObservableObject {
                 }
                 if ok {
                     self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
-                    self.noteDiagnostic("ghost re-prime attempt \(attempt) succeeded - ghost re-engaged")
+                    // Round 26: the resync may have re-engaged
+                    // through a different ladder stage than the
+                    // feed that died (a Stage 3 cache hit after a
+                    // Stage 2 death) - adopt the engine's live
+                    // feed kind and name the stage.
+                    self.ghostFeed = self.ghost.feed
+                    let engagedNote = self.ghost.lastEngagedStage.map { "ghost re-engaged (stage \($0))" }
+                        ?? "ghost re-engaged"
+                    self.noteDiagnostic("ghost re-prime attempt \(attempt) succeeded - \(engagedNote)")
                     self.ghostReprimeInFlight = false
                     return
                 }
@@ -2335,6 +2372,13 @@ final class TrapTubePlayerController: ObservableObject {
         let target = player.currentTime().seconds
         let ok = await ghost.resync(to: target.isFinite ? target : 0)
         guard audioPath == .ghost, !usingTapFallback else { return }
+        if ok {
+            // Round 26: a resync re-runs the ladder from
+            // Stage 2, so the live feed kind can differ from
+            // the one that was resynced - keep the published
+            // kind (and with it the status line) truthful.
+            ghostFeed = ghost.feed
+        }
         if !ok {
             if ghostFeed == .streamed || ghostFeed == .sameAsset {
                 // Round 25: a failed resync of a reader feed is
