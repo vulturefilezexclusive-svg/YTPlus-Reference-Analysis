@@ -1834,15 +1834,16 @@ final class TrapTubeGhostAudio {
             // window from cache - the prefetched next window
             // makes that instant - or extracts it.
             if let exportedFileURL,
-               position >= exportWindowStart, position < exportWindowEnd {
-                ok = primeFile(localURL: exportedFileURL, startAt: position,
-                               feedKind: .exported, route: "export",
-                               windowStart: exportWindowStart)
-                // A vanished/pruned cache file is not a dead
-                // end: Stage 3 re-serves or re-extracts the
-                // covering window.
-                if !ok { ok = await primeExport(position: { position }) }
+               position >= exportWindowStart, position < exportWindowEnd,
+               primeFile(localURL: exportedFileURL, startAt: position,
+                         feedKind: .exported, route: "export",
+                         windowStart: exportWindowStart) {
+                ok = true
             } else {
+                // Covers an out-of-window target AND an
+                // in-window prime that failed (a pruned cache
+                // file is not a dead end): Stage 3 re-serves or
+                // re-extracts the covering window.
                 ok = await primeExport(position: { position })
             }
             if ok { lastEngagedStage = 3 }
