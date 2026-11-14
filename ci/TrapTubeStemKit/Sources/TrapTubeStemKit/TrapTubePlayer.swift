@@ -1295,6 +1295,11 @@ final class TrapTubePlayerController: ObservableObject {
     let ghost = TrapTubeGhostAudio()
     @Published var ghostFeed: TrapTubeGhostAudio.Feed = .none
     @Published var ghostDriftMs: Int?
+    /// Round 27: the Ghost feed's RENDERED position (media
+    /// seconds), published by the sync tick alongside the
+    /// drift - the status line can now show where the audio
+    /// actually is, not just that a feed exists.
+    @Published var ghostAudioSeconds: Double?
     @Published var usingTapFallback = false
     /// Round 24: why Ghost failed on the current item, in the
     /// compact form the engine records (route + error domain/
@@ -1317,6 +1322,55 @@ final class TrapTubePlayerController: ObservableObject {
     private var ghostReprimeInFlight = false
     private static let maxGhostReprimeAttempts = 3
     private var lastHardResync = Date.distantPast
+    // Round 27 liveness bookkeeping: the last rendered-audio /
+    // video positions the sync tick sampled, when it sampled
+    // them, and how many consecutive stall verdicts the live
+    // feed has collected (any real progress resets the count).
+    private var ghostLivenessAudio: TimeInterval = -1
+    private var ghostLivenessVideo: TimeInterval = -1
+    private var ghostLivenessSince: Date = .distantPast
+    private var ghostSilentStrikes = 0
+
+    private func ghostFeedName(_ feed: TrapTubeGhostAudio.Feed) -> String {
+        switch feed {
+        case .none: return "none"
+        case .sameAsset: return "same-asset"
+        case .streamed: return "streamed"
+        case .file: return "file"
+        case .exported: return "export"
+        }
+    }
+
+    /// Round 27: true when the live feed's RENDERED position
+    /// has failed to advance over a >=1.5 s window while the
+    /// video advanced - the live-but-silent state (Build 223:
+    /// "GHOST (EXPORT)" on the status line and no audible
+    /// audio, because priming only ever proved the file
+    /// OPENED). Breadcrumbs the verdict and counts a strike;
+    /// any real progress resets the slate.
+    private func ghostLivenessStalled(audioTime: TimeInterval, videoTime: TimeInterval) -> Bool {
+        let now = Date()
+        if ghostLivenessSince == .distantPast {
+            ghostLivenessAudio = audioTime
+            ghostLivenessVideo = videoTime
+            ghostLivenessSince = now
+            return false
+        }
+        guard now.timeIntervalSince(ghostLivenessSince) >= 1.5 else { return false }
+        let audioAdvanced = audioTime - ghostLivenessAudio
+        let videoAdvanced = videoTime - ghostLivenessVideo
+        ghostLivenessAudio = audioTime
+        ghostLivenessVideo = videoTime
+        ghostLivenessSince = now
+        if audioAdvanced >= 0.05 {
+            ghostSilentStrikes = 0
+            return false
+        }
+        guard videoAdvanced > 0.5 else { return false }
+        ghostSilentStrikes += 1
+        noteDiagnostic("ghost live-but-silent: \(ghostFeedName(ghostFeed)) audio stuck at \(String(format: "%.1f", audioTime)) s while video advanced to \(String(format: "%.1f", videoTime)) s")
+        return true
+    }
     /// The video this session loaded; a re-presented (adopted)
     /// player view compares it against its request and skips the
     /// reload when they match.
@@ -1356,6 +1410,9 @@ final class TrapTubePlayerController: ObservableObject {
                 text += " · drift \(ghostDriftMs) ms"
             } else {
                 text += " · SYNCING..."
+            }
+            if let ghostAudioSeconds {
+                text += " · audio at \(String(format: "%.1f", ghostAudioSeconds)) s"
             }
             return text
         }
@@ -1632,6 +1689,13 @@ final class TrapTubePlayerController: ObservableObject {
             player.rate = rate
             ghost.setDesiredPlaying(true)
             ghost.resumeRendering()
+            // Round 27: an interruption is a pause the user did
+            // not choose - its end gets the same re-engagement
+            // as a manual resume (see togglePlayPause).
+            if audioPath == .ghost, !usingTapFallback,
+               ghostFeed == .file || ghostFeed == .exported {
+                Task { [weak self] in await self?.hardResyncGhost() }
+            }
             publishNowPlayingInfo()
         @unknown default:
             break
@@ -1749,6 +1813,9 @@ final class TrapTubePlayerController: ObservableObject {
                 // this one prime, both of them ours, neither of
                 // them EQ hook work.
                 if self.audioPath == .ghost {
+                    self.ghost.onDiagnosticNote = { [weak self] note in
+                        Task { @MainActor in self?.noteDiagnostic(note) }
+                    }
                     let primed = await self.ghost.preparePrePlay(clone: resolved.ghostClone, startAt: 0)
                     self.noteDiagnostic(primed
                         ? "ghost prime timing: pre-play - reader started before play()"
@@ -2023,6 +2090,22 @@ final class TrapTubePlayerController: ObservableObject {
         } else {
             player.rate = rate
             ghost.setDesiredPlaying(true)
+            // Round 27 (the Build 223 pause/resume defect): a
+            // user resume RE-ENGAGES the local-file Ghost feeds
+            // at the video's exact current position. The pause
+            // leaves the rendered-frame anchor untrustworthy -
+            // the node-time clock is host-derived across the
+            // pause and the pump (now gated while paused) held
+            // its queue against it - and the old resume did
+            // nothing but node.play(), so the corruption was
+            // never re-based and the drift sat uncorrectable.
+            // A file/exported re-prime is a cheap local seek;
+            // reader feeds keep their timeline and the sync
+            // tick's first pass confirms or hard-resyncs them.
+            if audioPath == .ghost, !usingTapFallback,
+               ghostFeed == .file || ghostFeed == .exported {
+                Task { [weak self] in await self?.hardResyncGhost() }
+            }
         }
         isPlaying = player.timeControlStatus == .playing
         publishNowPlayingInfo()
@@ -2164,6 +2247,9 @@ final class TrapTubePlayerController: ObservableObject {
         ghostReprimeInFlight = false
         ghost.onStreamStalled = { [weak self] in
             Task { @MainActor in self?.handleReaderFeedFailure() }
+        }
+        ghost.onDiagnosticNote = { [weak self] note in
+            Task { @MainActor in self?.noteDiagnostic(note) }
         }
         // The item goes silent the moment Ghost takes the audio; if
         // the prime fails, beginTapFallback unmutes it again.
@@ -2318,6 +2404,9 @@ final class TrapTubePlayerController: ObservableObject {
     private func startSyncLoop(item: AVPlayerItem) {
         syncTask?.cancel()
         lastHardResync = Date.distantPast
+        ghostLivenessSince = .distantPast
+        ghostSilentStrikes = 0
+        ghostAudioSeconds = nil
         var waitingOnVideo = false
         syncTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -2352,14 +2441,54 @@ final class TrapTubePlayerController: ObservableObject {
                 guard videoTime.isFinite else { continue }
                 let drift = audioTime - videoTime
                 self.ghostDriftMs = Int((drift * 1000).rounded())
+                self.ghostAudioSeconds = audioTime
                 guard self.player.timeControlStatus == .playing else { continue }
+                // Round 27: exported-window housekeeping -
+                // prefetch the next window once the playhead is
+                // 70% through the current one, so the boundary
+                // switch primes from cache instead of waiting
+                // on an extraction.
+                if self.ghostFeed == .exported, let window = self.ghost.exportWindow {
+                    let span = window.end - window.start
+                    if span > 0, videoTime >= window.start + 0.7 * span,
+                       videoTime < window.end {
+                        self.ghost.prefetchExportWindow(startingAt: window.end)
+                    }
+                }
+                // Round 27: liveness before drift correction -
+                // a feed rendering nothing has no drift worth
+                // bending, only a failure to route.
+                if self.ghostLivenessStalled(audioTime: audioTime, videoTime: videoTime) {
+                    if self.ghostFeed == .streamed || self.ghostFeed == .sameAsset {
+                        self.handleReaderFeedFailure()
+                    } else if self.ghostSilentStrikes >= 2, let item = self.player.currentItem {
+                        self.beginTapFallback(item: item,
+                                              reason: "ghost live-but-silent: the \(self.ghostFeedName(self.ghostFeed)) feed rendered no progress")
+                    } else {
+                        await self.hardResyncGhost()
+                    }
+                    continue
+                }
                 let magnitude = abs(drift)
                 if magnitude <= 0.025 {
                     self.ghost.setCorrection(1)
                 } else if magnitude <= 0.120 {
                     self.ghost.setCorrection(Float(min(max(1 - drift * 0.8, 0.97), 1.03)))
-                } else if !self.ghost.streamEnded,
+                } else if self.ghostFeed == .file || self.ghostFeed == .exported
+                            || !self.ghost.streamEnded,
                           Date().timeIntervalSince(self.lastHardResync) > 1.5 {
+                    // Round 27: the local-file feeds are NOT
+                    // vetoed by streamEnded. That flag is set by
+                    // ANY pump exit - one refused chunk or read
+                    // error, not just a genuine end of track -
+                    // and with the veto in place a single bad
+                    // exit froze a multi-second drift forever
+                    // (Build 223: -17370 ms, uncorrectable for
+                    // the life of the feed). A local re-prime is
+                    // cheap; for the reader feeds the veto still
+                    // stands, because their resync re-runs the
+                    // ladder and a completed reader means the
+                    // track really is over.
                     await self.hardResyncGhost()
                 }
             }
@@ -2370,6 +2499,15 @@ final class TrapTubePlayerController: ObservableObject {
         lastHardResync = Date()
         ghost.setCorrection(1)
         let target = player.currentTime().seconds
+        // Round 27: every hard resync names itself in the Diag
+        // - the feed, the drift that provoked it, the position
+        // it re-primes at - so a screenshot separates a working
+        // resync from a silent no-op (on Build 223 the drift
+        // sat at -17370 ms with no resync line ever written).
+        if let audioTime = ghost.position(), target.isFinite {
+            let driftMs = Int(((audioTime - target) * 1000).rounded())
+            noteDiagnostic("ghost hard resync (\(ghostFeedName(ghostFeed))): drift \(driftMs) ms → seek to \(String(format: "%.1f", target)) s")
+        }
         let ok = await ghost.resync(to: target.isFinite ? target : 0)
         guard audioPath == .ghost, !usingTapFallback else { return }
         if ok {
