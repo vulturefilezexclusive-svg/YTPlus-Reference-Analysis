@@ -27,6 +27,15 @@ public final class TrapTubeEQManager: NSObject {
         var isInt16PCM = false
         var states: [[BiquadState]] = []
         var coefficients = Array(repeating: BiquadCoefficients.identity, count: 17)
+        // Round 24: the soft limiter's state. The gain is the
+        // smoothed, stereo-linked gain reduction carried across
+        // process calls; the two curves are per-process-call
+        // scratch (per-frame peaks, then per-frame gains) sized
+        // ONCE in prepare() to the host's maximum frame count, so
+        // the render callback itself never allocates.
+        var limiterGain: Float = 1
+        var limiterPeaks: [Float] = []
+        var limiterGains: [Float] = []
         init(manager: TrapTubeEQManager) { self.manager = manager }
     }
     private final class AttachmentRecord {
@@ -80,12 +89,21 @@ public final class TrapTubeEQManager: NSObject {
 
     deinit { NotificationCenter.default.removeObserver(self) }
 
+    /// Round 24: posted by every settings setter so live
+    /// readouts derived from the settings (the auto headroom
+    /// line in the EQ panel) can refresh without polling.
+    private func postSettingsChanged() {
+        NotificationCenter.default.post(name: Notification.Name("TrapTubeEQSettingsChanged"),
+                                        object: nil)
+    }
+
     public func setBandGain(_ gain: Float, at index: Int) {
         guard Self.frequencies.indices.contains(index) else { return }
         let value = min(12, max(-12, gain))
         lock.lock(); bandGains[index] = value; lock.unlock()
         UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Band.\(index)")
         engineEQ.bands[index].gain = value
+        postSettingsChanged()
     }
 
     public func bandGain(at index: Int) -> Float {
@@ -98,6 +116,7 @@ public final class TrapTubeEQManager: NSObject {
         lock.lock(); bassBoost = value; lock.unlock()
         UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Bass")
         engineEQ.bands[16].gain = value
+        postSettingsChanged()
     }
 
     public var bassBoostDecibels: Float {
@@ -110,6 +129,7 @@ public final class TrapTubeEQManager: NSObject {
         // AVAudioUnitEQ globalGain provides the 0-200% master gain range.
         UserDefaults.standard.set(value, forKey: "TrapTube.EQ.Master")
         engineEQ.globalGain = value == 0 ? -96 : 20 * log10(value / 100)
+        postSettingsChanged()
     }
 
     public var masterGainPercent: Float {
@@ -123,6 +143,107 @@ public final class TrapTubeEQManager: NSObject {
     public func setEQEnabled(_ enabled: Bool) {
         lock.lock(); eqEnabled = enabled; lock.unlock()
         UserDefaults.standard.set(enabled, forKey: "TrapTube.EQ.Enabled")
+        postSettingsChanged()
+    }
+
+    // MARK: - Round 24: automatic headroom (ONE computation, both paths)
+    //
+    // YouTube's audio peaks at the format ceiling, so boosting a
+    // curve into it has nowhere to go but clipping: before this
+    // round neither render path had any headroom management at
+    // all, and the bass shelf (up to +20 dB) stacks on top of the
+    // 31/62 Hz band boosts and each preset's own bass value. The
+    // compensation below evaluates the ACTUAL cascade magnitude
+    // response of the current settings - designed with the very
+    // BiquadCoefficients the tap renders with - at probe
+    // frequencies (the 16 band centers plus probes across the
+    // shelf's region, where stacking peaks), and pulls the whole
+    // signal down by exactly the worst cumulative boost, ahead of
+    // the user's master gain. Cuts need no compensation, so the
+    // value is never positive. The tap applies it from its
+    // render-time snapshot; the Ghost engine applies the same
+    // number as its AVAudioUnitEQ globalGain (see
+    // TrapTubeGhostAudio.applyManagerState); the EQ panel shows
+    // it as a read-only "Headroom" line.
+
+    /// Probes across the 100 Hz shelf's region (the band centers
+    /// are probed too, from `frequencies`).
+    private static let headroomShelfProbes: [Double] = [20, 40, 60, 80, 100, 150, 200]
+    /// The reference rate the shared evaluation runs at. The
+    /// tap's live path evaluates at the stream's real rate via
+    /// the overload below; at these frequencies the difference
+    /// is far below a tenth of a dB.
+    private static let headroomReferenceSampleRate: Double = 48_000
+
+    /// Designs the 17-section cascade (16 peaking + bass shelf)
+    /// exactly as the tap's process callback designs it.
+    private static func designedCoefficients(bandGains: [Float], bass: Float,
+                                             sampleRate: Double) -> [BiquadCoefficients] {
+        var coefficients: [BiquadCoefficients] = []
+        for index in frequencies.indices {
+            coefficients.append(.peaking(
+                frequency: min(Double(frequencies[index]), sampleRate * 0.45),
+                gainDB: Double(bandGains[index]), sampleRate: sampleRate, q: 1.0))
+        }
+        coefficients.append(.lowShelf(
+            frequency: min(100, sampleRate * 0.20), gainDB: Double(bass),
+            sampleRate: sampleRate))
+        return coefficients
+    }
+
+    /// |H| of one designed cascade at one probe frequency, in dB.
+    private static func cascadeResponseDB(coefficients: [BiquadCoefficients],
+                                          probe: Double, sampleRate: Double) -> Double {
+        let w = 2 * Double.pi * probe / sampleRate
+        let cw = cos(w), sw = sin(w), cw2 = cos(2 * w), sw2 = sin(2 * w)
+        var magnitude = 1.0
+        for c in coefficients {
+            let nr = c.b0 + c.b1 * cw + c.b2 * cw2
+            let ni = -c.b1 * sw - c.b2 * sw2
+            let dr = 1 + c.a1 * cw + c.a2 * cw2
+            let di = -c.a1 * sw - c.a2 * sw2
+            let section = (nr * nr + ni * ni).squareRoot() / max((dr * dr + di * di).squareRoot(), 1e-12)
+            magnitude *= section
+        }
+        return magnitude > 0 ? 20 * log10(magnitude) : 0
+    }
+
+    /// The worst cumulative boost (dB, never negative) a designed
+    /// cascade produces at any probe frequency. Scalar-only: the
+    /// coefficient array is the caller's (the tap passes its
+    /// context's preallocated one), so this is safe to run on the
+    /// render thread.
+    static func peakBoostDB(coefficients: [BiquadCoefficients], sampleRate: Double) -> Double {
+        var peak = 0.0
+        for index in frequencies.indices {
+            peak = max(peak, cascadeResponseDB(coefficients: coefficients,
+                                               probe: Double(frequencies[index]),
+                                               sampleRate: sampleRate))
+        }
+        for probe in headroomShelfProbes {
+            peak = max(peak, cascadeResponseDB(coefficients: coefficients,
+                                               probe: probe, sampleRate: sampleRate))
+        }
+        return peak
+    }
+
+    /// The shared headroom computation: the worst-case cumulative
+    /// boost of the given band gains + bass shelf, in dB.
+    static func cascadePeakBoostDB(bandGains: [Float], bass: Float,
+                                   sampleRate: Double = headroomReferenceSampleRate) -> Double {
+        peakBoostDB(coefficients: designedCoefficients(bandGains: bandGains, bass: bass,
+                                                       sampleRate: sampleRate),
+                    sampleRate: sampleRate)
+    }
+
+    /// The compensation for the CURRENT settings, in dB: zero or
+    /// negative, applied ahead of the master gain on both paths.
+    public var headroomCompensationDB: Float {
+        lock.lock()
+        let gains = bandGains
+        let bass = bassBoost
+        lock.unlock()
+        return Float(-Self.cascadePeakBoostDB(bandGains: gains, bass: bass))
     }
 
     /// Round 19: attachment truth is what is on the item NOW, not what
@@ -352,11 +473,21 @@ public final class TrapTubeEQManager: NSObject {
                     let raw = MTAudioProcessingTapGetStorage(tap)
                     Unmanaged<EQTapContext>.fromOpaque(raw).release()
                 },
-                prepare: { tap, _, processingFormat in
+                prepare: { tap, maxFrames, processingFormat in
                     let raw = MTAudioProcessingTapGetStorage(tap)
                     let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
                     let format = processingFormat.pointee
                     context.sampleRate = max(8000, format.mSampleRate)
+                    // Round 24: size the limiter's per-frame
+                    // scratch ONCE, here, to the host's stated
+                    // maximum - the process callback chunks its
+                    // work to this capacity and never allocates.
+                    let capacity = max(8192, Int(maxFrames))
+                    if context.limiterPeaks.count != capacity {
+                        context.limiterPeaks = [Float](repeating: 0, count: capacity)
+                        context.limiterGains = [Float](repeating: 1, count: capacity)
+                    }
+                    context.limiterGain = 1
                     context.isFloatPCM = format.mFormatID == kAudioFormatLinearPCM &&
                                          (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0 &&
                                          (format.mFormatFlags & kAudioFormatFlagIsBigEndian) == 0 &&
@@ -388,6 +519,7 @@ public final class TrapTubeEQManager: NSObject {
                     let raw = MTAudioProcessingTapGetStorage(tap)
                     let context = Unmanaged<EQTapContext>.fromOpaque(raw).takeUnretainedValue()
                     context.states.removeAll(keepingCapacity: true)
+                    context.limiterGain = 1
                 },
                 process: { tap, frames, _, bufferList, framesOut, flagsOut in
                     let status = MTAudioProcessingTapGetSourceAudio(tap, frames, bufferList, flagsOut, nil, framesOut)
@@ -500,7 +632,8 @@ public final class TrapTubeEQManager: NSObject {
         let master = masterPercent / 100
         let enabled = eqEnabled
         lock.unlock()
-        // Bypass: samples pass bit-transparent, including no saturation stage.
+        // Bypass: samples pass bit-transparent - no cascade, no
+        // headroom compensation, no limiter.
         guard enabled else { return }
         let sampleRate = context.sampleRate
         let buffers = UnsafeMutableAudioBufferListPointer(list)
@@ -519,44 +652,169 @@ public final class TrapTubeEQManager: NSObject {
         context.coefficients[16] = BiquadCoefficients.lowShelf(
             frequency: min(100, sampleRate * 0.20), gainDB: Double(bass), sampleRate: sampleRate
         )
-        for (bufferIndex, buffer) in buffers.enumerated() {
-            guard let data = buffer.mData else { continue }
-            let channels = max(1, Int(buffer.mNumberChannels))
-            if context.isFloatPCM {
-                guard buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
-                let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
-                let pcm = data.bindMemory(to: Float.self, capacity: samples)
-                for sample in 0..<samples {
-                    pcm[sample] = processSample(pcm[sample], master: master, channel: sample % channels,
-                                                bufferIndex: bufferIndex, context: context)
-                }
-            } else if context.isInt16PCM {
-                guard buffer.mDataByteSize >= UInt32(MemoryLayout<Int16>.size) else { continue }
-                let samples = min(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size, frameCount * channels)
-                let pcm = data.bindMemory(to: Int16.self, capacity: samples)
-                for sample in 0..<samples {
-                    let input = Float(pcm[sample]) / 32768.0
-                    let output = processSample(input, master: master, channel: sample % channels,
-                                               bufferIndex: bufferIndex, context: context)
-                    pcm[sample] = Int16(min(1, max(-1, output)) * 32767.0)
+        // Round 24: automatic headroom, evaluated from the REAL
+        // coefficients just designed (the shared computation -
+        // see headroomCompensationDB) and folded into the
+        // pre-gain ahead of the user's master: a boosted curve
+        // arrives at the limiter already level-compensated
+        // instead of slamming it.
+        let peakBoost = Self.peakBoostDB(coefficients: context.coefficients, sampleRate: sampleRate)
+        let preGain = master * powf(10, Float(-peakBoost) / 20)
+        // Round 24: the tap's soft limiter, replacing the old
+        // per-sample tanh waveshaper (which, fed a hot boosted
+        // signal, spent its life in the saturation region and
+        // WAS the distortion users heard on bass-heavy presets).
+        // This is a true gain-reduction limiter: pass 1 runs the
+        // cascade and records the per-frame peak across ALL
+        // buffers and channels; an attack/release envelope turns
+        // the peaks into ONE gain per frame (stereo-linked, so
+        // the image never shifts); pass 2 applies that gain and
+        // a soft saturation ceiling as the last-resort guard for
+        // transients that outrun the attack. Working ceiling is
+        // -1 dBFS. Everything runs on the context's prepare-time
+        // scratch (chunked to its capacity), so the callback
+        // stays allocation-free with no locks taken here - the
+        // settings snapshot above remains the only lock.
+        // Enable state: always on while the EQ is enabled. The
+        // tap path has never honored the Ghost engine's FX
+        // settings (they are engine features by construction),
+        // so there is no existing toggle to tie this to; a
+        // protective limiter the user cannot switch off is the
+        // point of the distortion fix. When the EQ is disabled
+        // the whole stage is skipped (bit-transparent, above).
+        let ceiling: Float = 0.8913 // -1 dBFS
+        let limiting = !context.limiterPeaks.isEmpty
+        let chunkSize = limiting ? context.limiterPeaks.count : frameCount
+        let attackStep = 1 - expf(-1 / (0.0002 * Float(sampleRate)))
+        let releaseStep = 1 - expf(-1 / (0.15 * Float(sampleRate)))
+        var frameStart = 0
+        while frameStart < frameCount {
+            let frameEnd = min(frameStart + chunkSize, frameCount)
+            let chunkFrames = frameEnd - frameStart
+            if limiting {
+                for frame in 0..<chunkFrames { context.limiterPeaks[frame] = 0 }
+            }
+            // Pass 1: cascade in place (+ peak tracking).
+            for (bufferIndex, buffer) in buffers.enumerated() {
+                guard let data = buffer.mData else { continue }
+                let channels = max(1, Int(buffer.mNumberChannels))
+                let firstSample = frameStart * channels
+                if context.isFloatPCM {
+                    guard buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
+                    let total = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
+                    let lastSample = min(frameEnd * channels, total)
+                    guard lastSample > firstSample else { continue }
+                    let pcm = data.bindMemory(to: Float.self, capacity: total)
+                    for sample in firstSample..<lastSample {
+                        let value = processCascadeSample(pcm[sample] * preGain,
+                                                         channel: sample % channels,
+                                                         bufferIndex: bufferIndex, context: context)
+                        pcm[sample] = value
+                        if limiting {
+                            let frame = sample / channels - frameStart
+                            let magnitude = abs(value)
+                            if magnitude > context.limiterPeaks[frame] {
+                                context.limiterPeaks[frame] = magnitude
+                            }
+                        }
+                    }
+                } else if context.isInt16PCM {
+                    guard buffer.mDataByteSize >= UInt32(MemoryLayout<Int16>.size) else { continue }
+                    let total = min(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size, frameCount * channels)
+                    let lastSample = min(frameEnd * channels, total)
+                    guard lastSample > firstSample else { continue }
+                    let pcm = data.bindMemory(to: Int16.self, capacity: total)
+                    for sample in firstSample..<lastSample {
+                        let input = Float(pcm[sample]) / 32768.0
+                        let value = processCascadeSample(input * preGain,
+                                                         channel: sample % channels,
+                                                         bufferIndex: bufferIndex, context: context)
+                        pcm[sample] = Int16(min(1, max(-1, value)) * 32767.0)
+                        if limiting {
+                            let frame = sample / channels - frameStart
+                            let magnitude = abs(value)
+                            if magnitude > context.limiterPeaks[frame] {
+                                context.limiterPeaks[frame] = magnitude
+                            }
+                        }
+                    }
                 }
             }
+            if limiting {
+                // The envelope: dive toward the needed reduction
+                // with a ~0.2 ms attack, come back over ~150 ms.
+                var gain = context.limiterGain
+                for frame in 0..<chunkFrames {
+                    let peak = context.limiterPeaks[frame]
+                    let target: Float = peak > ceiling ? ceiling / peak : 1
+                    if target < gain {
+                        gain += attackStep * (target - gain)
+                    } else {
+                        gain += releaseStep * (target - gain)
+                    }
+                    context.limiterGains[frame] = gain
+                }
+                context.limiterGain = gain
+                // Pass 2: apply the linked gain + soft ceiling.
+                for (bufferIndex, buffer) in buffers.enumerated() {
+                    guard let data = buffer.mData else { continue }
+                    let channels = max(1, Int(buffer.mNumberChannels))
+                    let firstSample = frameStart * channels
+                    if context.isFloatPCM {
+                        guard buffer.mDataByteSize >= UInt32(MemoryLayout<Float>.size) else { continue }
+                        let total = min(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size, frameCount * channels)
+                        let lastSample = min(frameEnd * channels, total)
+                        guard lastSample > firstSample else { continue }
+                        let pcm = data.bindMemory(to: Float.self, capacity: total)
+                        for sample in firstSample..<lastSample {
+                            let frame = sample / channels - frameStart
+                            pcm[sample] = softCeiling(pcm[sample] * context.limiterGains[frame],
+                                                      ceiling: ceiling)
+                        }
+                    } else if context.isInt16PCM {
+                        guard buffer.mDataByteSize >= UInt32(MemoryLayout<Int16>.size) else { continue }
+                        let total = min(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size, frameCount * channels)
+                        let lastSample = min(frameEnd * channels, total)
+                        guard lastSample > firstSample else { continue }
+                        let pcm = data.bindMemory(to: Int16.self, capacity: total)
+                        for sample in firstSample..<lastSample {
+                            let frame = sample / channels - frameStart
+                            let value = softCeiling(Float(pcm[sample]) / 32768.0 * context.limiterGains[frame],
+                                                    ceiling: ceiling)
+                            pcm[sample] = Int16(min(1, max(-1, value)) * 32767.0)
+                        }
+                    }
+                }
+            }
+            frameStart = frameEnd
         }
     }
 
-    private func processSample(_ input: Float, master: Float, channel: Int,
-                               bufferIndex: Int, context: EQTapContext) -> Float {
-        var value = input * master
+    /// One sample through the 17 designed sections (16 peaking
+    /// bands + the bass shelf). The pre-gain (master x headroom)
+    /// is the caller's; level protection is the limiter's, in
+    /// processTapBuffers.
+    private func processCascadeSample(_ input: Float, channel: Int,
+                                      bufferIndex: Int, context: EQTapContext) -> Float {
+        var value = input
         for band in 0..<17 {
             let stateIndex = channel * 17 + band
             value = context.states[bufferIndex][stateIndex].process(value, context.coefficients[band])
         }
-        let magnitude = abs(value)
-        if magnitude > 0.85 {
-            let compressed = 0.85 + 0.15 * tanhf((magnitude - 0.85) / 0.15)
-            return value < 0 ? -compressed : compressed
-        }
         return value
+    }
+
+    /// The limiter's last-resort ceiling: a soft saturation whose
+    /// asymptote sits just above the -1 dBFS working ceiling. The
+    /// gain reduction does the real work; this only catches what
+    /// outruns the attack inside a single frame, and unlike the
+    /// pre-Round-24 waveshaper it is fed a compensated signal, so
+    /// it engages on transients instead of living in saturation.
+    private func softCeiling(_ value: Float, ceiling: Float) -> Float {
+        let magnitude = abs(value)
+        guard magnitude > ceiling else { return value }
+        let capped = ceiling + 0.05 * tanhf((magnitude - ceiling) / 0.05)
+        return value < 0 ? -capped : capped
     }
 
     @objc private func handleInterruption(_ note: Notification) {
