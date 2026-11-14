@@ -5,6 +5,7 @@ import SwiftUI
 import UIKit
 import WebKit
 import CryptoKit
+import MediaPlayer
 
 // MARK: - Musi-style stream resolution
 //
@@ -68,6 +69,25 @@ enum TrapTubeErrorFormatting {
             return description
         }
         return "Playback failed (\(describe(error)))"
+    }
+
+    /// Round 23: the ONE line the video area shows on a terminal
+    /// failure. The resolver's full ladder stays in the Diag line
+    /// and the EQ status (both carry describe() output); the
+    /// overlay gets plain language and a next action instead of a
+    /// client-profile dump ending in a raw reason string.
+    static func userFacingPlaybackFailure(_ error: Error) -> String {
+        if let playerError = error as? TrapTubePlayerError {
+            switch playerError {
+            case .invalidVideoID:
+                return playerError.errorDescription ?? "That link or ID doesn't look like a YouTube video."
+            case .network:
+                return "Couldn't reach YouTube — check your connection and try again."
+            case .unplayable, .allProfilesFailed, .cipherProtected, .noPlayableFormat:
+                return "This video couldn't be played — YouTube may be restricting it. Try another video."
+            }
+        }
+        return "Playback stopped — the stream failed. Try another video."
     }
 }
 
@@ -498,6 +518,12 @@ enum TrapTubeStreamResolver {
         let apiKey: String
         let userAgent: String
         let context: [String: Any]
+        /// Round 23: only the AUTH-WEB retry profile sets this.
+        /// Its request is not built here at all - fetchPlayerResponse
+        /// routes it to TrapTubeInnerTube's authenticated WEB
+        /// player request - so it never joins the signed-out
+        /// ladder and never carries auth headers of its own here.
+        var authenticated: Bool = false
     }
 
     private static let profiles: [ClientProfile] = [
@@ -571,11 +597,33 @@ enum TrapTubeStreamResolver {
     // resolution (profile attempt, response summary, item built, or the
     // real per-profile failure) to the player UI, so a screenshot of the
     // player IS the diagnosis instead of another round of guessing.
+    /// Round 23: the signed-in retry profile. NOT a member of the
+    /// signed-out ladder above: resolve() runs it alone, once,
+    /// after every signed-out profile has failed, and only when
+    /// the app holds a session. Its apiKey/context are never read -
+    /// fetchPlayerResponse routes it to TrapTubeInnerTube's
+    /// authenticated WEB player request - while its name and user
+    /// agent label the ladder steps, the failure accounting and the
+    /// Ghost source exactly like a real profile's, and WEB_EMBEDDED
+    /// stays the last SIGNED-OUT attempt either way.
+    private static let authenticatedProfile = ClientProfile(
+        name: "AUTH-WEB",
+        apiKey: "",
+        userAgent: TrapTubeInnerTube.webUserAgent,
+        context: [:],
+        authenticated: true)
+
     static func resolve(videoID: String, onStep: ((String) -> Void)? = nil) async throws -> TrapTubeResolvedPlayback {
         var sawCipher = false
         var lastPlayability: String?
         var failures: [String] = []
-        for profile in profiles {
+        // Round 23: the per-profile ladder as one local pass, so
+        // the signed-in retry below can run the IDENTICAL pass
+        // (same fall-through, same in-loop item construction, same
+        // accounting) over the AUTH-WEB profile once the signed-out
+        // ladder is exhausted.
+        func runLadder(over ladderProfiles: [ClientProfile]) async -> TrapTubeResolvedPlayback? {
+        for profile in ladderProfiles {
             do {
                 onStep?("\(profile.name): requesting")
                 let json = try await fetchPlayerResponse(videoID: videoID, profile: profile)
@@ -583,10 +631,18 @@ enum TrapTubeStreamResolver {
                    let status = playability["status"] as? String, status != "OK" {
                     lastPlayability = (playability["reason"] as? String) ?? status
                     onStep?("\(profile.name): playability \(status) - \(lastPlayability ?? status)")
+                    // Round 23: a playability refusal is a ladder
+                    // outcome like any other - record it in the
+                    // failure accounting too, so a terminal error
+                    // (and the Diag behind it) names EVERY profile
+                    // and its verdict in order, never just the
+                    // last profile that happened to answer.
+                    failures.append("\(profile.name): playability \(status) - \(lastPlayability ?? status)")
                     continue
                 }
                 guard let streaming = json["streamingData"] as? [String: Any] else {
                     failures.append("\(profile.name): no streaming data in the response")
+                    onStep?("\(profile.name): no streaming data in the response")
                     continue
                 }
                 let details = json["videoDetails"] as? [String: Any]
@@ -597,9 +653,13 @@ enum TrapTubeStreamResolver {
                 let adaptive = formatList(streaming["adaptiveFormats"])
                 let directCount = (muxed + adaptive).filter { $0.url != nil }.count
                 onStep?("\(profile.name): playability OK, \(muxed.count) muxed + \(adaptive.count) adaptive, \(directCount) direct URLs")
-                if muxed.isEmpty && adaptive.isEmpty { continue }
+                if muxed.isEmpty && adaptive.isEmpty {
+                    onStep?("\(profile.name): playability OK but the response carried no formats")
+                    continue
+                }
                 if muxed.allSatisfy({ $0.url == nil }) && adaptive.allSatisfy({ $0.url == nil }) {
                     sawCipher = true
+                    onStep?("\(profile.name): every format is signature-protected (no direct URLs)")
                     continue
                 }
 
@@ -725,6 +785,21 @@ enum TrapTubeStreamResolver {
                 continue
             }
         }
+        return nil
+        }
+        if let resolved = await runLadder(over: profiles) { return resolved }
+        // Round 23: every signed-out profile failed. When the app
+        // holds a signed-in session (the SAPISID cookie flow from
+        // the feed's Sign in), run the same ladder once over the
+        // AUTH-WEB profile before declaring failure: a class of
+        // videos every signed-out client is refused (age gates,
+        // some rights restrictions) answers the signed-in WEB
+        // client, and "This video is unavailable" to a signed-out
+        // client is not always the last word.
+        if TrapTubeYouTubeAuth.isSignedIn {
+            onStep?("AUTH-WEB: signed-in retry - every signed-out profile failed")
+            if let resolved = await runLadder(over: [authenticatedProfile]) { return resolved }
+        }
         if !failures.isEmpty {
             throw TrapTubePlayerError.allProfilesFailed(failures.joined(separator: " | "))
         }
@@ -801,6 +876,17 @@ enum TrapTubeStreamResolver {
     }
 
     private static func fetchPlayerResponse(videoID: String, profile: ClientProfile) async throws -> [String: Any] {
+        // Round 23: the AUTH-WEB retry is not a signed-out client
+        // request at all - TrapTubeInnerTube builds it on the WEB
+        // client with the saved session attached (the one place in
+        // this codebase auth headers are ever attached to a
+        // request). It runs only as resolve()'s last resort, after
+        // every signed-out profile failed, so the Round 14 rule
+        // below stands untouched: the signed-out ladder itself
+        // still carries no auth headers, ever.
+        if profile.authenticated {
+            return try await TrapTubeInnerTube.postPlayerResponseAuthenticated(videoID: videoID)
+        }
         guard let endpoint = URL(string: "https://www.youtube.com/youtubei/v1/player?key=\(profile.apiKey)&prettyPrint=false") else {
             throw TrapTubePlayerError.network("bad endpoint")
         }
@@ -1014,6 +1100,103 @@ private final class TrapTubePiPDelegateBridge: NSObject, AVPictureInPictureContr
     }
 }
 
+// MARK: - Now Playing (lock screen / Control Center)
+
+// Round 23: the native player publishes the standard iOS
+// now-playing info and answers the shared remote command center,
+// so a stream keeps playing - and stays controllable from the
+// lock screen and Control Center - when the phone locks or the
+// user switches apps. MPNowPlayingInfoCenter and
+// MPRemoteCommandCenter are per-PROCESS and shared with the host
+// app, so this coordinator arbitrates honestly instead of
+// fighting the host: a session's info is stamped with its own
+// video ID, and the remote handlers act only while that stamp is
+// still the panel's current content. When the user plays in
+// YouTube's own player instead, the host overwrites the info, the
+// stamp disappears, and these handlers stand down (the host's own
+// panel - and YTPlus's background playback - govern that surface).
+// Next/previous track are deliberately NOT wired: this player has
+// no queue (feed taps and searches load single videos), and
+// claiming transport buttons that do nothing would be worse than
+// not claiming them.
+enum TrapTubeNowPlaying {
+    static let stampKey = "TrapTubeNowPlayingVideoID"
+    private static weak var activeController: TrapTubePlayerController?
+    private static var commandsInstalled = false
+
+    static func claim(by controller: TrapTubePlayerController) {
+        activeController = controller
+        installCommandsIfNeeded()
+    }
+
+    /// The session is over for real (stop()'s teardown path - not
+    /// a minimize or a PiP dismissal, which keep the session, and
+    /// its panel, alive). Clear the panel only if it is still
+    /// this session's.
+    static func release(by controller: TrapTubePlayerController) {
+        guard activeController === controller else { return }
+        activeController = nil
+        if let videoID = controller.loadedVideoID, isStampCurrent(videoID: videoID) {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
+    }
+
+    static func isStampCurrent(videoID: String) -> Bool {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[stampKey] as? String == videoID
+    }
+
+    /// The controller a remote command may act on right now: the
+    /// claimed session, and only while its stamp still owns the
+    /// panel.
+    private static func liveController() -> TrapTubePlayerController? {
+        guard let controller = activeController,
+              let videoID = controller.loadedVideoID,
+              isStampCurrent(videoID: videoID) else { return nil }
+        return controller
+    }
+
+    private static func installCommandsIfNeeded() {
+        guard !commandsInstalled else { return }
+        commandsInstalled = true
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.addTarget { _ in
+            guard let controller = liveController() else { return .commandFailed }
+            DispatchQueue.main.async { controller.remotePlay() }
+            return .success
+        }
+        center.pauseCommand.addTarget { _ in
+            guard let controller = liveController() else { return .commandFailed }
+            DispatchQueue.main.async { controller.remotePause() }
+            return .success
+        }
+        center.togglePlayPauseCommand.addTarget { _ in
+            guard let controller = liveController() else { return .commandFailed }
+            DispatchQueue.main.async { controller.remoteTogglePlayPause() }
+            return .success
+        }
+        center.changePlaybackPositionCommand.addTarget { event in
+            guard let controller = liveController(),
+                  let positionEvent = event as? MPChangePlaybackPositionCommandEvent
+            else { return .commandFailed }
+            let position = positionEvent.positionTime
+            DispatchQueue.main.async { controller.remoteSeek(to: position) }
+            return .success
+        }
+        center.skipForwardCommand.preferredIntervals = [15]
+        center.skipForwardCommand.addTarget { _ in
+            guard let controller = liveController() else { return .commandFailed }
+            DispatchQueue.main.async { controller.remoteSkip(by: 15) }
+            return .success
+        }
+        center.skipBackwardCommand.preferredIntervals = [15]
+        center.skipBackwardCommand.addTarget { _ in
+            guard let controller = liveController() else { return .commandFailed }
+            DispatchQueue.main.async { controller.remoteSkip(by: -15) }
+            return .success
+        }
+    }
+}
+
 @MainActor
 final class TrapTubePlayerController: ObservableObject {
     let player = AVPlayer()
@@ -1021,6 +1204,16 @@ final class TrapTubePlayerController: ObservableObject {
     private var timeObserver: Any?
     private var itemStatusObservation: NSKeyValueObservation?
     private var loadTask: Task<Void, Never>?
+
+    // Round 23: lifecycle observer tokens (audio-session
+    // interruption, foreground return, item end), the interruption
+    // resume note, and the now-playing artwork cache.
+    private var interruptionObserver: NSObjectProtocol?
+    private var foregroundObserver: NSObjectProtocol?
+    private var itemEndObserver: NSObjectProtocol?
+    private var interruptedWhilePlaying = false
+    private var nowPlayingArtwork: UIImage?
+    private var nowPlayingArtworkVideoID: String?
 
     // Picture-in-picture state. The controller owns the PiP controller and
     // its delegate bridge; the inline view hands its AVPlayerLayer over via
@@ -1043,6 +1236,12 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var author = ""
     @Published var isLoading = false
     @Published var errorMessage: String?
+    /// Round 23: set the moment a load (or its item) fails for
+    /// real, cleared the moment a load starts. The audio-path and
+    /// playback-state lines read it, so a failed load SETTLES -
+    /// "LOAD FAILED" / "failed to load" - instead of hanging on
+    /// "GHOST STARTING..." / "idle" (the Build 207 screenshot).
+    @Published var loadFailed = false
     @Published var isPlaying = false
     @Published var isMuted = false
     @Published var currentTime: Double = 0
@@ -1084,6 +1283,7 @@ final class TrapTubePlayerController: ObservableObject {
     /// style. Empty on the plain tap path, where the view keeps
     /// showing the EQ manager's attach status instead.
     var pathStatusText: String {
+        if loadFailed { return "LOAD FAILED" }
         if usingTapFallback { return "TAP (FALLBACK)" }
         guard audioPath == .ghost else { return "" }
         switch ghostFeed {
@@ -1115,6 +1315,7 @@ final class TrapTubePlayerController: ObservableObject {
     // state instead of a spinner and a guess.
     @Published var playbackStateLine: String = "idle"
     private func makePlaybackStateLine() -> String {
+        if loadFailed { return "failed to load" }
         let state: String
         switch player.timeControlStatus {
         case .playing: state = "playing"
@@ -1147,11 +1348,16 @@ final class TrapTubePlayerController: ObservableObject {
     private var heartbeatResolveReturned = false
     private weak var heartbeatItem: AVPlayerItem?
 
-    /// Append one milestone to the diagnostics trail (keeps the most
-    /// recent few so the line stays compact and readable).
+    /// Append one milestone to the diagnostics trail. Round 23:
+    /// the trail keeps the WHOLE ladder (up to 30 steps) - under
+    /// the old 3-step trim, a terminal failure's Diag appeared to
+    /// START at WEB_EMBEDDED because the IOS and ANDROID steps had
+    /// already scrolled out of the trail by the time the failure
+    /// landed (the Build 207 screenshot). The Diag is fine print;
+    /// completeness there is worth more than compactness.
     func noteDiagnostic(_ step: String) {
         diagSteps.append(step)
-        if diagSteps.count > 3 { diagSteps.removeFirst(diagSteps.count - 3) }
+        if diagSteps.count > 30 { diagSteps.removeFirst(diagSteps.count - 30) }
         diagnosticsLine = "Diag: " + diagSteps.joined(separator: " > ")
         NSLog("[TrapTube Player] Diag: %@", step)
     }
@@ -1235,13 +1441,172 @@ final class TrapTubePlayerController: ObservableObject {
                     self.heartbeatTask = nil
                 }
                 if let itemDuration = self.player.currentItem?.duration.seconds,
-                   itemDuration.isFinite {
+                   itemDuration.isFinite, itemDuration != self.duration {
                     self.duration = itemDuration
+                    // Round 23: the panel learns the real duration
+                    // when the item reports it (the load-time
+                    // publish usually precedes it).
+                    self.publishNowPlayingInfo()
                 }
                 self.isPlaying = self.player.timeControlStatus == .playing
                 self.playbackStateLine = self.makePlaybackStateLine()
                 self.checkSponsorSegments()
             }
+        // Round 23: background/lock-screen lifecycle. The Ghost
+        // engine renders on its own schedule while backgrounded -
+        // it never needed a timer to keep audio flowing - but
+        // interruptions and foreground returns are acted on here:
+        // an interruption end re-activates the session and resumes
+        // at position, and a foreground return forces the drift
+        // check the possibly-suspended sync loop skipped over.
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] note in
+                self?.handleAudioInterruption(note)
+            }
+        foregroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil, queue: .main) { [weak self] _ in
+                self?.handleReturnToForeground()
+            }
+    }
+
+    deinit {
+        for token in [interruptionObserver, foregroundObserver, itemEndObserver] {
+            if let token { NotificationCenter.default.removeObserver(token) }
+        }
+    }
+
+    // MARK: Now Playing / background lifecycle (Round 23)
+
+    /// Publish (or refresh) this session's now-playing info: title,
+    /// channel as artist, the thumbnail as artwork once it lands,
+    /// duration, elapsed time and the honest playback rate (0
+    /// unless actually playing). Called on load, on every
+    /// transport action and seek, on item end and on interruption
+    /// edges, so the lock screen never shows a state the player
+    /// isn't actually in.
+    func publishNowPlayingInfo() {
+        guard let videoID = loadedVideoID, player.currentItem != nil else { return }
+        TrapTubeNowPlaying.claim(by: self)
+        var info: [String: Any] = [:]
+        info[MPMediaItemPropertyTitle] = title.isEmpty ? "TrapTube Player" : title
+        info[MPMediaItemPropertyArtist] = author
+        info[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.video.rawValue
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = currentTime
+        info[MPNowPlayingInfoPropertyPlaybackRate] =
+            player.timeControlStatus == .playing ? Double(rate) : 0
+        info[MPNowPlayingInfoPropertyIsLiveStream] = false
+        if duration.isFinite, duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        if let artwork = nowPlayingArtwork {
+            info[MPMediaItemPropertyArtwork] =
+                MPMediaItemArtwork(boundsSize: artwork.size) { _ in artwork }
+        }
+        info[TrapTubeNowPlaying.stampKey] = videoID
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    /// The video's thumbnail, fetched once per video for the lock
+    /// screen; republished when it lands if the session is still
+    /// on the same video.
+    private func fetchNowPlayingArtwork(videoID: String) {
+        guard nowPlayingArtworkVideoID != videoID else { return }
+        nowPlayingArtworkVideoID = videoID
+        nowPlayingArtwork = nil
+        guard let url = URL(string: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg") else { return }
+        Task { [weak self] in
+            guard let (data, _) = try? await URLSession.shared.data(from: url),
+                  let image = UIImage(data: data) else { return }
+            guard let self, self.loadedVideoID == videoID else { return }
+            self.nowPlayingArtwork = image
+            self.publishNowPlayingInfo()
+        }
+    }
+
+    // Remote-command entry points. The coordinator has already
+    // verified this session still owns the panel; these drive the
+    // same transport the on-screen controls drive, so a lock
+    // screen seek hard-resyncs Ghost exactly like an in-app one
+    // (every seek funnels through seek -> noteUserSeek).
+    func remotePlay() {
+        guard player.currentItem != nil, player.timeControlStatus != .playing else { return }
+        togglePlayPause()
+    }
+
+    func remotePause() {
+        guard player.timeControlStatus == .playing else { return }
+        togglePlayPause()
+    }
+
+    func remoteTogglePlayPause() { togglePlayPause() }
+
+    func remoteSeek(to seconds: Double) { seek(to: seconds) }
+
+    func remoteSkip(by seconds: Double) { skip(by: seconds) }
+
+    private func handleAudioInterruption(_ note: Notification) {
+        guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+        switch type {
+        case .began:
+            interruptedWhilePlaying = player.timeControlStatus == .playing
+            noteDiagnostic("audio interruption began")
+            publishNowPlayingInfo()
+        case .ended:
+            let options = AVAudioSession.InterruptionOptions(
+                rawValue: (note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt) ?? 0)
+            let resume = interruptedWhilePlaying && options.contains(.shouldResume)
+            noteDiagnostic("audio interruption ended (resume: \(resume))")
+            interruptedWhilePlaying = false
+            guard resume, player.currentItem != nil else { return }
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                NSLog("[TrapTube Player] Session reactivation after interruption failed: %@",
+                      TrapTubeErrorFormatting.describe(error))
+            }
+            // The same resume shape as a manual play: the video leg
+            // at the session rate, the Ghost leg told to render.
+            player.rate = rate
+            ghost.setDesiredPlaying(true)
+            ghost.resumeRendering()
+            publishNowPlayingInfo()
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleReturnToForeground() {
+        guard player.currentItem != nil else { return }
+        if player.timeControlStatus == .playing {
+            try? AVAudioSession.sharedInstance().setActive(true)
+        }
+        // While the app was backgrounded, the 5 Hz sync loop's
+        // timer may have been suspended even though the audio
+        // engine kept rendering on schedule - so on return,
+        // measure the drift once, immediately, and hard-resync
+        // past the usual 120 ms threshold instead of waiting for a
+        // tick to notice.
+        if audioPath == .ghost, !usingTapFallback, ghostFeed != .none,
+           let audioTime = ghost.position() {
+            let videoTime = player.currentTime().seconds
+            if videoTime.isFinite {
+                let drift = audioTime - videoTime
+                ghostDriftMs = Int((drift * 1000).rounded())
+                if abs(drift) > 0.120, player.timeControlStatus == .playing {
+                    noteDiagnostic("foreground return: drift \(ghostDriftMs ?? 0) ms - hard resync")
+                    Task { [weak self] in await self?.hardResyncGhost() }
+                }
+            }
+        }
+        publishNowPlayingInfo()
+    }
+
+    private func handleItemDidPlayToEnd() {
+        noteDiagnostic("item played to end")
+        publishNowPlayingInfo()
     }
 
     func load(videoID: String) {
@@ -1276,8 +1641,11 @@ final class TrapTubePlayerController: ObservableObject {
         heartbeatItem = nil
         itemStatusObservation?.invalidate()
         itemStatusObservation = nil
+        itemEndObserver.map { NotificationCenter.default.removeObserver($0) }
+        itemEndObserver = nil
         isLoading = true
         errorMessage = nil
+        loadFailed = false
         title = ""
         author = ""
         diagSteps = []
@@ -1315,10 +1683,19 @@ final class TrapTubePlayerController: ObservableObject {
                 self.title = resolved.title
                 self.author = resolved.author
                 self.observeItemStatus(resolved.item)
+                self.itemEndObserver = NotificationCenter.default.addObserver(
+                    forName: .AVPlayerItemDidPlayToEndTime, object: resolved.item,
+                    queue: .main) { [weak self] _ in self?.handleItemDidPlayToEnd() }
                 self.player.replaceCurrentItem(with: resolved.item)
                 self.isLoading = false
                 self.player.play()
                 self.noteDiagnostic("item set, play() called")
+                // Round 23: claim the lock-screen panel for this
+                // session - title and channel publish now, the
+                // thumbnail artwork republishes when it lands, the
+                // real duration when the item reports it.
+                self.fetchNowPlayingArtwork(videoID: videoID)
+                self.publishNowPlayingInfo()
                 // Round 19: land the EQ tap NOW, while the resolver's
                 // validated tracks are still loaded, instead of waiting
                 // for the hook's KVO round-trip and async track load.
@@ -1349,8 +1726,15 @@ final class TrapTubePlayerController: ObservableObject {
                 self.heartbeatTask?.cancel()
                 self.heartbeatTask = nil
                 self.isLoading = false
+                // Round 23: settle every status honestly - the
+                // path line reads LOAD FAILED, the playback line
+                // reads "failed to load", and the video area gets
+                // ONE plain-language line. The full resolver trail
+                // stays where it belongs: the Diag above and the
+                // EQ status below.
+                self.loadFailed = true
                 self.noteDiagnostic("LOAD FAILED: \(TrapTubeErrorFormatting.describe(error))")
-                self.errorMessage = TrapTubeErrorFormatting.playbackFailure(error)
+                self.errorMessage = TrapTubeErrorFormatting.userFacingPlaybackFailure(error)
                 // No item ever existed, so no EQ attach could start: say
                 // so plainly instead of leaving the status line sitting
                 // on a stale "attaching..." from the hook probe. Round 15:
@@ -1467,14 +1851,16 @@ final class TrapTubePlayerController: ObservableObject {
                 guard let self else { return }
                 if let itemError {
                     self.noteDiagnostic("ITEM FAILED: \(TrapTubeErrorFormatting.describe(itemError))")
-                    self.errorMessage = TrapTubeErrorFormatting.playbackFailure(itemError)
+                    self.loadFailed = true
+                    self.errorMessage = TrapTubeErrorFormatting.userFacingPlaybackFailure(itemError)
                     NSLog("[TrapTube Player] Item failed after creation: %@",
                           TrapTubeErrorFormatting.describe(itemError))
                     TrapTubeEQManager.shared.setAttachmentStatus(
                         "Playback failed before EQ could attach - \(TrapTubeErrorFormatting.describe(itemError))")
                 } else {
                     self.noteDiagnostic("ITEM FAILED: status .failed with no error object")
-                    self.errorMessage = "Playback failed (AVPlayerItem status became .failed with no error object)"
+                    self.loadFailed = true
+                    self.errorMessage = "Playback stopped — the stream failed. Try another video."
                     TrapTubeEQManager.shared.setAttachmentStatus("Playback failed before EQ could attach")
                 }
                 self.isLoading = false
@@ -1552,6 +1938,7 @@ final class TrapTubePlayerController: ObservableObject {
             ghost.setDesiredPlaying(true)
         }
         isPlaying = player.timeControlStatus == .playing
+        publishNowPlayingInfo()
     }
 
     /// Mute toggle for the player card's speaker button. The EQ tap sits
@@ -1576,12 +1963,14 @@ final class TrapTubePlayerController: ObservableObject {
         player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
         noteUserSeek()
+        publishNowPlayingInfo()
     }
 
     func seek(to seconds: Double) {
         player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
                     toleranceBefore: .zero, toleranceAfter: .zero)
         noteUserSeek()
+        publishNowPlayingInfo()
     }
 
     /// Round 20: a user seek moves the video instantly; the ghost
@@ -1596,6 +1985,7 @@ final class TrapTubePlayerController: ObservableObject {
         rate = newRate
         if player.timeControlStatus == .playing { player.rate = newRate }
         ghost.setBaselineRate(newRate)
+        publishNowPlayingInfo()
     }
 
     // MARK: Fullscreen + Picture in Picture
@@ -1854,6 +2244,12 @@ final class TrapTubePlayerController: ObservableObject {
         ghost.shutdown()
         ghostFeed = .none
         ghostDriftMs = nil
+        // Round 23: the session is over for real - release the
+        // lock-screen panel. The minimize and PiP returns above
+        // keep it: playback, and its panel, continue there.
+        TrapTubeNowPlaying.release(by: self)
+        itemEndObserver.map { NotificationCenter.default.removeObserver($0) }
+        itemEndObserver = nil
         if Self.retainedForMiniPlayer === self { Self.retainedForMiniPlayer = nil }
         loadTask?.cancel()
         watchdogTask?.cancel()
@@ -3216,6 +3612,32 @@ enum TrapTubeInnerTube {
         guard attempt.status == 200 else {
             throw TrapTubePlayerError.network(
                 "YouTube refused the request: \(httpErrorMessage(attempt.json, status: attempt.status))")
+        }
+        return attempt.json
+    }
+
+    /// Round 23: the player endpoint on the WEB client WITH the
+    /// saved session attached - the resolver's AUTH-WEB retry. It
+    /// exists for exactly one job: after every signed-out client
+    /// profile has failed, ask once more as the signed-in user,
+    /// because a class of videos (age gates, some rights
+    /// restrictions) refuses every signed-out client yet answers
+    /// the account. Deliberately NOT routed through post(): that
+    /// helper answers an authenticated refusal by retrying signed
+    /// out, which is exactly backwards here - signed-out is what
+    /// already failed. performPost(authenticated: true) keeps the
+    /// session attachment in the one existing place, and the
+    /// signed-out playback ladder in TrapTubeStreamResolver is
+    /// untouched. The response is the ordinary player JSON the
+    /// resolver's ladder already knows how to build an item from.
+    static func postPlayerResponseAuthenticated(videoID: String) async throws -> [String: Any] {
+        let attempt = try await performPost(
+            endpoint: "https://www.youtube.com/youtubei/v1/player",
+            body: ["videoId": videoID, "racyCheckOk": true, "contentCheckOk": true],
+            authenticated: true)
+        guard attempt.status == 200 else {
+            throw TrapTubePlayerError.network(
+                "YouTube refused the signed-in player request: \(httpErrorMessage(attempt.json, status: attempt.status))")
         }
         return attempt.json
     }
