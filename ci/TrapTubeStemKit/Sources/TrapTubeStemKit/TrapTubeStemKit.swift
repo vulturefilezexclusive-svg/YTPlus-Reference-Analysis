@@ -613,7 +613,7 @@ private struct TrapTubeStemStudioView: View {
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(manager.isEQEnabled ? accent : Color.white.opacity(0.12), in: Capsule())
             }
-            Text("Reverb \(fx.reverbPreset.displayName) · Limiter \(fx.limiterEnabled ? "on" : "off") · Width \(fx.widthPercent)% · Bass +\(Int(manager.bassBoostDB.rounded())) dB · Master \(Int(manager.masterVolumePercent.rounded()))%")
+            Text("Reverb \(fx.reverbPreset.displayName) · Limiter \(fx.limiterEnabled ? "on" : "off") · Width \(fx.widthPercent)% · Bass +\(Int(manager.bassBoostDecibels.rounded())) dB · Master \(Int(manager.masterGainPercent.rounded()))%")
                 .font(.caption).foregroundStyle(Color.white.opacity(0.55))
                 .fixedSize(horizontal: false, vertical: true)
             Button { showEQPanel = true } label: {
