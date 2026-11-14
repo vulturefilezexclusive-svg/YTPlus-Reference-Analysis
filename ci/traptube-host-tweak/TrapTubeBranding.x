@@ -2411,6 +2411,15 @@ DYLD_INTERPOSE(TTReplacementAudioComponentInstanceDispose, AudioComponentInstanc
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:YES forKey:@"advancedMode"];
     [defaults setBool:YES forKey:@"advancedModeReminder"];
+    // Round 23: YTPlus's Background Playback switch (defaults key
+    // backgroundPlayback, per the YTLite settings inventory) ships
+    // unset in the pinned dylib, and an unset switch leaves the
+    // host watch player pausing at lock. Default it ON - written
+    // ONLY when the key has never been set, so a user who turns
+    // it off in the YTPlus settings keeps it off.
+    if ([defaults objectForKey:@"backgroundPlayback"] == nil) {
+        [defaults setBool:YES forKey:@"backgroundPlayback"];
+    }
     [defaults synchronize];
     dispatch_async(dispatch_get_main_queue(), ^{
         TTApplyAccentGlobally();
