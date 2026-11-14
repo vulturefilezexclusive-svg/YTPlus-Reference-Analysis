@@ -543,6 +543,31 @@ final class TrapTubeGhostAudio {
         lastFailureReason = failureTrail.joined(separator: " · ")
     }
 
+    /// Round 29 candidate: the last AVAudioEngine.start() error, so
+    /// an engine that refuses to start names itself in the Diag
+    /// instead of surfacing only as "rendered no progress".
+    private var lastEngineStartError: String?
+
+    /// Starts the engine when it is stopped. Replaces the bare
+    /// `try? engine.start()` call sites, which swallowed the error
+    /// (the silent-exit failure class). Returns true when the engine
+    /// is running afterwards.
+    @discardableResult
+    private func ensureEngineRunning(context: String) -> Bool {
+        if engine.isRunning { lastEngineStartError = nil; return true }
+        do {
+            try engine.start()
+            lastEngineStartError = nil
+            return true
+        } catch {
+            let ns = error as NSError
+            let text = "\(context): engine start failed \(ns.domain) \(ns.code)"
+            lastEngineStartError = text
+            NSLog("[TrapTube Ghost] %@", text)
+            return false
+        }
+    }
+
     /// "Domain code" for an error, naming the DEEPEST underlying
     /// error too when it differs - the surface wrapper (a -11800
     /// or an NSURLErrorDomain -1) is never the actionable part;
@@ -827,6 +852,7 @@ final class TrapTubeGhostAudio {
         if let clone { self.cloneSource = clone }
         if let videoID { self.currentVideoID = videoID }
         failureTrail = []
+        lastEngineStartError = nil
         lastFailureReason = nil
         lastFailureShort = nil
         teardownFeed(deleteTemp: true)
@@ -1093,7 +1119,7 @@ final class TrapTubeGhostAudio {
         }
         feed = feedKind
         startPump()
-        if !engine.isRunning { try? engine.start() }
+        ensureEngineRunning(context: "reader feed start")
         if desiredPlaying { node.play() }
         return true
     }
@@ -1473,7 +1499,7 @@ final class TrapTubeGhostAudio {
         file.framePosition = startFrame
         feed = feedKind
         startFilePump()
-        if !engine.isRunning { try? engine.start() }
+        ensureEngineRunning(context: "file feed start")
         if desiredPlaying { node.play() }
         return true
     }
@@ -1818,7 +1844,7 @@ final class TrapTubeGhostAudio {
     @discardableResult
     func restartEngineIfStopped() -> Bool {
         guard feed != .none, !engine.isRunning else { return false }
-        try? engine.start()
+        ensureEngineRunning(context: "engine restart")
         if desiredPlaying { node.play() }
         return true
     }
@@ -1862,9 +1888,11 @@ final class TrapTubeGhostAudio {
     /// stage instead of being declared live over silence.
     private func confirmOrFail(route: String) async -> Bool {
         if await confirmRendering() { return true }
+        let engineNote = lastEngineStartError.map { " (\($0))" } ?? ""
         recordFailure(route: route,
-                      cause: "primed but rendered no progress within 1.5 s",
-                      short: "\(route) rendered nothing")
+                      cause: "primed but rendered no progress within 1.5 s" + engineNote,
+                      short: lastEngineStartError == nil ? "\(route) rendered nothing"
+                                                         : "\(route) engine start failed")
         teardownFeed(deleteTemp: true)
         return false
     }
@@ -1873,7 +1901,7 @@ final class TrapTubeGhostAudio {
         desiredPlaying = playing
         guard feed != .none else { return }
         if playing {
-            if !engine.isRunning { try? engine.start() }
+            ensureEngineRunning(context: "set desired playing")
             node.play()
         } else {
             node.pause()
@@ -1886,7 +1914,7 @@ final class TrapTubeGhostAudio {
 
     func resumeRendering() {
         guard desiredPlaying, feed != .none else { return }
-        if !engine.isRunning { try? engine.start() }
+        ensureEngineRunning(context: "resume rendering")
         node.play()
     }
 
