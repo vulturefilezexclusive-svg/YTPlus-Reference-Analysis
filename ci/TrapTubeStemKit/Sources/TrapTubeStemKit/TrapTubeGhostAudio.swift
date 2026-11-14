@@ -10,16 +10,22 @@ import Foundation
 // muted while this engine renders the audio-only stream through its
 // own graph - player node -> varispeed -> 10-band EQ -> reverb ->
 // dynamics (limiter) -> main mixer - so the EQ the user hears is a
-// real AVAudioUnitEQ, not a tap. Two feeds: STREAMED (an
-// AVAssetReader pump schedules decoded PCM a few seconds ahead) and
-// FILE (the audio file, fetched through the re-minting downloader
-// below and scheduled by a chunk pump through the same gate) for
-// streams the reader cannot run. Round 22 made Ghost the ONLY audio
-// method (the Ghost/Tap A/B picker is gone); when both feeds fail
-// the player controller still falls back to the Round 19 tap path
-// as a safety net and the status line says TAP (FALLBACK). The
-// Round 22 sound effects (reverb, limiter, virtual-surround width,
-// crossfeed, balance) live in this engine - see TrapTubeFXSettings.
+// real AVAudioUnitEQ, not a tap. Three feeds, tried in order:
+// SAME-ASSET (Round 24: an AVAssetReader over the resolved player
+// item's OWN asset - the stream that just proved it loads on this
+// device), STREAMED (an AVAssetReader pump over an independently
+// minted audio-only URL, scheduling decoded PCM a few seconds
+// ahead) and FILE (the audio file, fetched through the re-minting
+// downloader below and scheduled by a chunk pump through the same
+// gate) for streams the readers cannot run. Round 22 made Ghost
+// the ONLY audio method (the Ghost/Tap A/B picker is gone); when
+// every feed fails the player controller still falls back to the
+// Round 19 tap path as a safety net and the status line says so.
+// Round 24: every feed exit point records WHY (route, cause,
+// error domain/code) in lastFailureReason - a bare "ghost failed"
+// is no longer reachable. The Round 22 sound effects (reverb,
+// limiter, virtual-surround width, crossfeed, balance) live in
+// this engine - see TrapTubeFXSettings.
 //
 // The EQ curve itself stays owned by TrapTubeEQManager (the panel's
 // 16 bands + bass + master). The controller re-applies the manager's
@@ -202,6 +208,19 @@ final class TrapTubeFXSettings {
     private(set) var crossfeedPercent: Float
     private(set) var balance: Float
 
+    /// Round 24: the Ghost limiter's runtime liveness, written by
+    /// every Ghost engine at build time from its ACTUAL unit
+    /// creation result (TrapTubeGhostAudio.init) and read by the
+    /// Sound Effects card ("Limiter: active / unavailable").
+    /// nil until the first Ghost engine exists in this process:
+    /// no engine, no limiter, and the card says that instead of
+    /// implying one is running.
+    private(set) var ghostLimiterAvailability: Bool?
+
+    func noteGhostLimiterAvailability(_ available: Bool) {
+        ghostLimiterAvailability = available
+    }
+
     private init() {
         let defaults = UserDefaults.standard
         reverbPreset = TrapTubeReverbPreset(rawValue: defaults.integer(forKey: Key.reverbPreset)) ?? .off
@@ -266,7 +285,7 @@ final class TrapTubeFXSettings {
 @MainActor
 final class TrapTubeGhostAudio {
     enum Feed {
-        case none, streamed, file
+        case none, sameAsset, streamed, file
     }
 
     struct Source {
@@ -290,20 +309,47 @@ final class TrapTubeGhostAudio {
     private let varispeed = AVAudioUnitVarispeed()
     private let eqUnit = AVAudioUnitEQ(numberOfBands: 10)
     private let reverbUnit = AVAudioUnitReverb()
-    /// Round 22 fix (runs 203/204): the iOS 27 SDK no longer
-    /// vends the AVAudioUnitDynamicsProcessor class to Swift, so
-    /// the very same DynamicsProcessor audio unit is created
-    /// through AVAudioUnit's generic component instantiation
-    /// (see instantiateDynamicsUnit) and configured through its
-    /// AUAudioUnit parameter tree. Nil until that in-process
-    /// instantiation lands - milliseconds after init - and the
-    /// chain simply runs without the limiter stage until then;
-    /// wireChain inserts it the moment it arrives.
-    private var dynamicsUnit: AVAudioUnitEffect?
+    /// Round 24 LIMITER AUDIT. Round 22 created this unit
+    /// through the generic component-instantiation API with an
+    /// empty option set - which loads the unit OUT of process -
+    /// and its completion handler discarded the error parameter
+    /// entirely: a nil unit, a failed cast, or a completion that
+    /// never fired all left the chain silently limiter-less
+    /// while the Sound Effects card implied a limiter was
+    /// running. On a sideloaded build the out-of-process route
+    /// is exactly where that call can die. The fix is
+    /// structural: the unit is created SYNCHRONOUSLY, in
+    /// process, through AVAudioUnitEffect - the same
+    /// construction TrapTubeEQManager uses for its PeakLimiter
+    /// in this very module - so it exists (or not) before init
+    /// returns, wireChain always sees the real answer, and the
+    /// creation result is published to the FX store for the
+    /// Sound Effects card's "Limiter: active / unavailable"
+    /// line. Configuration still goes through the AUAudioUnit
+    /// parameter tree (see configureDynamicsUnit).
+    private let dynamicsUnit: AVAudioUnitEffect? = {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_DynamicsProcessor,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0)
+        return AVAudioUnitEffect(audioComponentDescription: description)
+    }()
+
+    /// Whether the limiter unit exists - created, attached and
+    /// wired into the chain by wireChain. This (not the toggle)
+    /// is what the Sound Effects card's status line reports.
+    var limiterAvailable: Bool { dynamicsUnit != nil }
 
     private var connected = false
     private var graphFormat: AVAudioFormat?
     private var bandGains: [Float] = Array(repeating: 0, count: 10)
+    /// Round 24: the shared auto-headroom compensation (dB, <= 0)
+    /// cached from the EQ manager so an engine reset cannot lose
+    /// it - applyParameters re-applies it as the EQ unit's
+    /// globalGain after every wireChain.
+    private var headroomGainDB: Float = 0
     private var bypassed = false
     private var baselineRate: Float = 1
     private var correction: Float = 1
@@ -328,7 +374,66 @@ final class TrapTubeGhostAudio {
     private var crossfeedLowR: Float = 0
 
     private var source: Source?
+    /// Round 24: the resolved player item's own asset, kept so a
+    /// resync can re-prime the same-asset feed without the
+    /// controller re-handing it over.
+    private var resolvedAsset: AVAsset?
     private var desiredPlaying = false
+
+    // MARK: Round 24: failure reasons
+    //
+    // Before this round a Ghost failure reached the user as the
+    // bare words "ghost failed": the streamed prime swallowed
+    // its track-load error with `try?`, the file prime returned
+    // false from four silent exits, and start() reported only a
+    // Feed enum. Now EVERY exit point records its route, cause
+    // and the real NSError domain/code here. The controller puts
+    // lastFailureReason in the player's Diag line and
+    // lastFailureShort in the audio-path status, so a screenshot
+    // of a fallback carries its own diagnosis.
+
+    /// Full reason for the last failed start/escalation: every
+    /// attempted feed's exit, in order, joined for the Diag.
+    private(set) var lastFailureReason: String?
+    /// The compact form ("track load CoreMediaErrorDomain
+    /// -12660") for the audio-path status line.
+    private(set) var lastFailureShort: String?
+    private var failureTrail: [String] = []
+
+    private func recordFailure(route: String, cause: String, short: String) {
+        failureTrail.append("\(route): \(cause)")
+        lastFailureShort = short
+        NSLog("[TrapTube Ghost] %@ prime exit: %@", route, cause)
+    }
+
+    private func finishFailure() {
+        lastFailureReason = failureTrail.joined(separator: " · ")
+    }
+
+    /// "Domain code" for an error, naming the DEEPEST underlying
+    /// error too when it differs - the surface wrapper (a -11800
+    /// or an NSURLErrorDomain -1) is never the actionable part;
+    /// the CoreMedia 403 underneath it is.
+    private static func describe(_ error: Error) -> String {
+        let top = error as NSError
+        var deepest = top
+        while let next = deepest.userInfo[NSUnderlyingErrorKey] as? NSError, next !== deepest {
+            deepest = next
+        }
+        if deepest !== top {
+            return "\(top.domain) \(top.code) (underlying: \(deepest.domain) \(deepest.code))"
+        }
+        return "\(top.domain) \(top.code)"
+    }
+
+    private static func shortCode(_ error: Error) -> String {
+        let top = error as NSError
+        var deepest = top
+        while let next = deepest.userInfo[NSUnderlyingErrorKey] as? NSError, next !== deepest {
+            deepest = next
+        }
+        return "\(deepest.domain) \(deepest.code)"
+    }
 
     private var reader: AVAssetReader?
     private var readerOutput: AVAssetReaderTrackOutput?
@@ -364,36 +469,13 @@ final class TrapTubeGhostAudio {
         engine.attach(varispeed)
         engine.attach(eqUnit)
         engine.attach(reverbUnit)
+        if let dynamicsUnit { engine.attach(dynamicsUnit) }
         applyFXSettings()
         applyParameters()
-        instantiateDynamicsUnit()
-    }
-
-    /// Creates Apple's DynamicsProcessor effect unit ('aufx' /
-    /// 'dyna' / 'appl') through AVAudioUnit's generic component
-    /// instantiation - the route that survives the iOS 27 SDK
-    /// dropping the typed Swift subclass. Loaded in-process: no
-    /// extension host, completes in milliseconds. On arrival the
-    /// unit is attached and configured, and if the graph is
-    /// already connected it is rewired with the limiter inserted.
-    private func instantiateDynamicsUnit() {
-        let description = AudioComponentDescription(
-            componentType: kAudioUnitType_Effect,
-            componentSubType: kAudioUnitSubType_DynamicsProcessor,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0,
-            componentFlagsMask: 0)
-        AVAudioUnit.instantiate(with: description, options: []) { [weak self] unit, _ in
-            DispatchQueue.main.async {
-                guard let self, let unit = unit as? AVAudioUnitEffect else { return }
-                self.dynamicsUnit = unit
-                self.engine.attach(unit)
-                self.applyParameters()
-                if self.connected, let format = self.graphFormat {
-                    self.wireChain(format: format)
-                }
-            }
-        }
+        // Round 24: publish the limiter's creation result so the
+        // Sound Effects card reports the engine that ACTUALLY
+        // got built, not the one the settings assume.
+        TrapTubeFXSettings.shared.noteGhostLimiterAvailability(dynamicsUnit != nil)
     }
 
     // MARK: Parameters (cached: an engine reset must not lose them)
@@ -408,6 +490,7 @@ final class TrapTubeGhostAudio {
             band.bypass = false
         }
         eqUnit.bypass = bypassed
+        eqUnit.globalGain = headroomGainDB
         varispeed.rate = baselineRate * correction
         engine.mainMixerNode.outputVolume = outputLevelValue
         pushReverbState()
@@ -470,6 +553,12 @@ final class TrapTubeGhostAudio {
         fxLimiterEnabled = fx.limiterEnabled
         pushReverbState()
         dynamicsUnit?.bypass = !fxLimiterEnabled
+        // Round 24: re-assert the limiter's parameters on the
+        // same tick. The AUAudioUnit parameter tree only exists
+        // once the unit is realized (at graph connection), so a
+        // configure attempted before that silently lands on a
+        // nil tree; the tick guarantees the values land after.
+        configureDynamicsUnit()
     }
 
     /// Pulls the EQ state from TrapTubeEQManager (the panel's source
@@ -489,6 +578,14 @@ final class TrapTubeGhostAudio {
         }
         bypassed = !manager.isEQEnabled
         if connected { eqUnit.bypass = bypassed }
+        // Round 24: automatic headroom - the ONE shared
+        // compensation (the manager's cascadePeakBoostDB over
+        // the panel's 16 bands + bass shelf), applied as this
+        // unit's globalGain: ahead of the master level below, so
+        // a boosted curve is pulled down by exactly its worst
+        // cumulative boost instead of clipping the unit output.
+        headroomGainDB = manager.headroomCompensationDB
+        eqUnit.globalGain = headroomGainDB
         outputLevelValue = min(max(manager.masterGainPercent / 100, 0), 1)
         if connected { engine.mainMixerNode.outputVolume = outputLevelValue }
     }
@@ -530,13 +627,14 @@ final class TrapTubeGhostAudio {
     }
 
     /// (Re)builds the connections in `format`: node -> varispeed
-    /// -> EQ -> reverb -> dynamics (limiter, when the unit has
-    /// landed) -> mixer. A format change needs fresh connections;
+    /// -> EQ -> reverb -> dynamics (limiter, when the unit
+    /// exists) -> mixer. A format change needs fresh connections;
     /// reset() drops them (and node parameters), so re-apply ours
     /// after. The reset also drops the reverb unit's loaded
     /// preset - invalidate the cache so applyParameters reloads
-    /// it. Also called from the dynamics instantiation completion
-    /// to insert the limiter into an already-connected graph.
+    /// it. Since Round 24 the limiter is created synchronously at
+    /// init, so it is simply present (or honestly absent) every
+    /// time this runs - there is no late arrival to insert.
     private func wireChain(format: AVAudioFormat) {
         engine.reset()
         loadedReverbPreset = .off
@@ -555,41 +653,139 @@ final class TrapTubeGhostAudio {
 
     // MARK: Starting feeds
 
-    /// Tries the streamed feed first, then the file feed. The
-    /// position provider is consulted at the moment each feed
-    /// actually primes, so a slow download still lands on the
-    /// video's current position.
-    func start(source: Source, position: @escaping () -> TimeInterval) async -> Feed {
+    /// Tries the feeds in Round 24's order: SAME-ASSET (the
+    /// resolved item's own asset - the stream that just proved
+    /// it loads on this device), then the independently minted
+    /// STREAMED feed, then the FILE feed. The position provider
+    /// is consulted at the moment each feed actually primes, so
+    /// a slow download still lands on the video's current
+    /// position. A nil minted source no longer starves Ghost:
+    /// the same-asset feed needs no mint at all, which is the
+    /// structural answer to the Build 213 failure (IOS legs
+    /// refused at load, ANDROID minting no audio-only URL at
+    /// all, while the ANDROID muxed stream played fine).
+    func start(source: Source?, asset: AVAsset, position: @escaping () -> TimeInterval) async -> Feed {
         self.source = source
+        self.resolvedAsset = asset
+        failureTrail = []
+        lastFailureReason = nil
+        lastFailureShort = nil
         teardownFeed(deleteTemp: true)
-        if await primeStreamed(source: source, startAt: position()) {
-            return .streamed
+        if await primeSameAsset(asset: asset, startAt: position()) {
+            return .sameAsset
         }
-        if await primeFileRoute(source: source, position: position) {
-            return .file
+        if let source {
+            if await primeStreamed(source: source, startAt: position()) {
+                return .streamed
+            }
+            if await primeFileRoute(source: source, position: position) {
+                return .file
+            }
         }
         feed = .none
+        finishFailure()
         return .none
     }
 
     func switchToFile(position: @escaping () -> TimeInterval) async -> Bool {
-        guard let source else { return false }
+        guard let source else {
+            recordFailure(route: "file", cause: "no minted source to download",
+                          short: "no minted source")
+            finishFailure()
+            return false
+        }
+        // The trail is NOT reset here: the stall that escalated
+        // to this call belongs to the same failure chain, and if
+        // the file feed also fails the Diag should show both.
         teardownFeed(deleteTemp: true)
-        return await primeFileRoute(source: source, position: position)
+        let ok = await primeFileRoute(source: source, position: position)
+        if !ok { finishFailure() }
+        return ok
+    }
+
+    /// Round 24: the NEW primary feed. The reader pumps the
+    /// audio track out of the asset the RESOLVER already built
+    /// and the PLAYER is already playing: for a muxed item that
+    /// is the AVURLAsset itself; for a composition item it is
+    /// the composition, whose audio track reads through to the
+    /// audio leg's own asset. No second mint and no second URL
+    /// family to be refused - if the video is playing, this
+    /// asset's bytes are already flowing. The feed joins the
+    /// same pump, the same canonical conversion and the same
+    /// sync discipline as the streamed feed, and the video
+    /// player's own audio stays silenced exactly as before (the
+    /// controller mutes the item before Ghost starts, whichever
+    /// feed wins).
+    private func primeSameAsset(asset: AVAsset, startAt: TimeInterval) async -> Bool {
+        let track: AVAssetTrack
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let first = tracks.first else {
+                recordFailure(route: "same-asset",
+                              cause: "the playing asset exposes no audio track",
+                              short: "no audio track")
+                return false
+            }
+            track = first
+        } catch {
+            recordFailure(route: "same-asset",
+                          cause: "track load failed - \(Self.describe(error))",
+                          short: "track load \(Self.shortCode(error))")
+            return false
+        }
+        return primeReader(asset: asset, track: track, feedKind: .sameAsset,
+                           route: "same-asset", startAt: startAt)
     }
 
     private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
         let asset = AVURLAsset(url: source.url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": source.userAgent, "Referer": "https://www.youtube.com/"]
         ])
-        // The graph format is the canonical stream format, NOT a
-        // locally rebuilt twin of what we hope the reader emits: the
-        // pump converts every emitted buffer into exactly this
-        // format before scheduling.
-        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
-              let format = streamFormat,
-              let newReader = try? AVAssetReader(asset: asset) else {
-            NSLog("[TrapTube Ghost] Streamed prime exit: track/reader setup failed")
+        let track: AVAssetTrack
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let first = tracks.first else {
+                recordFailure(route: "streamed",
+                              cause: "the minted asset exposes no audio track",
+                              short: "no audio track")
+                return false
+            }
+            track = first
+        } catch {
+            // Round 24: this do/catch replaces a `try?` that used
+            // to swallow the real error whole - on the Build 213
+            // device this is where an IOS leg's 403 went to die
+            // without leaving a reason anywhere.
+            recordFailure(route: "streamed",
+                          cause: "track load failed - \(Self.describe(error))",
+                          short: "track load \(Self.shortCode(error))")
+            return false
+        }
+        return primeReader(asset: asset, track: track, feedKind: .streamed,
+                           route: "streamed", startAt: startAt)
+    }
+
+    /// The reader prime both streamed-class feeds share: build
+    /// the reader over the given asset/track, connect the graph
+    /// in the canonical format, start reading, start the pump.
+    /// The graph format is the canonical stream format, NOT a
+    /// locally rebuilt twin of what we hope the reader emits: the
+    /// pump converts every emitted buffer into exactly this
+    /// format before scheduling.
+    private func primeReader(asset: AVAsset, track: AVAssetTrack,
+                             feedKind: Feed, route: String, startAt: TimeInterval) -> Bool {
+        let newReader: AVAssetReader
+        do {
+            newReader = try AVAssetReader(asset: asset)
+        } catch {
+            recordFailure(route: route,
+                          cause: "reader creation failed - \(Self.describe(error))",
+                          short: "reader \(Self.shortCode(error))")
+            return false
+        }
+        guard let format = streamFormat else {
+            recordFailure(route: route, cause: "canonical stream format unavailable",
+                          short: "no stream format")
             return false
         }
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
@@ -602,7 +798,8 @@ final class TrapTubeGhostAudio {
         ])
         output.alwaysCopiesSampleData = false
         guard newReader.canAdd(output) else {
-            NSLog("[TrapTube Ghost] Streamed prime exit: reader refused the output")
+            recordFailure(route: route, cause: "reader refused the PCM output",
+                          short: "reader refused output")
             return false
         }
         newReader.add(output)
@@ -615,7 +812,8 @@ final class TrapTubeGhostAudio {
         // output or schedule into one node concurrently.
         teardownFeed(deleteTemp: false)
         guard connectGraph(format: format) else {
-            NSLog("[TrapTube Ghost] Streamed prime exit: graph connect refused the format")
+            recordFailure(route: route, cause: "graph connect refused the canonical format",
+                          short: "graph refused format")
             return false
         }
         node.stop()
@@ -628,11 +826,13 @@ final class TrapTubeGhostAudio {
         lastBufferAt = Date()
         audioDuration = 0
         guard newReader.startReading() else {
-            NSLog("[TrapTube Ghost] Streamed prime exit: startReading failed")
+            let cause = newReader.error.map { "startReading failed - \(Self.describe($0))" }
+                ?? "startReading failed"
+            recordFailure(route: route, cause: cause, short: "reader start failed")
             teardownFeed(deleteTemp: false)
             return false
         }
-        feed = .streamed
+        feed = feedKind
         startPump()
         if !engine.isRunning { try? engine.start() }
         if desiredPlaying { node.play() }
@@ -645,8 +845,21 @@ final class TrapTubeGhostAudio {
             downloaded = try await TrapTubeGhostDownloader.shared.downloadWithRemint(
                 from: source.url, userAgent: source.userAgent,
                 remint: source.refresher, onProgress: { _ in })
+        } catch let error as TrapTubeGhostDownloadError {
+            switch error {
+            case .badStatus(let status, let host):
+                recordFailure(route: "file",
+                              cause: "download answered HTTP \(status) from \(host)",
+                              short: "download HTTP \(status)")
+            case .emptyDownload:
+                recordFailure(route: "file", cause: "download delivered no data",
+                              short: "download empty")
+            }
+            return false
         } catch {
-            NSLog("[TrapTube Ghost] File prime exit: download failed - %@", "\(error)")
+            recordFailure(route: "file",
+                          cause: "download failed - \(Self.describe(error))",
+                          short: "download \(Self.shortCode(error))")
             return false
         }
         // AVAudioFile needs a real audio extension to open the
@@ -654,7 +867,11 @@ final class TrapTubeGhostAudio {
         let local = FileManager.default.temporaryDirectory
             .appendingPathComponent("tt-ghost-\(UUID().uuidString).m4a")
         if (try? FileManager.default.moveItem(at: downloaded, to: local)) == nil {
-            guard (try? FileManager.default.copyItem(at: downloaded, to: local)) != nil else { return false }
+            guard (try? FileManager.default.copyItem(at: downloaded, to: local)) != nil else {
+                recordFailure(route: "file", cause: "could not stage the downloaded file",
+                              short: "file staging failed")
+                return false
+            }
             try? FileManager.default.removeItem(at: downloaded)
         }
         tempFileURL = local
@@ -662,11 +879,19 @@ final class TrapTubeGhostAudio {
     }
 
     private func primeFile(localURL: URL, startAt: TimeInterval) -> Bool {
-        guard let file = try? AVAudioFile(forReading: localURL) else { return false }
+        guard let file = try? AVAudioFile(forReading: localURL) else {
+            recordFailure(route: "file", cause: "the downloaded file could not be opened as audio",
+                          short: "file open failed")
+            return false
+        }
         let format = file.processingFormat
         // A degenerate processing format would poison the frame
         // math below and the graph connection alike.
-        guard format.sampleRate > 0, format.channelCount > 0 else { return false }
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            recordFailure(route: "file", cause: "the downloaded file reports a degenerate audio format",
+                          short: "bad file format")
+            return false
+        }
         // Same retirement as the streamed prime: the file pump
         // must be the only producer on this node.
         teardownFeed(deleteTemp: false)
@@ -676,7 +901,11 @@ final class TrapTubeGhostAudio {
         // and scheduled with scheduleSegment - a path no buffer
         // effect could ever touch, which is why the file feed now
         // decodes through the shared pump instead.
-        guard let canonical = streamFormat, connectGraph(format: canonical) else { return false }
+        guard let canonical = streamFormat, connectGraph(format: canonical) else {
+            recordFailure(route: "file", cause: "graph connect refused the canonical format",
+                          short: "graph refused format")
+            return false
+        }
         node.stop()
         loadedFile = file
         audioDuration = Double(file.length) / format.sampleRate
@@ -686,7 +915,11 @@ final class TrapTubeGhostAudio {
         stallReported = false
         lastBufferAt = Date()
         let startFrame = AVAudioFramePosition(primeOffset * format.sampleRate)
-        guard startFrame < file.length else { return false }
+        guard startFrame < file.length else {
+            recordFailure(route: "file", cause: "the requested position is past the end of the audio",
+                          short: "position past end")
+            return false
+        }
         file.framePosition = startFrame
         feed = .file
         startFilePump()
@@ -749,12 +982,24 @@ final class TrapTubeGhostAudio {
         // feed generation at prime time - never on the live
         // properties, which a resync may swap mid-loop.
         guard let pumpReader = reader, let pumpOutput = readerOutput else { return }
+        // Round 24: the pump serves both reader feeds; it
+        // captures WHICH one at prime time so its loop condition
+        // and its failure reasons name the right route.
+        let pumpFeed = feed
+        let pumpRoute = pumpFeed == .sameAsset ? "same-asset" : "streamed"
         let generation = feedGeneration
         pumpTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled, self.feedGeneration == generation,
-                  self.feed == .streamed, self.reader === pumpReader {
+                  self.feed == pumpFeed, self.reader === pumpReader {
                 if pumpReader.status == .failed {
+                    // Round 24: the reader's own error joins the
+                    // trail before the stall escalates, so the
+                    // eventual fallback can say WHY the feed died.
+                    let cause = pumpReader.error.map { "reader failed mid-stream - \(Self.describe($0))" }
+                        ?? "reader failed mid-stream"
+                    self.recordFailure(route: pumpRoute, cause: cause, short: "reader failed")
+                    self.finishFailure()
                     self.reportStall()
                     return
                 }
@@ -786,6 +1031,10 @@ final class TrapTubeGhostAudio {
                 // the file feed.
                 if self.desiredPlaying, self.scheduledAhead() < 0.5,
                    Date().timeIntervalSince(self.lastBufferAt) > 5 {
+                    self.recordFailure(route: pumpRoute,
+                                       cause: "reader starved - no buffers for over five seconds while playing",
+                                       short: "reader starved")
+                    self.finishFailure()
                     self.reportStall()
                     return
                 }
@@ -999,16 +1248,28 @@ final class TrapTubeGhostAudio {
     /// Hard resync: flush the node and re-prime the same feed at
     /// the video's current position.
     func resync(to position: TimeInterval) async -> Bool {
-        guard let source, feed != .none else { return false }
+        guard feed != .none else { return false }
+        // A resync owns a fresh failure trail: its primes record
+        // anew, and the caller (hard resync, then escalate or
+        // fall back) reads the reason for THIS attempt, not a
+        // stale one from the original start.
+        failureTrail = []
+        let ok: Bool
         switch feed {
+        case .sameAsset:
+            guard let resolvedAsset else { return false }
+            ok = await primeSameAsset(asset: resolvedAsset, startAt: position)
         case .streamed:
-            return await primeStreamed(source: source, startAt: position)
+            guard let source else { return false }
+            ok = await primeStreamed(source: source, startAt: position)
         case .file:
             guard let tempFileURL else { return false }
-            return primeFile(localURL: tempFileURL, startAt: position)
+            ok = primeFile(localURL: tempFileURL, startAt: position)
         case .none:
             return false
         }
+        if !ok { finishFailure() }
+        return ok
     }
 
     func teardownFeed(deleteTemp: Bool) {
@@ -1038,6 +1299,7 @@ final class TrapTubeGhostAudio {
         teardownFeed(deleteTemp: true)
         engine.stop()
         source = nil
+        resolvedAsset = nil
         desiredPlaying = false
     }
 }
