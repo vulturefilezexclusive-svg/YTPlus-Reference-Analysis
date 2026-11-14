@@ -11,13 +11,20 @@ import Foundation
 // own graph - player node -> varispeed -> 10-band EQ -> reverb ->
 // dynamics (limiter) -> main mixer - so the EQ the user hears is a
 // real AVAudioUnitEQ, not a tap. Three feeds, tried in order:
-// SAME-ASSET (Round 24: an AVAssetReader over the resolved player
-// item's OWN asset - the stream that just proved it loads on this
-// device), STREAMED (an AVAssetReader pump over an independently
+// SAME-ASSET (Round 24: an AVAssetReader over the resolved
+// stream - the one that just proved it loads on this device;
+// Round 25: over a fresh clone of it, see below), STREAMED (an
+// AVAssetReader pump over an independently
 // minted audio-only URL, scheduling decoded PCM a few seconds
 // ahead) and FILE (the audio file, fetched through the re-minting
 // downloader below and scheduled by a chunk pump through the same
-// gate) for streams the readers cannot run. Round 22 made Ghost
+// gate) for streams the readers cannot run. Round 25: SAME-ASSET
+// reads a FRESH CLONE of the resolved stream (built per prime
+// from the resolver's stashed URL + header descriptor), never
+// the playing item's live asset instance - readers over the
+// live instance were refused at creation on device (-11838) -
+// and every reader feed completes a full awaited property
+// load before reader creation. Round 22 made Ghost
 // the ONLY audio method (the Ghost/Tap A/B picker is gone); when
 // every feed fails the player controller still falls back to the
 // Round 19 tap path as a safety net and the status line says so.
@@ -294,6 +301,28 @@ final class TrapTubeGhostAudio {
         let refresher: TrapTubeGhostStreamRefresher
     }
 
+    /// Round 25: the Ghost clone descriptor, stashed by the
+    /// resolver at resolve time alongside the resolved item: the
+    /// URL and the EXACT header fields the resolver's own asset
+    /// was built with - the muxed file's URL for a muxed
+    /// resolution, the AUDIO LEG's URL for a composition (the
+    /// leg was inserted into the composition at .zero from a
+    /// range starting at .zero, so the leg's own timeline IS
+    /// the composition's audio timeline and Ghost, which only
+    /// needs audio, can read the leg alone from the same
+    /// offsets). The same-asset feed builds a FRESH AVURLAsset
+    /// from this descriptor on every prime and NEVER touches
+    /// the playing item's live asset instance: on the Build 217
+    /// device, an AVAssetReader over the player's own asset
+    /// (and over a tracks-only-loaded streamed asset) was
+    /// refused at creation with AVFoundationErrorDomain -11838
+    /// (AVErrorOperationNotAllowed), which is why both reader
+    /// feeds died before pumping a single buffer.
+    struct CloneSource {
+        let url: URL
+        let headers: [String: String]
+    }
+
     static let bandFrequencies: [Float] = [32, 64, 125, 250, 500, 1_000, 2_000, 4_000, 8_000, 16_000]
     /// Which TrapTubeEQManager band feeds each ghost band (nearest
     /// frequency): 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k.
@@ -374,10 +403,14 @@ final class TrapTubeGhostAudio {
     private var crossfeedLowR: Float = 0
 
     private var source: Source?
-    /// Round 24: the resolved player item's own asset, kept so a
-    /// resync can re-prime the same-asset feed without the
-    /// controller re-handing it over.
-    private var resolvedAsset: AVAsset?
+    /// Round 25: the clone descriptor stashed at resolve time,
+    /// kept so every same-asset prime (start, resync, re-prime)
+    /// builds a FRESH asset from it. Round 24 kept the resolved
+    /// item's own asset here instead - the live instance the
+    /// AVPlayer was playing - and readers over it were refused
+    /// at creation on device (-11838); the descriptor replaces
+    /// the instance, never the other way round.
+    private var cloneSource: CloneSource?
     private var desiredPlaying = false
 
     // MARK: Round 24: failure reasons
@@ -653,25 +686,27 @@ final class TrapTubeGhostAudio {
 
     // MARK: Starting feeds
 
-    /// Tries the feeds in Round 24's order: SAME-ASSET (the
-    /// resolved item's own asset - the stream that just proved
-    /// it loads on this device), then the independently minted
-    /// STREAMED feed, then the FILE feed. The position provider
-    /// is consulted at the moment each feed actually primes, so
-    /// a slow download still lands on the video's current
-    /// position. A nil minted source no longer starves Ghost:
-    /// the same-asset feed needs no mint at all, which is the
-    /// structural answer to the Build 213 failure (IOS legs
-    /// refused at load, ANDROID minting no audio-only URL at
-    /// all, while the ANDROID muxed stream played fine).
-    func start(source: Source?, asset: AVAsset, position: @escaping () -> TimeInterval) async -> Feed {
+    /// Tries the feeds in Round 24's order: SAME-ASSET (a fresh
+    /// clone of the stream that just proved it loads on this
+    /// device - Round 25: cloned from the resolve-time
+    /// descriptor, never the playing item's live asset), then
+    /// the independently minted STREAMED feed, then the FILE
+    /// feed. The position provider is consulted at the moment
+    /// each feed actually primes, so a slow download still
+    /// lands on the video's current position. A nil minted
+    /// source no longer starves Ghost: the same-asset feed
+    /// needs no mint at all, which is the structural answer to
+    /// the Build 213 failure (IOS legs refused at load, ANDROID
+    /// minting no audio-only URL at all, while the ANDROID
+    /// muxed stream played fine).
+    func start(source: Source?, clone: CloneSource?, position: @escaping () -> TimeInterval) async -> Feed {
         self.source = source
-        self.resolvedAsset = asset
+        self.cloneSource = clone
         failureTrail = []
         lastFailureReason = nil
         lastFailureShort = nil
         teardownFeed(deleteTemp: true)
-        if await primeSameAsset(asset: asset, startAt: position()) {
+        if await primeSameAsset(startAt: position()) {
             return .sameAsset
         }
         if let source {
@@ -704,33 +739,40 @@ final class TrapTubeGhostAudio {
     }
 
     /// Round 24: the NEW primary feed. The reader pumps the
-    /// audio track out of the asset the RESOLVER already built
-    /// and the PLAYER is already playing: for a muxed item that
-    /// is the AVURLAsset itself; for a composition item it is
-    /// the composition, whose audio track reads through to the
-    /// audio leg's own asset. No second mint and no second URL
-    /// family to be refused - if the video is playing, this
-    /// asset's bytes are already flowing. The feed joins the
-    /// same pump, the same canonical conversion and the same
-    /// sync discipline as the streamed feed, and the video
+    /// audio track out of the stream the RESOLVER already built
+    /// and the PLAYER is already playing. No second mint and no
+    /// second URL family to be refused - if the video is
+    /// playing, this URL's bytes are already flowing.
+    ///
+    /// Round 25: what the reader is built over changed. Round
+    /// 24 handed primeReader the playing item's OWN asset
+    /// instance (the very AVURLAsset, or the composition
+    /// itself), and on the Build 217 device AVAssetReader
+    /// creation over it threw AVFoundationErrorDomain -11838
+    /// (AVErrorOperationNotAllowed) before a single buffer was
+    /// pumped. Now the resolver stashes a CloneSource (URL +
+    /// the exact headers its own asset was built with - for a
+    /// composition resolution, the audio leg's URL: Ghost only
+    /// needs audio, and the leg's timeline starts at zero
+    /// exactly where the composition inserted it) and every
+    /// prime builds a FRESH AVURLAsset from that descriptor.
+    /// The player's live instance is never read. The feed joins
+    /// the same pump, the same canonical conversion and the
+    /// same sync discipline as the streamed feed, and the video
     /// player's own audio stays silenced exactly as before (the
     /// controller mutes the item before Ghost starts, whichever
     /// feed wins).
-    private func primeSameAsset(asset: AVAsset, startAt: TimeInterval) async -> Bool {
-        let track: AVAssetTrack
-        do {
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let first = tracks.first else {
-                recordFailure(route: "same-asset",
-                              cause: "the playing asset exposes no audio track",
-                              short: "no audio track")
-                return false
-            }
-            track = first
-        } catch {
+    private func primeSameAsset(startAt: TimeInterval) async -> Bool {
+        guard let cloneSource else {
             recordFailure(route: "same-asset",
-                          cause: "track load failed - \(Self.describe(error))",
-                          short: "track load \(Self.shortCode(error))")
+                          cause: "the resolver stashed no clone descriptor for this item",
+                          short: "no clone descriptor")
+            return false
+        }
+        let asset = AVURLAsset(url: cloneSource.url, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": cloneSource.headers
+        ])
+        guard let track = await loadReaderTrack(asset: asset, route: "same-asset") else {
             return false
         }
         return primeReader(asset: asset, track: track, feedKind: .sameAsset,
@@ -741,28 +783,63 @@ final class TrapTubeGhostAudio {
         let asset = AVURLAsset(url: source.url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": ["User-Agent": source.userAgent, "Referer": "https://www.youtube.com/"]
         ])
-        let track: AVAssetTrack
-        do {
-            let tracks = try await asset.loadTracks(withMediaType: .audio)
-            guard let first = tracks.first else {
-                recordFailure(route: "streamed",
-                              cause: "the minted asset exposes no audio track",
-                              short: "no audio track")
-                return false
-            }
-            track = first
-        } catch {
-            // Round 24: this do/catch replaces a `try?` that used
-            // to swallow the real error whole - on the Build 213
-            // device this is where an IOS leg's 403 went to die
-            // without leaving a reason anywhere.
-            recordFailure(route: "streamed",
-                          cause: "track load failed - \(Self.describe(error))",
-                          short: "track load \(Self.shortCode(error))")
+        // Round 24: the load below replaces a `try?` that used
+        // to swallow the real error whole - on the Build 213
+        // device this is where an IOS leg's 403 went to die
+        // without leaving a reason anywhere.
+        guard let track = await loadReaderTrack(asset: asset, route: "streamed") else {
             return false
         }
         return primeReader(asset: asset, track: track, feedKind: .streamed,
                            route: "streamed", startAt: startAt)
+    }
+
+    /// Round 25: the FULL awaited load every reader feed
+    /// performs before AVAssetReader creation: the audio track
+    /// list, the asset's readability/playability, and the
+    /// track's format descriptions. Round 24 loaded ONLY the
+    /// track list; on the Build 217 device both reader feeds
+    /// then died at reader creation with -11838
+    /// (AVErrorOperationNotAllowed) - an asset whose readable
+    /// state was never established is exactly the asset a
+    /// reader is allowed to refuse. Every failure breadcrumbs
+    /// with its real error (no try? anywhere in this path), and
+    /// an asset that reports itself not readable names that as
+    /// its own distinct cause.
+    private func loadReaderTrack(asset: AVAsset, route: String) async -> AVAssetTrack? {
+        let track: AVAssetTrack
+        do {
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let first = tracks.first else {
+                recordFailure(route: route,
+                              cause: "the asset exposes no audio track",
+                              short: "no audio track")
+                return nil
+            }
+            track = first
+        } catch {
+            recordFailure(route: route,
+                          cause: "track load failed - \(Self.describe(error))",
+                          short: "track load \(Self.shortCode(error))")
+            return nil
+        }
+        do {
+            let readable = try await asset.load(.isReadable)
+            let playable = try await asset.load(.isPlayable)
+            _ = try await track.load(.formatDescriptions)
+            guard readable else {
+                recordFailure(route: route,
+                              cause: "the asset reports it is not readable (playable: \(playable))",
+                              short: "asset not readable")
+                return nil
+            }
+        } catch {
+            recordFailure(route: route,
+                          cause: "asset property load failed - \(Self.describe(error))",
+                          short: "property load \(Self.shortCode(error))")
+            return nil
+        }
+        return track
     }
 
     /// The reader prime both streamed-class feeds share: build
@@ -825,10 +902,15 @@ final class TrapTubeGhostAudio {
         stallReported = false
         lastBufferAt = Date()
         audioDuration = 0
+        // Round 25: creation (above) and start stay SEPARATE
+        // breadcrumb points on purpose - a created reader whose
+        // start is refused names reader.error here as its own
+        // "reader start refused" cause, so a device trail can
+        // discriminate the two refusals.
         guard newReader.startReading() else {
-            let cause = newReader.error.map { "startReading failed - \(Self.describe($0))" }
-                ?? "startReading failed"
-            recordFailure(route: route, cause: cause, short: "reader start failed")
+            let cause = newReader.error.map { "reader start refused - \(Self.describe($0))" }
+                ?? "reader start refused"
+            recordFailure(route: route, cause: cause, short: "reader start refused")
             teardownFeed(deleteTemp: false)
             return false
         }
@@ -1257,8 +1339,11 @@ final class TrapTubeGhostAudio {
         let ok: Bool
         switch feed {
         case .sameAsset:
-            guard let resolvedAsset else { return false }
-            ok = await primeSameAsset(asset: resolvedAsset, startAt: position)
+            // Round 25: re-primes from the clone descriptor -
+            // primeSameAsset builds a fresh clone asset on every
+            // call, so a resync never resurrects the playing
+            // item's live asset instance.
+            ok = await primeSameAsset(startAt: position)
         case .streamed:
             guard let source else { return false }
             ok = await primeStreamed(source: source, startAt: position)
@@ -1299,7 +1384,7 @@ final class TrapTubeGhostAudio {
         teardownFeed(deleteTemp: true)
         engine.stop()
         source = nil
-        resolvedAsset = nil
+        cloneSource = nil
         desiredPlaying = false
     }
 }
