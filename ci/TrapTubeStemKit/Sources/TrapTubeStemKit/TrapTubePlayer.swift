@@ -506,6 +506,17 @@ struct TrapTubeResolvedPlayback {
     /// any direct audio URL - Ghost then has nothing to eat and the
     /// controller falls back to the tap.
     let ghostSource: TrapTubeGhostAudio.Source?
+    /// Round 25: the clone descriptor for Ghost's same-asset
+    /// feed, stashed HERE, at resolve time, from the very values
+    /// the item's own asset was built with: the muxed URL for a
+    /// muxed resolution, the audio leg's URL for a composition
+    /// (inserted at .zero from a range starting at .zero, so the
+    /// leg's timeline is the composition's audio timeline).
+    /// Ghost clones a fresh asset from this on every prime and
+    /// never reads the item's live asset instance - readers
+    /// over that instance were refused at creation on device
+    /// (AVFoundationErrorDomain -11838).
+    let ghostClone: TrapTubeGhostAudio.CloneSource?
 }
 
 enum TrapTubeStreamResolver {
@@ -713,7 +724,8 @@ enum TrapTubeStreamResolver {
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: item,
                                                     profileName: profile.name,
-                                                    ghostSource: ghostLeg)
+                                                    ghostSource: ghostLeg,
+                                                    ghostClone: TrapTubeGhostAudio.CloneSource(url: url, headers: headers))
                 }
 
                 // 2) Otherwise combine the best MP4 video-only and audio-only
@@ -768,10 +780,17 @@ enum TrapTubeStreamResolver {
                     let ghostLeg = TrapTubeGhostAudio.Source(
                         url: audioURL, userAgent: profile.userAgent,
                         refresher: { await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) })
+                    // Round 25: the clone descriptor names the
+                    // AUDIO LEG alone - it was inserted above at
+                    // .zero from audioRange, whose start is .zero,
+                    // so the leg's own timeline aligns with the
+                    // composition's audio track and Ghost can
+                    // read the leg directly at the same offsets.
                     return TrapTubeResolvedPlayback(title: title, author: author,
                                                     item: item,
                                                     profileName: profile.name,
-                                                    ghostSource: ghostLeg)
+                                                    ghostSource: ghostLeg,
+                                                    ghostClone: TrapTubeGhostAudio.CloneSource(url: audioURL, headers: headers))
                 }
                 failures.append("\(profile.name): formats were present but none were directly playable")
             } catch {
@@ -1285,6 +1304,18 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var ghostFailureShort: String?
     private var ghostTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
+    /// Round 25: bounded Ghost re-engagement. A reader feed that
+    /// dies mid-stream is re-primed at the playhead (fresh clone
+    /// asset + reader) up to maxGhostReprimeAttempts times per
+    /// track before the session concedes to the file feed and
+    /// then the tap. The counter resets on a new track, on a
+    /// user seek, and when a video stall ends (the routes that
+    /// already re-prime); ghostReprimeInFlight keeps the pump's
+    /// stall callback and a failed drift resync from running
+    /// two recovery loops at once.
+    private var ghostReprimeAttempts = 0
+    private var ghostReprimeInFlight = false
+    private static let maxGhostReprimeAttempts = 3
     private var lastHardResync = Date.distantPast
     /// The video this session loaded; a re-presented (adopted)
     /// player view compares it against its request and skips the
@@ -1743,14 +1774,18 @@ final class TrapTubePlayerController: ObservableObject {
                 if self.audioPath == .ghost {
                     // Round 24: Ghost always gets its chance now,
                     // minted source or not - its primary feed reads
-                    // the resolved item's OWN asset, so a video no
-                    // profile could mint an audio leg for (the
-                    // Build 213 failure: IOS refused at load,
-                    // ANDROID SABR-only) is no longer an automatic
-                    // fallback. If every feed still fails, the
-                    // engine's recorded reasons drive the fallback
-                    // (see startGhost / beginTapFallback).
-                    self.startGhost(source: resolved.ghostSource, item: resolved.item)
+                    // the resolved stream, so a video no profile
+                    // could mint an audio leg for (the Build 213
+                    // failure: IOS refused at load, ANDROID
+                    // SABR-only) is no longer an automatic
+                    // fallback. Round 25: the feed clones that
+                    // stream from the descriptor the resolver
+                    // stashed (resolved.ghostClone) instead of
+                    // reading the item's live asset. If every feed
+                    // still fails, the engine's recorded reasons
+                    // drive the fallback (see startGhost /
+                    // beginTapFallback).
+                    self.startGhost(source: resolved.ghostSource, clone: resolved.ghostClone, item: resolved.item)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -2007,8 +2042,11 @@ final class TrapTubePlayerController: ObservableObject {
     /// Round 20: a user seek moves the video instantly; the ghost
     /// feed hard-resyncs to the same position so the audio follows
     /// the playhead instead of bending back through the sync loop.
+    /// Round 25: a user seek also resets the re-engagement
+    /// budget - the seek's own re-prime route starts fresh.
     private func noteUserSeek() {
         guard audioPath == .ghost, !usingTapFallback, ghostFeed != .none else { return }
+        ghostReprimeAttempts = 0
         Task { [weak self] in await self?.hardResyncGhost() }
     }
 
@@ -2097,10 +2135,14 @@ final class TrapTubePlayerController: ObservableObject {
 
     // MARK: Ghost orchestration (Round 20)
 
-    private func startGhost(source: TrapTubeGhostAudio.Source?, item: AVPlayerItem) {
+    private func startGhost(source: TrapTubeGhostAudio.Source?, clone: TrapTubeGhostAudio.CloneSource?, item: AVPlayerItem) {
         ghostTask?.cancel()
+        // Round 25: a new track starts with a fresh re-engagement
+        // budget (see handleReaderFeedFailure).
+        ghostReprimeAttempts = 0
+        ghostReprimeInFlight = false
         ghost.onStreamStalled = { [weak self] in
-            Task { @MainActor in self?.escalateGhostToFile() }
+            Task { @MainActor in self?.handleReaderFeedFailure() }
         }
         // The item goes silent the moment Ghost takes the audio; if
         // the prime fails, beginTapFallback unmutes it again.
@@ -2110,9 +2152,11 @@ final class TrapTubePlayerController: ObservableObject {
             self.ghost.setBaselineRate(self.rate)
             self.ghost.applyManagerState()
             self.ghost.applyFXSettings()
-            // Round 24: the item's own asset rides along - it is
-            // the same-asset feed's whole input (see the engine).
-            let feed = await self.ghost.start(source: source, asset: item.asset) { [weak self] in
+            // Round 25: the resolve-time clone descriptor rides
+            // along - it is the same-asset feed's whole input
+            // (see the engine). The item itself is handed over
+            // only as the identity this start belongs to.
+            let feed = await self.ghost.start(source: source, clone: clone) { [weak self] in
                 self?.player.currentTime().seconds ?? 0
             }
             guard !Task.isCancelled, self.player.currentItem === item else { return }
@@ -2129,9 +2173,65 @@ final class TrapTubePlayerController: ObservableObject {
         }
     }
 
+    /// Round 25: STAYING ENGAGED. A reader feed (same-asset or
+    /// streamed) that fails or starves mid-stream no longer
+    /// concedes the track on the first failure: it is re-primed
+    /// at the current playhead - a fresh clone asset and reader
+    /// every attempt - up to maxGhostReprimeAttempts times,
+    /// with a growing backoff (0.75 s, 1.5 s, 3 s) so a hard
+    /// failure cannot spin. Every attempt is breadcrumbed with
+    /// the cause the engine recorded for the death it follows.
+    /// Only when the cap is exhausted does the session escalate
+    /// to the file feed (and from there, as before, to the
+    /// tap). Reached from the pump's stall callback and from a
+    /// failed drift/seek hard resync; the in-flight flag keeps
+    /// those two routes from running recovery concurrently.
+    private func handleReaderFeedFailure() {
+        guard audioPath == .ghost, !usingTapFallback,
+              ghostFeed == .streamed || ghostFeed == .sameAsset,
+              let item = player.currentItem,
+              !ghostReprimeInFlight else { return }
+        ghostReprimeInFlight = true
+        ghostTask?.cancel()
+        ghostTask = Task { [weak self] in
+            guard let self else { return }
+            while self.ghostReprimeAttempts < Self.maxGhostReprimeAttempts {
+                self.ghostReprimeAttempts += 1
+                let attempt = self.ghostReprimeAttempts
+                let cause = self.ghost.lastFailureShort ?? "reader feed failed"
+                self.noteDiagnostic("ghost re-prime attempt \(attempt): \(cause)")
+                let backoff: UInt64 = attempt == 1 ? 750_000_000
+                    : attempt == 2 ? 1_500_000_000 : 3_000_000_000
+                try? await Task.sleep(nanoseconds: backoff)
+                guard !Task.isCancelled, self.player.currentItem === item,
+                      !self.usingTapFallback else {
+                    self.ghostReprimeInFlight = false
+                    return
+                }
+                let target = self.player.currentTime().seconds
+                let ok = await self.ghost.resync(to: target.isFinite ? target : 0)
+                guard !Task.isCancelled, self.player.currentItem === item else {
+                    self.ghostReprimeInFlight = false
+                    return
+                }
+                if ok {
+                    self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+                    self.noteDiagnostic("ghost re-prime attempt \(attempt) succeeded - ghost re-engaged")
+                    self.ghostReprimeInFlight = false
+                    return
+                }
+            }
+            self.noteDiagnostic("ghost re-prime cap exhausted (\(Self.maxGhostReprimeAttempts) attempts) - escalating")
+            self.ghostReprimeInFlight = false
+            self.escalateGhostToFile()
+        }
+    }
+
     /// A streamed-class feed (same-asset or streamed) that fails
     /// or starves escalates to the file feed at the video's
-    /// current position.
+    /// current position. Round 25: this is now the LAST step of
+    /// reader-feed recovery, reached only after the re-prime
+    /// cap is exhausted (see handleReaderFeedFailure).
     private func escalateGhostToFile() {
         guard audioPath == .ghost, !usingTapFallback,
               ghostFeed == .streamed || ghostFeed == .sameAsset,
@@ -2202,6 +2302,11 @@ final class TrapTubePlayerController: ObservableObject {
                 if waitingOnVideo {
                     waitingOnVideo = false
                     self.ghost.resumeRendering()
+                    // Round 25: a stall ending is a fresh start
+                    // for the reader feed - the re-engagement
+                    // budget resets before this re-prime route
+                    // runs (see handleReaderFeedFailure).
+                    self.ghostReprimeAttempts = 0
                     await self.hardResyncGhost()
                     continue
                 }
@@ -2232,7 +2337,11 @@ final class TrapTubePlayerController: ObservableObject {
         guard audioPath == .ghost, !usingTapFallback else { return }
         if !ok {
             if ghostFeed == .streamed || ghostFeed == .sameAsset {
-                escalateGhostToFile()
+                // Round 25: a failed resync of a reader feed is
+                // a re-engagement case, not an instant concession
+                // - the bounded re-prime loop takes it from here
+                // (it no-ops if a recovery is already in flight).
+                handleReaderFeedFailure()
             } else if let item = player.currentItem {
                 beginTapFallback(item: item,
                                  reason: ghost.lastFailureReason ?? "the resync failed")
