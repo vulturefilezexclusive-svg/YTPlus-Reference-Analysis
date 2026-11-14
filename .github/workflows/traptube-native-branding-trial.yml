@@ -607,8 +607,41 @@ jobs:
           grep -Fq 'the trail keeps the WHOLE ladder' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'TrapTubeEQPlayerSection' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq '@"backgroundPlayback"' ci/traptube-host-tweak/TrapTubeBranding.x
+          # Round 24: Ghost same-asset feed + failure reasons on
+          # every exit point.
+          grep -Fq 'case none, sameAsset, streamed, file' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'primeSameAsset' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'lastFailureReason' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'lastFailureReason' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'GHOST (SAME-ASSET)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'GHOST FAILED:' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          if grep -Fq 'ghost failed - tap fallback' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift; then echo "VERIFY FAIL: Round 24 replaced the bare ghost-failure Diag with a reasoned one"; exit 36; fi
+          # Round 24: the Ghost limiter is created synchronously
+          # in process and its liveness is published to the FX
+          # store; the old fire-and-forget instantiation route,
+          # whose completion discarded every error, must not
+          # return.
+          if grep -Fq 'AVAudioUnit.instantiate' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift; then echo "VERIFY FAIL: Round 24 removed the silent-failure limiter instantiation route"; exit 36; fi
+          grep -Fq 'AVAudioUnitEffect(audioComponentDescription' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'ghostLimiterAvailability' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'Limiter: active' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          # Round 24: ONE shared auto-headroom computation, both
+          # paths, plus the tap's linked soft limiter.
+          grep -Fq 'cascadePeakBoostDB' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'headroomCompensationDB' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'headroomCompensationDB' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'headroomCompensationDB' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'limiterPeaks' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'softCeiling' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeEQManager.swift
+          grep -Fq 'Headroom' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          # Round 24: manual feed pagination - the list bottoms
+          # out and a Show more button is the only loadMore call
+          # site (scroll prefetch must not return).
+          grep -Fq 'hasMoreContent' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Show more' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          test "$(grep -c 'await feed.loadMore()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift)" -eq 1 || { echo "VERIFY FAIL: feed.loadMore must have exactly one call site (the Show more button)"; exit 36; }
           unzip -tq output/TrapTube-YTPlus-Branding-Theme-Trial.ipa
-          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits settings and the version footer replaced with the bandit credit line, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers (engine only since Round 22 - the stem separation UI is removed), TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, preserved original YTLite dylib, Round 20 width-pinned Stem Studio player with a minimize button and retained mini player, Ghost Tier 1 as the sole audio method since Round 22 (streamed/file feeds, tap kept only as the automatic fallback, no A/B picker), the EQ tab (the former Stem Studio tab renamed to EQ; Round 23: a structured premium-player section and EQ summary card over the YouTube search & feed section, with the shared EQ settings section presented as the player's connected panel sheet), six clean modern hip-hop presets, the Ghost sound-effects engine (reverb presets and mix, protective limiter, virtual-surround width, crossfeed and balance on both feeds), seamless in-place EQ re-attach with a position breadcrumb, and Round 23 background playback with the standard iOS Now Playing panel and remote commands, the resolver's full-ladder fall-through with a signed-in AUTH-WEB retry and a complete terminal Diag, and the YTPlus background-playback default."
+          echo "Verified: TrapTube app icon payload, host-wide localized text replacement, text-only header wordmark substitution, versioned native launch storyboard, removed account/developer/credits settings and the version footer replaced with the bandit credit line, selectable HTDemucs 4/6/fine-tuned models with transparent quality tiers (engine only since Round 22 - the stem separation UI is removed), TrapTube Settings section and Marker Felt display typography for TrapTube wordmarks, Stream Volume Boost settings wired to the existing VolumeBoostYT audio hook, 16-band EQ framework and player-item audio-tap integration, Stem Studio-aligned dark surfaces and controls, injected branding tweak, preserved original YTLite dylib, Round 20 width-pinned Stem Studio player with a minimize button and retained mini player, Ghost Tier 1 as the sole audio method since Round 22 (streamed/file feeds, tap kept only as the automatic fallback, no A/B picker), the EQ tab (the former Stem Studio tab renamed to EQ; Round 23: a structured premium-player section and EQ summary card over the YouTube search & feed section, with the shared EQ settings section presented as the player's connected panel sheet), six clean modern hip-hop presets, the Ghost sound-effects engine (reverb presets and mix, protective limiter, virtual-surround width, crossfeed and balance on both feeds), seamless in-place EQ re-attach with a position breadcrumb, and Round 23 background playback with the standard iOS Now Playing panel and remote commands, the resolver's full-ladder fall-through with a signed-in AUTH-WEB retry and a complete terminal Diag, and the YTPlus background-playback default, and Round 24's Ghost same-asset primary feed with a recorded failure reason on every exit point, the shared auto-headroom compensation with the tap's stereo-linked soft limiter and the preset low-end re-voice, the synchronously created Ghost limiter with its published liveness status, and the EQ tab feed's manual Show-more pagination."
 
       - name: Upload TrapTube branded trial IPA and build audit
         uses: actions/upload-artifact@v4
