@@ -1122,8 +1122,9 @@ final class TrapTubePlayerController: ObservableObject {
         @unknown default: state = "unknown"
         }
         let shownRate = player.rate != 0 ? player.rate : rate
+        let rateText = String(format: "%g", Double(shownRate))
         let video = (playerLayer?.isReadyForDisplay ?? false) ? "video ready" : "video not ready"
-        return "\(state) · \(shownRate, specifier: "%g")x · \(video)"
+        return "\(state) · \(rateText)x · \(video)"
     }
 
     // Round 16 watchdog: started the moment play() is called; if the
