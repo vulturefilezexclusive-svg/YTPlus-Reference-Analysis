@@ -759,6 +759,7 @@ private struct TrapTubeEQPlayerSection: View {
             } else {
                 emptyStage
             }
+            TrapTubeShareDiagnosticsButton(controller: controller)
         }
     }
 
@@ -786,6 +787,54 @@ private struct TrapTubeEQPlayerSection: View {
         .padding(.vertical, 22).padding(.horizontal, 16)
         .ttGlassCard(cornerRadius: 18)
     }
+}
+
+/// Round 30: Share diagnostics - exports the Diag trail plus the
+/// session and EQ/FX state as a .txt through the iOS share sheet,
+/// so a failure can be sent for analysis instead of screenshotted
+/// one line at a time. Sits under the player card (and under the
+/// empty stage) so it stays reachable whether or not a session
+/// is live.
+private struct TrapTubeShareDiagnosticsButton: View {
+    let controller: TrapTubePlayerController?
+
+    @State private var shareItem: TrapTubeShareItem?
+
+    var body: some View {
+        Button {
+            if let url = TrapTubeDiagnosticsExport.write(controller: controller) {
+                shareItem = TrapTubeShareItem(url: url)
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "square.and.arrow.up").font(.caption.weight(.bold))
+                Text("Share diagnostics").font(.caption.weight(.bold))
+            }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 9)
+            .background(Color.white.opacity(0.08), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .sheet(item: $shareItem) { item in
+            TrapTubeShareSheet(items: [item.url])
+        }
+    }
+}
+
+private struct TrapTubeShareItem: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+private struct TrapTubeShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 /// The live session's card: the minimized controller rendered as
