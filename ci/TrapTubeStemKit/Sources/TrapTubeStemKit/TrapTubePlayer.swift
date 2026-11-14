@@ -1330,6 +1330,43 @@ final class TrapTubePlayerController: ObservableObject {
     private var ghostLivenessVideo: TimeInterval = -1
     private var ghostLivenessSince: Date = .distantPast
     private var ghostSilentStrikes = 0
+    /// Round 28: true while the playing item is muted BY the
+    /// Ghost takeover - as opposed to the user's own mute
+    /// choice, which lives in isMuted. Before this round,
+    /// startGhost muted the item the moment the Ghost ladder
+    /// STARTED, so any slow stage was an open-ended silent
+    /// video (Build 228: an 88-minute mix audible for two
+    /// seconds, then cut hard to silence under
+    /// "GHOST STARTING..."). Now the item is muted only at
+    /// the live handoff - a feed the engine has proven is
+    /// rendering - and every recovery route restores the
+    /// item's audio while Ghost re-engages.
+    private var ghostTakeoverMuted = false
+
+    /// The live handoff: the ONLY place the takeover mute
+    /// lands. Called when a Ghost feed has proven it renders
+    /// (at start, after a re-prime, after an escalation,
+    /// after a recovery resync).
+    private func applyGhostTakeoverMute() {
+        guard !ghostTakeoverMuted else { return }
+        ghostTakeoverMuted = true
+        player.isMuted = true
+    }
+
+    /// Restore the item's own audio (to the user's mute
+    /// choice) when a Ghost takeover ends or suspends for a
+    /// re-engagement. The breadcrumb is written on every
+    /// fallback (alwaysNote) and whenever a restore actually
+    /// changes the item's state.
+    private func restoreItemAudioAfterGhostTakeover(alwaysNote: Bool = false) {
+        if ghostTakeoverMuted {
+            ghostTakeoverMuted = false
+            player.isMuted = isMuted
+            noteDiagnostic("ghost takeover aborted: item audio restored")
+        } else if alwaysNote {
+            noteDiagnostic("ghost takeover aborted: item audio restored")
+        }
+    }
 
     private func ghostFeedName(_ feed: TrapTubeGhostAudio.Feed) -> String {
         switch feed {
@@ -1756,6 +1793,7 @@ final class TrapTubePlayerController: ObservableObject {
         usingTapFallback = false
         ghostFailureShort = nil
         player.isMuted = false
+        ghostTakeoverMuted = false
         loadTask?.cancel()
         watchdogTask?.cancel()
         watchdogTask = nil
@@ -1798,29 +1836,16 @@ final class TrapTubePlayerController: ObservableObject {
                 guard !Task.isCancelled else { return }
                 self.heartbeatResolveReturned = true
                 self.heartbeatItem = resolved.item
-                // Round 26, Stage 1: prime-before-play. The Ghost
-                // same-asset reader is built and started on its
-                // clone NOW, while no player holds the item yet,
-                // so a refusal here cannot be contention with a
-                // running player; the attempt's asset facts are
-                // recorded either way, and when this does not
-                // engage, startGhost runs the ladder on from
-                // Stage 2. This sits BEFORE the resolved
-                // milestone on purpose: the milestone-to-play()
-                // span below stays free of suspension, exactly
-                // as Round 16 requires - the only suspensions in
-                // this whole stretch are the resolve itself and
-                // this one prime, both of them ours, neither of
-                // them EQ hook work.
-                if self.audioPath == .ghost {
-                    self.ghost.onDiagnosticNote = { [weak self] note in
-                        Task { @MainActor in self?.noteDiagnostic(note) }
-                    }
-                    let primed = await self.ghost.preparePrePlay(clone: resolved.ghostClone, startAt: 0)
-                    self.noteDiagnostic(primed
-                        ? "ghost prime timing: pre-play - reader started before play()"
-                        : "ghost prime timing: pre-play did not engage - post-play ladder follows")
-                }
+                // Round 28: Round 26's prime-before-play stage
+                // used to sit here - a clone load and reader
+                // build suspended between the resolver's return
+                // and play(), on every single load, for a
+                // reader this device has never once allowed to
+                // exist. It is removed outright: nothing
+                // suspends between the resolve and play() now,
+                // and Ghost's export-first ladder runs after
+                // play() from startGhost, with the item audible
+                // until the live handoff (see startGhost).
                 // Round 16 ordering invariant: from here to play() the
                 // sequence is purely synchronous - milestone, item in,
                 // play() - with no suspension on any EQ work in between
@@ -1852,8 +1877,9 @@ final class TrapTubePlayerController: ObservableObject {
                 // Round 20: the audio path decides what happens
                 // next. Tap: the Round 19 immediate attach, exactly
                 // as before. Ghost: the tap stays OUT of this item -
-                // the engine owns the audio and the muted item is
-                // video-only; the tap is attached later only if
+                // the engine takes the audio over at the live
+                // handoff (Round 28: the item stays audible until
+                // that moment); the tap is attached later only if
                 // Ghost fails outright (beginTapFallback).
                 if self.audioPath == .tap {
                     self.preservingPlaybackIntent { self.hook.attachImmediately(to: resolved.item) }
@@ -2251,14 +2277,24 @@ final class TrapTubePlayerController: ObservableObject {
         ghost.onDiagnosticNote = { [weak self] note in
             Task { @MainActor in self?.noteDiagnostic(note) }
         }
-        // The item goes silent the moment Ghost takes the audio; if
-        // the prime fails, beginTapFallback unmutes it again.
-        player.isMuted = true
+        // Round 28: the item is NOT muted here. It stays
+        // audible through the whole Ghost ladder - however
+        // long that takes - and is muted only at the live
+        // handoff below, when the winning feed has proven it
+        // renders. (The code this replaces muted the item at
+        // this exact line, before the ladder ran; see
+        // ghostTakeoverMuted for what that did on device.)
         ghostTask = Task { [weak self] in
             guard let self else { return }
             self.ghost.setBaselineRate(self.rate)
             self.ghost.applyManagerState()
             self.ghost.applyFXSettings()
+            // Round 28: the engine primes toward a playing
+            // session, so its per-stage handoff proof
+            // (rendered progress, see the engine's
+            // confirmRendering) can actually run during the
+            // ladder instead of passing untested.
+            self.ghost.setDesiredPlaying(self.player.timeControlStatus != .paused)
             // Round 25: the resolve-time clone descriptor rides
             // along - it is the same-asset feed's whole input
             // (see the engine). The item itself is handed over
@@ -2275,10 +2311,19 @@ final class TrapTubePlayerController: ObservableObject {
             self.ghostFeed = feed
             self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
             self.ghost.setMuted(self.isMuted)
+            // Round 28: THE HANDOFF. The returned feed has
+            // proven it renders - it rendered at zero mixer
+            // level through the ladder, and start() lifted
+            // that silence as it returned. The item goes
+            // silent NOW, in the same synchronous step, so
+            // the user hears neither a gap nor the two legs
+            // doubled.
+            self.applyGhostTakeoverMute()
+            self.noteDiagnostic("ghost takeover: item muted at the live handoff")
             // Round 26: the live note names the ladder stage
             // that owns the feed, so a screenshot separates a
-            // Stage 1 pre-play engagement from a Stage 3
-            // extraction at a glance.
+            // Stage 1 export engagement from a Stage 4 reader
+            // engagement at a glance.
             let feedName = feed == .file ? "file"
                 : feed == .exported ? "export"
                 : feed == .sameAsset ? "same-asset" : "streamed"
@@ -2307,6 +2352,11 @@ final class TrapTubePlayerController: ObservableObject {
               let item = player.currentItem,
               !ghostReprimeInFlight else { return }
         ghostReprimeInFlight = true
+        // Round 28: while Ghost re-engages, the item is the
+        // audible leg again - the takeover mute lifts for the
+        // whole re-prime loop and lands again only when a
+        // re-engaged feed has proven it renders.
+        restoreItemAudioAfterGhostTakeover()
         ghostTask?.cancel()
         ghostTask = Task { [weak self] in
             guard let self else { return }
@@ -2331,10 +2381,14 @@ final class TrapTubePlayerController: ObservableObject {
                 }
                 if ok {
                     self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+                    // Round 28: the resync only returns true
+                    // for a feed that has proven it renders -
+                    // the takeover mute lands again.
+                    self.applyGhostTakeoverMute()
                     // Round 26: the resync may have re-engaged
                     // through a different ladder stage than the
-                    // feed that died (a Stage 3 cache hit after a
-                    // Stage 2 death) - adopt the engine's live
+                    // feed that died (an export cache hit after
+                    // a reader death) - adopt the engine's live
                     // feed kind and name the stage.
                     self.ghostFeed = self.ghost.feed
                     let engagedNote = self.ghost.lastEngagedStage.map { "ghost re-engaged (stage \($0))" }
@@ -2360,6 +2414,10 @@ final class TrapTubePlayerController: ObservableObject {
               ghostFeed == .streamed || ghostFeed == .sameAsset,
               let item = player.currentItem else { return }
         ghostTask?.cancel()
+        // Round 28: the item carries the audio while the file
+        // feed downloads and proves itself; the takeover mute
+        // lands again only on a proven feed.
+        restoreItemAudioAfterGhostTakeover()
         ghostTask = Task { [weak self] in
             guard let self else { return }
             let ok = await self.ghost.switchToFile { [weak self] in
@@ -2369,6 +2427,7 @@ final class TrapTubePlayerController: ObservableObject {
             if ok {
                 self.ghostFeed = .file
                 self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+                self.applyGhostTakeoverMute()
             } else {
                 self.beginTapFallback(item: item,
                                       reason: self.ghost.lastFailureReason ?? "the file feed failed")
@@ -2389,7 +2448,11 @@ final class TrapTubePlayerController: ObservableObject {
         ghostDriftMs = nil
         syncTask?.cancel()
         ghost.teardownFeed(deleteTemp: true)
-        player.isMuted = isMuted
+        // Round 28: the fallback ALWAYS restores the item's
+        // audio first (to the user's own mute choice) - the
+        // tap now processes a sounding item, never a muted
+        // one Ghost left behind.
+        restoreItemAudioAfterGhostTakeover(alwaysNote: true)
         noteDiagnostic("ghost failed: \(reason) - tap fallback")
         preservingPlaybackIntent { hook.attachImmediately(to: item) }
     }
@@ -2455,6 +2518,17 @@ final class TrapTubePlayerController: ObservableObject {
                         self.ghost.prefetchExportWindow(startingAt: window.end)
                     }
                 }
+                // Round 28: the engine's own running state is
+                // a liveness signal in its own right. A stopped
+                // engine (a media-services reset, a session
+                // deactivation the host app forced) freezes the
+                // rendered position the guard below watches -
+                // restart it under the live feed first; the
+                // guard remains the arbiter of whether the feed
+                // actually recovers.
+                if self.ghost.restartEngineIfStopped() {
+                    self.noteDiagnostic("ghost live-but-silent: engine stopped under a live feed - restart attempted")
+                }
                 // Round 27: liveness before drift correction -
                 // a feed rendering nothing has no drift worth
                 // bending, only a failure to route.
@@ -2465,6 +2539,13 @@ final class TrapTubePlayerController: ObservableObject {
                         self.beginTapFallback(item: item,
                                               reason: "ghost live-but-silent: the \(self.ghostFeedName(self.ghostFeed)) feed rendered no progress")
                     } else {
+                        // Round 28: this resync can take real
+                        // time (a fresh window extraction). The
+                        // item is audible for its duration; the
+                        // takeover mute lands again when the
+                        // resync proves rendering (see
+                        // hardResyncGhost).
+                        self.restoreItemAudioAfterGhostTakeover()
                         await self.hardResyncGhost()
                     }
                     continue
@@ -2511,11 +2592,17 @@ final class TrapTubePlayerController: ObservableObject {
         let ok = await ghost.resync(to: target.isFinite ? target : 0)
         guard audioPath == .ghost, !usingTapFallback else { return }
         if ok {
-            // Round 26: a resync re-runs the ladder from
-            // Stage 2, so the live feed kind can differ from
-            // the one that was resynced - keep the published
-            // kind (and with it the status line) truthful.
+            // Round 26: a resync re-runs the ladder, so the
+            // live feed kind can differ from the one that was
+            // resynced - keep the published kind (and with it
+            // the status line) truthful.
             ghostFeed = ghost.feed
+            // Round 28: a resync that began with the item
+            // restored (the liveness route) re-takes the item
+            // over now that the feed has proven it renders
+            // again. When the takeover was never lifted, this
+            // is a no-op.
+            applyGhostTakeoverMute()
         }
         if !ok {
             if ghostFeed == .streamed || ghostFeed == .sameAsset {
@@ -2575,6 +2662,7 @@ final class TrapTubePlayerController: ObservableObject {
         ghost.shutdown()
         ghostFeed = .none
         ghostDriftMs = nil
+        ghostTakeoverMuted = false
         // Round 23: the session is over for real - release the
         // lock-screen panel. The minimize and PiP returns above
         // keep it: playback, and its panel, continue there.
