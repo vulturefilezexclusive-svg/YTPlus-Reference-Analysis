@@ -1182,7 +1182,7 @@ final class TrapTubeGhostAudio {
     /// was ENTERED, the (whole-file) extraction then ran for
     /// many seconds while the video played on, and the pump
     /// anchored itself that many seconds in the past.
-    private func primeExport(position: () -> TimeInterval) async -> Bool {
+    private func primeExport(position: @escaping () -> TimeInterval) async -> Bool {
         guard let cloneSource else {
             recordFailure(route: "export",
                           cause: "no clone descriptor to extract from",
