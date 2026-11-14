@@ -1,5 +1,6 @@
 import AVFAudio
 import AVFoundation
+import AudioToolbox
 import Foundation
 
 // MARK: - Ghost audio path (Round 20, Tier 1: Stem Studio player only)
@@ -289,7 +290,16 @@ final class TrapTubeGhostAudio {
     private let varispeed = AVAudioUnitVarispeed()
     private let eqUnit = AVAudioUnitEQ(numberOfBands: 10)
     private let reverbUnit = AVAudioUnitReverb()
-    private let dynamicsUnit = AVAudioUnitDynamicsProcessor()
+    /// Round 22 fix (runs 203/204): the iOS 27 SDK no longer
+    /// vends the AVAudioUnitDynamicsProcessor class to Swift, so
+    /// the very same DynamicsProcessor audio unit is created
+    /// through AVAudioUnit's generic component instantiation
+    /// (see instantiateDynamicsUnit) and configured through its
+    /// AUAudioUnit parameter tree. Nil until that in-process
+    /// instantiation lands - milliseconds after init - and the
+    /// chain simply runs without the limiter stage until then;
+    /// wireChain inserts it the moment it arrives.
+    private var dynamicsUnit: AVAudioUnit?
 
     private var connected = false
     private var graphFormat: AVAudioFormat?
@@ -354,9 +364,36 @@ final class TrapTubeGhostAudio {
         engine.attach(varispeed)
         engine.attach(eqUnit)
         engine.attach(reverbUnit)
-        engine.attach(dynamicsUnit)
         applyFXSettings()
         applyParameters()
+        instantiateDynamicsUnit()
+    }
+
+    /// Creates Apple's DynamicsProcessor effect unit ('aufx' /
+    /// 'dyna' / 'appl') through AVAudioUnit's generic component
+    /// instantiation - the route that survives the iOS 27 SDK
+    /// dropping the typed Swift subclass. Loaded in-process: no
+    /// extension host, completes in milliseconds. On arrival the
+    /// unit is attached and configured, and if the graph is
+    /// already connected it is rewired with the limiter inserted.
+    private func instantiateDynamicsUnit() {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: kAudioUnitSubType_DynamicsProcessor,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0)
+        AVAudioUnit.instantiate(with: description, options: [.loadInProcess]) { [weak self] unit, _ in
+            DispatchQueue.main.async {
+                guard let self, let unit else { return }
+                self.dynamicsUnit = unit
+                self.engine.attach(unit)
+                self.applyParameters()
+                if self.connected, let format = self.graphFormat {
+                    self.wireChain(format: format)
+                }
+            }
+        }
     }
 
     // MARK: Parameters (cached: an engine reset must not lose them)
@@ -374,20 +411,34 @@ final class TrapTubeGhostAudio {
         varispeed.rate = baselineRate * correction
         engine.mainMixerNode.outputVolume = outputLevelValue
         pushReverbState()
-        // The limiter: a protective ceiling, not a compressor
-        // sound - threshold -1 dB with 1 dB of headroom puts the
-        // effective ceiling at 0 dBFS, attack 1 ms, release
-        // 150 ms, no expansion, neutral master gain. It catches
-        // peaks (EQ boosts and reverb tails included) without
-        // pumping on typical content.
-        dynamicsUnit.threshold = -1
-        dynamicsUnit.headRoom = 1
-        dynamicsUnit.expansionRatio = 1
-        dynamicsUnit.expansionThreshold = -80
-        dynamicsUnit.attackTime = 0.001
-        dynamicsUnit.releaseTime = 0.15
-        dynamicsUnit.masterGain = 0
-        dynamicsUnit.bypass = !fxLimiterEnabled
+        configureDynamicsUnit()
+    }
+
+    /// The limiter: a protective ceiling, not a compressor sound.
+    /// The generically-created DynamicsProcessor unit is set
+    /// through its AUAudioUnit parameter tree - the addresses are
+    /// the classic kDynamicsProcessor_* parameter IDs (threshold
+    /// 0, headroom 1, expansion ratio 2, expansion threshold 3,
+    /// attack 4, release 5, master gain 6). Threshold -1 dB with
+    /// 1 dB of headroom puts the effective ceiling at 0 dBFS,
+    /// attack 1 ms, release 150 ms, no expansion, neutral master
+    /// gain: it catches peaks (EQ boosts and reverb tails
+    /// included) without pumping on typical content. Bypass
+    /// follows the persisted limiter toggle.
+    private func configureDynamicsUnit() {
+        guard let unit = dynamicsUnit else { return }
+        let tree = unit.auAudioUnit.parameterTree
+        func set(_ id: AUParameterAddress, _ value: AUValue) {
+            tree?.parameter(withAddress: id)?.setValue(value, originator: nil)
+        }
+        set(AUParameterAddress(kDynamicsProcessor_ThresholdParam), -1)
+        set(AUParameterAddress(kDynamicsProcessor_HeadRoomParam), 1)
+        set(AUParameterAddress(kDynamicsProcessor_ExpansionRatioParam), 1)
+        set(AUParameterAddress(kDynamicsProcessor_ExpansionThresholdParam), -80)
+        set(AUParameterAddress(kDynamicsProcessor_AttackTimeParam), 0.001)
+        set(AUParameterAddress(kDynamicsProcessor_ReleaseTimeParam), 0.15)
+        set(AUParameterAddress(kDynamicsProcessor_MasterGainParam), 0)
+        unit.bypass = !fxLimiterEnabled
     }
 
     /// Loads the selected factory preset into the reverb unit
@@ -417,7 +468,7 @@ final class TrapTubeGhostAudio {
         fxReverbMix = fx.reverbMix
         fxLimiterEnabled = fx.limiterEnabled
         pushReverbState()
-        dynamicsUnit.bypass = !fxLimiterEnabled
+        dynamicsUnit?.bypass = !fxLimiterEnabled
     }
 
     /// Pulls the EQ state from TrapTubeEQManager (the panel's source
@@ -471,22 +522,34 @@ final class TrapTubeGhostAudio {
     private func connectGraph(format: AVAudioFormat) -> Bool {
         if connected, graphFormat == format { return true }
         guard format.sampleRate > 0, format.channelCount > 0 else { return false }
-        // A format change needs fresh connections; reset() drops
-        // them (and node parameters), so re-apply ours after. The
-        // reset also drops the reverb unit's loaded preset -
-        // invalidate the cache so applyParameters reloads it.
+        graphFormat = format
+        connected = true
+        wireChain(format: format)
+        return true
+    }
+
+    /// (Re)builds the connections in `format`: node -> varispeed
+    /// -> EQ -> reverb -> dynamics (limiter, when the unit has
+    /// landed) -> mixer. A format change needs fresh connections;
+    /// reset() drops them (and node parameters), so re-apply ours
+    /// after. The reset also drops the reverb unit's loaded
+    /// preset - invalidate the cache so applyParameters reloads
+    /// it. Also called from the dynamics instantiation completion
+    /// to insert the limiter into an already-connected graph.
+    private func wireChain(format: AVAudioFormat) {
         engine.reset()
         loadedReverbPreset = .off
         engine.connect(node, to: varispeed, format: format)
         engine.connect(varispeed, to: eqUnit, format: format)
         engine.connect(eqUnit, to: reverbUnit, format: format)
-        engine.connect(reverbUnit, to: dynamicsUnit, format: format)
-        engine.connect(dynamicsUnit, to: engine.mainMixerNode, format: format)
-        graphFormat = format
-        connected = true
+        if let dynamics = dynamicsUnit {
+            engine.connect(reverbUnit, to: dynamics, format: format)
+            engine.connect(dynamics, to: engine.mainMixerNode, format: format)
+        } else {
+            engine.connect(reverbUnit, to: engine.mainMixerNode, format: format)
+        }
         applyParameters()
         applyManagerState()
-        return true
     }
 
     // MARK: Starting feeds
