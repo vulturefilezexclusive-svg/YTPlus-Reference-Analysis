@@ -1236,6 +1236,10 @@ enum TrapTubeNowPlaying {
 /// EQ/FX settings - everything a screenshot of the one-line Diag
 /// cannot carry. The EQ tab's Share diagnostics button writes it
 /// to a temp .txt and hands it to the iOS share sheet.
+/// @MainActor because everything it reads is main-actor-isolated
+/// (the player controller and the Ghost engine); its one caller
+/// is a SwiftUI button action, already on the main actor.
+@MainActor
 enum TrapTubeDiagnosticsExport {
 
     static func text(controller: TrapTubePlayerController?) -> String {
