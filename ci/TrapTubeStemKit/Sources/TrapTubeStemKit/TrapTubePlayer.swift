@@ -1049,23 +1049,24 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var duration: Double = 0
     @Published var rate: Float = 1.0
 
-    // Round 20: Ghost Tier 1 - the dual-path audio engine for this
-    // player (see TrapTubeGhostAudio.swift). The persisted A/B choice
-    // uses the same defaults key as the hybrid app; Ghost is the
-    // default. The view shows pathStatusText while Ghost owns the
-    // audio; the tap path keeps the EQ manager's own status line.
+    // Ghost Tier 1 - the audio engine for this player (see
+    // TrapTubeGhostAudio.swift). Round 22: Ghost is the ONLY audio
+    // method - the Ghost/Tap A/B picker is gone, the persisted
+    // choice is migrated away in init, and this is always .ghost.
+    // The .tap case survives only so the fallback state keeps its
+    // meaning: it is never a selected method anymore, just the
+    // automatic safety net in usingTapFallback, which the status
+    // line names TAP (FALLBACK) out loud. The view shows
+    // pathStatusText while Ghost owns the audio; on the fallback
+    // the EQ manager's own status line takes over.
     enum AudioPath: String { case ghost, tap }
-    private(set) var audioPath: AudioPath = {
-        let saved = UserDefaults.standard.string(forKey: "TrapTube.NativePlayer.AudioPath")
-        return AudioPath(rawValue: saved ?? "") ?? .ghost
-    }()
+    private(set) var audioPath: AudioPath = .ghost
     let ghost = TrapTubeGhostAudio()
     @Published var ghostFeed: TrapTubeGhostAudio.Feed = .none
     @Published var ghostDriftMs: Int?
     @Published var usingTapFallback = false
     private var ghostTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
-    private var audioPathObserver: NSObjectProtocol?
     private var lastHardResync = Date.distantPast
     /// The video this session loaded; a re-presented (adopted)
     /// player view compares it against its request and skips the
@@ -1173,11 +1174,13 @@ final class TrapTubePlayerController: ObservableObject {
         // a second hook instance's synchronous work around our items.
         TrapTubeAudioHook.registerResolverPlayer(player)
         hook.install(on: player)
-        audioPathObserver = NotificationCenter.default.addObserver(
-            forName: Notification.Name("TrapTubeAudioPathChanged"), object: nil, queue: .main) { [weak self] note in
-            guard let raw = note.userInfo?["path"] as? String,
-                  let path = AudioPath(rawValue: raw) else { return }
-            self?.switchAudioPath(to: path)
+        // Round 22 migration: rewrite a stored "tap" selection
+        // from the removed A/B picker, so the persisted key can
+        // never divert the player to a method choice that no
+        // longer exists - Ghost is the only audio method now.
+        if UserDefaults.standard.string(forKey: "TrapTube.NativePlayer.AudioPath") == AudioPath.tap.rawValue {
+            UserDefaults.standard.set(AudioPath.ghost.rawValue,
+                                      forKey: "TrapTube.NativePlayer.AudioPath")
         }
         pipDelegate.onDidStart = { [weak self] in
             DispatchQueue.main.async { [weak self] in
@@ -1685,6 +1688,7 @@ final class TrapTubePlayerController: ObservableObject {
             guard let self else { return }
             self.ghost.setBaselineRate(self.rate)
             self.ghost.applyManagerState()
+            self.ghost.applyFXSettings()
             let feed = await self.ghost.start(source: source) { [weak self] in
                 self?.player.currentTime().seconds ?? 0
             }
@@ -1755,6 +1759,10 @@ final class TrapTubePlayerController: ObservableObject {
                 guard let self, self.audioPath == .ghost, !self.usingTapFallback,
                       self.ghostFeed != .none, self.player.currentItem === item else { continue }
                 self.ghost.applyManagerState()
+                // Round 22: the effects units ride the same tick,
+                // so reverb/limiter edits land live on the units
+                // (the buffer effects read the store directly).
+                self.ghost.applyFXSettings()
                 if self.player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
                     if !waitingOnVideo {
                         waitingOnVideo = true
@@ -1803,45 +1811,11 @@ final class TrapTubePlayerController: ObservableObject {
     }
 
     /// The EQ panel's Ghost/Tap A/B switch, live on the playing
-    /// session: the video item is never reloaded and the position
-    /// never resets - only the AUDIO leg changes hands at the
-    /// current position. Tap -> Ghost mints a fresh source, takes
-    /// the tap off, and primes the engine; Ghost -> Tap shuts the
-    /// engine down, unmutes, and attaches the tap to the live item.
-    func switchAudioPath(to path: AudioPath) {
-        guard path != audioPath else { return }
-        audioPath = path
-        UserDefaults.standard.set(path.rawValue, forKey: "TrapTube.NativePlayer.AudioPath")
-        noteDiagnostic("audio path -> \(path.rawValue) at \(Int(currentTime))s")
-        guard let item = player.currentItem, let videoID = loadedVideoID else { return }
-        if path == .ghost {
-            usingTapFallback = false
-            ghostTask = Task { [weak self] in
-                guard let self else { return }
-                guard let fresh = await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) else {
-                    self.usingTapFallback = true
-                    return
-                }
-                let source = TrapTubeGhostAudio.Source(
-                    url: fresh.url, userAgent: fresh.userAgent,
-                    refresher: { await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) })
-                self.preservingPlaybackIntent {
-                    TrapTubeEQManager.shared.detach(from: item)
-                }
-                self.startGhost(source: source, item: item)
-            }
-        } else {
-            ghostTask?.cancel()
-            syncTask?.cancel()
-            ghost.shutdown()
-            ghostFeed = .none
-            ghostDriftMs = nil
-            usingTapFallback = false
-            player.isMuted = isMuted
-            preservingPlaybackIntent { hook.attachImmediately(to: item) }
-        }
-    }
-
+    // Round 22: the Ghost/Tap A/B switch that used to live here is
+    // deleted, not deprecated - Ghost is the only audio method,
+    // the panel picker is gone, and a stored "tap" value is
+    // migrated to "ghost" in init. The tap survives only as the
+    // automatic fallback in beginTapFallback.
     /// Full teardown for the mini player's close button: the
     /// retained session ends instead of being retained again.
     func closeRetainedSession() {
@@ -2619,18 +2593,104 @@ struct TrapTubeEQPreset {
         bandGains: [-2, -1, 0, 2, 4, 4.6, 5, 5, 5, 4.4, 4, 2.8, 2, 1.4, 0.8, 0],
         bass: 0, master: 100)
 
-    /// TrapTube's own first, then the Musi pack in Musi's order;
-    /// Flat sits last as the reset-style option.
+    // MARK: Clean modern hip-hop pack (Round 22)
+    //
+    // Six presets voiced for newer-generation hip hop WITHOUT the
+    // distortion the older curves can stack up: no band boost
+    // above +4 dB, the sub bands (31/62 Hz) at +4 or less, shaping
+    // done with cuts as much as boosts, the harsh top (8-16 kHz)
+    // at zero or negative on the aggressive voicings, modest bass
+    // values, and masters at 94-96% so stacked boosts keep
+    // headroom under the limiter instead of slamming it.
+    static let newEraHipHop = TrapTubeEQPreset(
+        name: "New Era Hip Hop",
+        bandGains: [3, 3, 2, 0, -1, -1, 0, 1, 1.5, 1.5, 1, 0.5, 0, 0, -0.5, -1],
+        bass: 3, master: 96)
+    static let modernTrapClean = TrapTubeEQPreset(
+        name: "Modern Trap Clean",
+        bandGains: [4, 4, 2, -1, -2, -1, 0, 1, 2, 2, 1.5, 1, 0, -0.5, -1, -1.5],
+        bass: 4, master: 95)
+    static let melodicClean = TrapTubeEQPreset(
+        name: "Melodic Clean",
+        bandGains: [2, 2.5, 3, 2, 1, 0.5, 0.5, 1, 1.5, 1.5, 1, 0.5, 0, -0.5, -1, -1.5],
+        bass: 2, master: 96)
+    static let rageClean = TrapTubeEQPreset(
+        name: "Rage Clean",
+        bandGains: [4, 3.5, 1, -2, -2.5, -1.5, -0.5, 0, 1, 1, 0.5, 0, -1, -1.5, -2, -2.5],
+        bass: 4, master: 94)
+    static let drillClean = TrapTubeEQPreset(
+        name: "Drill Clean",
+        bandGains: [3, 4, 2, 0, -1, 0, 1, 1.5, 2, 2, 1.5, 0.5, 0, -0.5, -1, -1],
+        bass: 3, master: 95)
+    static let undergroundClean = TrapTubeEQPreset(
+        name: "Underground Clean",
+        bandGains: [2.5, 3, 2.5, 1.5, 0.5, 0, 0, 0, 0.5, 0, -0.5, -1, -2, -2.5, -3, -3.5],
+        bass: 2, master: 96)
+
+    /// TrapTube's own first, then the Musi pack in Musi's order,
+    /// then the Round 22 clean pack; Flat sits last as the
+    /// reset-style option.
     static let all: [TrapTubeEQPreset] = [
         .trap, .drill, .clarity,
         .bando, .defaultPreset, .bass, .bassPlusPlus, .acoustic,
         .classical, .dance, .deep, .electronic, .hipHop, .jazz,
         .loudness, .lounge, .pop, .rock, .spokenWord,
+        .newEraHipHop, .modernTrapClean, .melodicClean, .rageClean,
+        .drillClean, .undergroundClean,
         .flat
     ]
 }
 
 struct TrapTubeEqualizerPanel: View {
+    @Environment(\.dismiss) private var dismiss
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
+                    Text("A 16-band graphic equalizer with bass boost and master gain.")
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+
+            ScrollView(showsIndicators: false) {
+                TrapTubeEQSettingsSection()
+                    .padding(18)
+            }
+        }
+        .background {
+            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
+                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+        }
+        .preferredColorScheme(.dark)
+    }
+}
+
+/// Round 22: the EQ controls as a reusable section. The
+/// in-player sheet (TrapTubeEqualizerPanel above) presents it,
+/// and the EQ tab embeds it at the top of its single page, so
+/// both surfaces drive the SAME shared EQ manager and effects
+/// store - there is no second EQ implementation to drift. Every
+/// change applies live to whatever is playing, including a
+/// session retained by the mini player.
+struct TrapTubeEQSettingsSection: View {
     @State private var streamStatus = "Not attached yet"
     @State private var selectedPresetName: String? =
         UserDefaults.standard.string(forKey: "TrapTube.EQ.Preset")
@@ -2638,25 +2698,11 @@ struct TrapTubeEqualizerPanel: View {
     /// is applied programmatically this token is bumped and used as the
     /// slider cards' .id(...) to force fresh rows showing the new values.
     @State private var eqRefreshToken = 0
-    @Environment(\.dismiss) private var dismiss
+    @State private var reverbPreset: TrapTubeReverbPreset =
+        TrapTubeFXSettings.shared.reverbPreset
 
     private var manager: TrapTubeEQManager { TrapTubeEQManager.shared }
-
-    /// Round 20: the Ghost/Tap A/B selection. Reads and writes the
-    /// persisted choice; a change also posts the switch so whichever
-    /// player session is live swaps its audio leg at the current
-    /// position (the controller owns the switch - see
-    /// switchAudioPath).
-    private var audioPathSelection: Binding<String> {
-        Binding(
-            get: { UserDefaults.standard.string(forKey: "TrapTube.NativePlayer.AudioPath") ?? "ghost" },
-            set: { newValue in
-                UserDefaults.standard.set(newValue, forKey: "TrapTube.NativePlayer.AudioPath")
-                NotificationCenter.default.post(name: Notification.Name("TrapTubeAudioPathChanged"),
-                                                object: nil, userInfo: ["path": newValue])
-            }
-        )
-    }
+    private var fx: TrapTubeFXSettings { TrapTubeFXSettings.shared }
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -2719,122 +2765,153 @@ struct TrapTubeEqualizerPanel: View {
         .ttGlassCard(cornerRadius: 18)
     }
 
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
-                    Text("A 16-band graphic equalizer with bass boost and master gain.")
-                        .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+    /// Round 22: the Ghost engine's sound effects (the Poweramp
+    /// port). These are Ghost-only by construction - the reverb
+    /// and limiter are units in its chain, and width, crossfeed
+    /// and balance process its stream - so this card says so
+    /// instead of implying they reach the tap fallback.
+    private var effectsCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("SOUND EFFECTS").font(.caption.weight(.black))
+                .tracking(1.5).foregroundStyle(accent)
+            Text("Rendered by the Ghost engine while it carries the audio - if a stream ever falls back to the EQ tap, the bands, bass, master and presets still apply, but these effects do not.")
+                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Reverb").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(TrapTubeReverbPreset.allCases) { preset in
+                        Button {
+                            reverbPreset = preset
+                            fx.setReverbPreset(preset)
+                        } label: {
+                            Text(preset.displayName)
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(reverbPreset == preset
+                                            ? AnyShapeStyle(accent)
+                                            : AnyShapeStyle(.ultraThinMaterial),
+                                            in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                Spacer()
-                Button("Done") { dismiss() }
+            }
+            TrapTubeEQSliderRow(title: "Reverb mix", value: fx.reverbMix,
+                                range: 0...100, suffix: "%") {
+                fx.setReverbMix($0)
+            }
+            Toggle("Limiter (anti-distortion)", isOn: Binding(
+                get: { fx.limiterEnabled },
+                set: { fx.setLimiterEnabled($0) }
+            ))
+            .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+            .tint(accent)
+            TrapTubeEQSliderRow(title: "Virtual surround (width)", value: fx.widthPercent,
+                                range: 0...200, suffix: "%") {
+                fx.setWidthPercent($0)
+            }
+            TrapTubeEQSliderRow(title: "Crossfeed", value: fx.crossfeedPercent,
+                                range: 0...100, suffix: "%") {
+                fx.setCrossfeedPercent($0)
+            }
+            TrapTubeEQSliderRow(title: "Balance", value: fx.balance,
+                                range: -100...100, suffix: "") {
+                fx.setBalance($0)
+            }
+        }
+        .padding(16)
+        .ttGlassCard(cornerRadius: 18)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Equalizer enabled", isOn: Binding(
+                    get: { manager.isEQEnabled },
+                    set: { manager.setEQEnabled($0) }
+                ))
+                .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                .tint(accent)
+                HStack {
+                    Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    // Round 21: the status string can be a
+                    // whole error sentence; framed + wrapped
+                    // to two lines so it can never push the
+                    // card wider than the sheet.
+                    Text(streamStatus)
+                        .font(.caption.weight(.bold)).foregroundStyle(accent)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .onAppear { streamStatus = manager.attachmentStatus }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
+                    if let status = note.userInfo?["status"] as? String { streamStatus = status }
+                }
+                // Round 22: Ghost is the only audio method - the
+                // Ghost/Tap A/B picker that used to sit here is
+                // gone. The tap remains only as the automatic
+                // fallback, and the player says TAP (FALLBACK)
+                // out loud whenever it is carrying a stream.
+                Text("Audio renders through the Ghost engine. If a stream ever can't run on it, the player falls back to the EQ tap and the status line says so.")
+                    .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button("Reset EQ to flat") { applyPreset(.flat) }
                     .font(.subheadline.weight(.bold)).foregroundStyle(accent)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 14)
+            .padding(16)
+            .ttGlassCard(cornerRadius: 18)
 
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Toggle("Equalizer enabled", isOn: Binding(
-                            get: { manager.isEQEnabled },
-                            set: { manager.setEQEnabled($0) }
-                        ))
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                        .tint(accent)
-                        HStack {
-                            Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                                .lineLimit(1)
-                                .layoutPriority(1)
-                            // Round 21: the status string can be a
-                            // whole error sentence; framed + wrapped
-                            // to two lines so it can never push the
-                            // card wider than the sheet.
-                            Text(streamStatus)
-                                .font(.caption.weight(.bold)).foregroundStyle(accent)
-                                .multilineTextAlignment(.trailing)
-                                .lineLimit(2)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                        .onAppear { streamStatus = manager.attachmentStatus }
-                        .onReceive(NotificationCenter.default.publisher(
-                            for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
-                            if let status = note.userInfo?["status"] as? String { streamStatus = status }
-                        }
-                        // Round 20: Ghost/Tap A/B - Ghost renders
-                        // the audio through TrapTube's own engine
-                        // (the item plays muted); Tap processes the
-                        // stream in place on the item's mix.
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("Audio path").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                            Picker("Audio path", selection: audioPathSelection) {
-                                Text("Ghost").tag("ghost")
-                                Text("Tap").tag("tap")
-                            }
-                            .pickerStyle(.segmented)
-                            Text("Switching keeps the song at its current position - only the audio leg changes hands.")
-                                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Button("Reset EQ to flat") { applyPreset(.flat) }
-                            .font(.subheadline.weight(.bold)).foregroundStyle(accent)
-                    }
-                    .padding(16)
-                    .ttGlassCard(cornerRadius: 18)
+            presetsCard
 
-                    presetsCard
+            effectsCard
 
-                    VStack(alignment: .leading, spacing: 16) {
-                        TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
-                                            range: 0...20, suffix: " dB") {
-                            manager.setBassBoost($0)
-                            noteManualEQChange()
-                        }
-                        TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
-                                            range: 0...200, suffix: "%") {
-                            manager.setMasterGainPercent($0)
-                            noteManualEQChange()
-                        }
-                    }
-                    .padding(16)
-                    .ttGlassCard(cornerRadius: 18)
-                    .id(eqRefreshToken)
-
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text("16-BAND EQUALIZER").font(.caption.weight(.black))
-                            .tracking(1.5).foregroundStyle(accent)
-                        ForEach(Array(TrapTubeEQManager.frequencies.enumerated()), id: \.offset) { index, frequency in
-                            let label = frequency >= 1000
-                                ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
-                                   ? "\(Int(frequency / 1000)) kHz"
-                                   : String(format: "%.1f kHz", frequency / 1000))
-                                : "\(Int(frequency)) Hz"
-                            TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
-                                                range: -12...12, suffix: " dB") {
-                                manager.setBandGain($0, at: index)
-                                noteManualEQChange()
-                            }
-                        }
-                    }
-                    .padding(16)
-                    .ttGlassCard(cornerRadius: 18)
-                    .id(eqRefreshToken)
-
-                    Text("EQ applies to the TrapTube Player and to TrapTube-owned audio. YouTube's own player renders through its private pipeline and doesn't expose its audio.")
-                        .font(.caption).foregroundStyle(Color.white.opacity(0.45))
-                        .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 16) {
+                TrapTubeEQSliderRow(title: "Bass boost", value: manager.bassBoostDecibels,
+                                    range: 0...20, suffix: " dB") {
+                    manager.setBassBoost($0)
+                    noteManualEQChange()
                 }
-                .padding(18)
+                TrapTubeEQSliderRow(title: "Master gain", value: manager.masterGainPercent,
+                                    range: 0...200, suffix: "%") {
+                    manager.setMasterGainPercent($0)
+                    noteManualEQChange()
+                }
             }
+            .padding(16)
+            .ttGlassCard(cornerRadius: 18)
+            .id(eqRefreshToken)
+
+            VStack(alignment: .leading, spacing: 14) {
+                Text("16-BAND EQUALIZER").font(.caption.weight(.black))
+                    .tracking(1.5).foregroundStyle(accent)
+                ForEach(Array(TrapTubeEQManager.frequencies.enumerated()), id: \.offset) { index, frequency in
+                    let label = frequency >= 1000
+                        ? (frequency.truncatingRemainder(dividingBy: 1000) == 0
+                           ? "\(Int(frequency / 1000)) kHz"
+                           : String(format: "%.1f kHz", frequency / 1000))
+                        : "\(Int(frequency)) Hz"
+                    TrapTubeEQSliderRow(title: label, value: manager.bandGain(at: index),
+                                        range: -12...12, suffix: " dB") {
+                        manager.setBandGain($0, at: index)
+                        noteManualEQChange()
+                    }
+                }
+            }
+            .padding(16)
+            .ttGlassCard(cornerRadius: 18)
+            .id(eqRefreshToken)
+
+            Text("EQ applies to the TrapTube Player and to TrapTube-owned audio. YouTube's own player renders through its private pipeline and doesn't expose its audio.")
+                .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .background {
-            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
-                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-        }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -3462,7 +3539,6 @@ struct TrapTubePlayerHomeView: View {
     @State private var showProfile = false
     @State private var authSignedIn = TrapTubeYouTubeAuth.isSignedIn
     @State private var authStale = TrapTubeYouTubeAuth.isSessionStale
-    @ObservedObject private var miniStore = TrapTubeMiniPlayerStore.shared
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -3484,9 +3560,10 @@ struct TrapTubePlayerHomeView: View {
                 detectedButton(detectedID)
             }
             content
-            if let mini = miniStore.controller {
-                miniPlayerBar(mini)
-            }
+            // Round 22: the mini player bar no longer renders
+            // here - this view now sits inside the EQ tab's single
+            // scrolling page, so the root renders the bar pinned
+            // under the page instead of at the end of the feed.
         }
         .task {
             // Round 19: pay the EQ manager's one-time engine-graph
@@ -3517,44 +3594,6 @@ struct TrapTubePlayerHomeView: View {
         }) {
             TrapTubeProfileView()
         }
-    }
-
-    /// Round 20: the minimized session's bar - play/pause, the
-    /// title and path readout, close, and tap-to-reopen, which
-    /// re-presents the player with the SAME controller (nothing
-    /// reloads, the position is untouched).
-    private func miniPlayerBar(_ controller: TrapTubePlayerController) -> some View {
-        HStack(spacing: 12) {
-            Button { controller.togglePlayPause() } label: {
-                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(accent, in: Circle())
-            }
-            .buttonStyle(.plain)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                Text(controller.pathStatusText.isEmpty ? "Now playing" : controller.pathStatusText)
-                    .font(.caption2).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if let saved = miniStore.request { request = saved }
-            }
-            Button { miniStore.close() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.ultraThinMaterial)
     }
 
     private var accountBar: some View {
@@ -3682,8 +3721,10 @@ struct TrapTubePlayerHomeView: View {
     @ViewBuilder
     private var content: some View {
         if feed.items.isEmpty {
+            // Round 22: no height-filling spacers - this view is
+            // embedded in the EQ tab's scrolling page now, so the
+            // empty state is a padded block, not a full-height one.
             VStack(spacing: 12) {
-                Spacer()
                 if feed.isLoading {
                     ProgressView().tint(.white)
                     Text("Loading your feed…")
@@ -3703,33 +3744,35 @@ struct TrapTubePlayerHomeView: View {
                     }
                     .font(.subheadline.weight(.bold)).foregroundStyle(accent)
                 }
-                Spacer()
             }
             .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
         } else {
-            ScrollView(showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    Text(feed.sectionTitle.uppercased())
-                        .font(.caption.weight(.black)).tracking(1.5)
-                        .foregroundStyle(accent)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 6)
-                        .padding(.bottom, 4)
-                    ForEach(feed.items) { item in
-                        row(item)
-                            .onAppear {
-                                if item.videoID == feed.items.last?.videoID {
-                                    Task { await feed.loadMore() }
-                                }
+            // Round 22: no ScrollView of its own - the EQ tab's
+            // single page scrolls, and this lazy stack renders the
+            // feed inside it (pagination still keys off row
+            // appearances, which the page's scroll drives).
+            LazyVStack(alignment: .leading, spacing: 6) {
+                Text(feed.sectionTitle.uppercased())
+                    .font(.caption.weight(.black)).tracking(1.5)
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                    .padding(.bottom, 4)
+                ForEach(feed.items) { item in
+                    row(item)
+                        .onAppear {
+                            if item.videoID == feed.items.last?.videoID {
+                                Task { await feed.loadMore() }
                             }
-                    }
-                    if feed.isLoading {
-                        HStack { Spacer(); ProgressView().tint(.white); Spacer() }
-                            .padding(.vertical, 14)
-                    }
+                        }
                 }
-                .padding(.bottom, 16)
+                if feed.isLoading {
+                    HStack { Spacer(); ProgressView().tint(.white); Spacer() }
+                        .padding(.vertical, 14)
+                }
             }
+            .padding(.bottom, 16)
         }
     }
 
