@@ -1277,6 +1277,12 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var ghostFeed: TrapTubeGhostAudio.Feed = .none
     @Published var ghostDriftMs: Int?
     @Published var usingTapFallback = false
+    /// Round 24: why Ghost failed on the current item, in the
+    /// compact form the engine records (route + error domain/
+    /// code). The audio-path status shows it - "GHOST FAILED:
+    /// <reason> -> TAP (FALLBACK)" - and the full per-feed trail
+    /// goes to the Diag. Nil unless the fallback is active.
+    @Published var ghostFailureShort: String?
     private var ghostTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
     private var lastHardResync = Date.distantPast
@@ -1297,13 +1303,22 @@ final class TrapTubePlayerController: ObservableObject {
     /// showing the EQ manager's attach status instead.
     var pathStatusText: String {
         if loadFailed { return "LOAD FAILED" }
-        if usingTapFallback { return "TAP (FALLBACK)" }
+        if usingTapFallback {
+            // Round 24: the fallback state names its cause - the
+            // engine's compact failure reason rides the status
+            // line, so a screenshot explains itself.
+            if let ghostFailureShort, !ghostFailureShort.isEmpty {
+                return "GHOST FAILED: \(ghostFailureShort) → TAP (FALLBACK)"
+            }
+            return "TAP (FALLBACK)"
+        }
         guard audioPath == .ghost else { return "" }
         switch ghostFeed {
         case .none:
             return loadedVideoID == nil ? "" : "GHOST STARTING..."
-        case .streamed, .file:
-            var text = ghostFeed == .file ? "GHOST (FILE)" : "GHOST (STREAMED)"
+        case .sameAsset, .streamed, .file:
+            var text = ghostFeed == .file ? "GHOST (FILE)"
+                : ghostFeed == .sameAsset ? "GHOST (SAME-ASSET)" : "GHOST (STREAMED)"
             if !TrapTubeEQManager.shared.isEQEnabled { text += " · EQ OFF" }
             if let ghostDriftMs {
                 text += " · drift \(ghostDriftMs) ms"
@@ -1643,6 +1658,7 @@ final class TrapTubePlayerController: ObservableObject {
         ghostFeed = .none
         ghostDriftMs = nil
         usingTapFallback = false
+        ghostFailureShort = nil
         player.isMuted = false
         loadTask?.cancel()
         watchdogTask?.cancel()
@@ -1725,14 +1741,16 @@ final class TrapTubePlayerController: ObservableObject {
                 }
                 self.startLoadWatchdog(for: resolved.item)
                 if self.audioPath == .ghost {
-                    if let ghostSource = resolved.ghostSource {
-                        self.startGhost(source: ghostSource, item: resolved.item)
-                    } else {
-                        // No profile offered any direct audio URL:
-                        // Ghost has nothing to eat on this video.
-                        self.noteDiagnostic("ghost: no direct audio URL from any profile - tap fallback")
-                        self.beginTapFallback(item: resolved.item)
-                    }
+                    // Round 24: Ghost always gets its chance now,
+                    // minted source or not - its primary feed reads
+                    // the resolved item's OWN asset, so a video no
+                    // profile could mint an audio leg for (the
+                    // Build 213 failure: IOS refused at load,
+                    // ANDROID SABR-only) is no longer an automatic
+                    // fallback. If every feed still fails, the
+                    // engine's recorded reasons drive the fallback
+                    // (see startGhost / beginTapFallback).
+                    self.startGhost(source: resolved.ghostSource, item: resolved.item)
                 }
             } catch {
                 guard !Task.isCancelled else { return }
@@ -2079,7 +2097,7 @@ final class TrapTubePlayerController: ObservableObject {
 
     // MARK: Ghost orchestration (Round 20)
 
-    private func startGhost(source: TrapTubeGhostAudio.Source, item: AVPlayerItem) {
+    private func startGhost(source: TrapTubeGhostAudio.Source?, item: AVPlayerItem) {
         ghostTask?.cancel()
         ghost.onStreamStalled = { [weak self] in
             Task { @MainActor in self?.escalateGhostToFile() }
@@ -2092,26 +2110,31 @@ final class TrapTubePlayerController: ObservableObject {
             self.ghost.setBaselineRate(self.rate)
             self.ghost.applyManagerState()
             self.ghost.applyFXSettings()
-            let feed = await self.ghost.start(source: source) { [weak self] in
+            // Round 24: the item's own asset rides along - it is
+            // the same-asset feed's whole input (see the engine).
+            let feed = await self.ghost.start(source: source, asset: item.asset) { [weak self] in
                 self?.player.currentTime().seconds ?? 0
             }
             guard !Task.isCancelled, self.player.currentItem === item else { return }
             if feed == .none {
-                self.beginTapFallback(item: item)
+                self.beginTapFallback(item: item,
+                                      reason: self.ghost.lastFailureReason ?? "every Ghost feed failed")
                 return
             }
             self.ghostFeed = feed
             self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
             self.ghost.setMuted(self.isMuted)
-            self.noteDiagnostic("ghost live (\(feed == .file ? "file" : "streamed"))")
+            self.noteDiagnostic("ghost live (\(feed == .file ? "file" : feed == .sameAsset ? "same-asset" : "streamed"))")
             self.startSyncLoop(item: item)
         }
     }
 
-    /// A streamed feed that fails or starves escalates to the file
-    /// feed at the video's current position.
+    /// A streamed-class feed (same-asset or streamed) that fails
+    /// or starves escalates to the file feed at the video's
+    /// current position.
     private func escalateGhostToFile() {
-        guard audioPath == .ghost, !usingTapFallback, ghostFeed == .streamed,
+        guard audioPath == .ghost, !usingTapFallback,
+              ghostFeed == .streamed || ghostFeed == .sameAsset,
               let item = player.currentItem else { return }
         ghostTask?.cancel()
         ghostTask = Task { [weak self] in
@@ -2124,24 +2147,27 @@ final class TrapTubePlayerController: ObservableObject {
                 self.ghostFeed = .file
                 self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
             } else {
-                self.beginTapFallback(item: item)
+                self.beginTapFallback(item: item,
+                                      reason: self.ghost.lastFailureReason ?? "the file feed failed")
             }
         }
     }
 
-    /// Ghost failed outright on this item: unmute the stream (to the
-    /// user's own mute choice) and run the Round 19 tap attach for
-    /// it instead. The status line says TAP (FALLBACK), so the state
-    /// is never a mystery on a screenshot.
-    private func beginTapFallback(item: AVPlayerItem) {
+    /// Ghost failed outright on this item: unmute the stream (to
+    /// the user's own mute choice) and run the Round 19 tap attach
+    /// for it instead. Round 24: the Diag line and the status
+    /// both carry WHY (the engine's recorded per-feed reasons) -
+    /// a bare "ghost failed" is no longer written anywhere.
+    private func beginTapFallback(item: AVPlayerItem, reason: String) {
         guard player.currentItem === item else { return }
         usingTapFallback = true
+        ghostFailureShort = ghost.lastFailureShort
         ghostFeed = .none
         ghostDriftMs = nil
         syncTask?.cancel()
         ghost.teardownFeed(deleteTemp: true)
         player.isMuted = isMuted
-        noteDiagnostic("ghost failed - tap fallback")
+        noteDiagnostic("ghost failed: \(reason) - tap fallback")
         preservingPlaybackIntent { hook.attachImmediately(to: item) }
     }
 
@@ -2205,10 +2231,11 @@ final class TrapTubePlayerController: ObservableObject {
         let ok = await ghost.resync(to: target.isFinite ? target : 0)
         guard audioPath == .ghost, !usingTapFallback else { return }
         if !ok {
-            if ghostFeed == .streamed {
+            if ghostFeed == .streamed || ghostFeed == .sameAsset {
                 escalateGhostToFile()
             } else if let item = player.currentItem {
-                beginTapFallback(item: item)
+                beginTapFallback(item: item,
+                                 reason: ghost.lastFailureReason ?? "the resync failed")
             }
         }
     }
@@ -2898,6 +2925,20 @@ struct TrapTubeNativePlayerView: View {
 /// 4k, 6k, 8k, 10k, 12k, 16k); every value sits inside the manager's
 /// clamps (±12 dB bands, 0-20 dB bass, 0-200% master), so applying one is
 /// just the normal setters, live on the playing stream.
+///
+/// Round 24 re-voice: every preset was run through the headroom
+/// probe evaluation (the manager's cascadePeakBoostDB - the real
+/// 17-section cascade at the band centers + shelf probes). Ten
+/// presets stacked more than +10 dB of cumulative boost at or
+/// below 250 Hz (Bass++ peaked at +25.3 dB at 31 Hz, Bando
+/// +21.9, Drill +20.5) - boosts no limiter setting could render
+/// undistorted into a full-scale stream. Those ten were trimmed
+/// minimally (the bass shelf and the 31/62 Hz bands share the
+/// cut; every other band, every name and every master is
+/// untouched), and the Round 24 auto-headroom compensates the
+/// rest at render time, so each preset keeps its shape at a
+/// safe level. The six Round 22 clean presets all measured
+/// under +9.5 dB and are unchanged.
 struct TrapTubeEQPreset {
     let name: String
     let bandGains: [Float]
@@ -2910,12 +2951,12 @@ struct TrapTubeEQPreset {
         bass: 0, master: 100)
     static let trap = TrapTubeEQPreset(
         name: "Trap",
-        bandGains: [7, 6, 4, 1, -1, -1, 0, 1, 2, 2, 3, 3, 4, 4, 3, 2],
-        bass: 8, master: 105)
+        bandGains: [3.5, 2.5, 4, 1, -1, -1, 0, 1, 2, 2, 3, 3, 4, 4, 3, 2],
+        bass: 4.5, master: 105)
     static let drill = TrapTubeEQPreset(
         name: "Drill",
-        bandGains: [8, 7, 5, 2, 0, -2, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3],
-        bass: 10, master: 105)
+        bandGains: [3, 2, 5, 2, 0, -2, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3],
+        bass: 5, master: 105)
     static let clarity = TrapTubeEQPreset(
         name: "Clarity",
         bandGains: [-2, -2, -1, -3, -2, 0, 1, 2, 3, 4, 4, 3, 3, 4, 4, 5],
@@ -2939,20 +2980,20 @@ struct TrapTubeEQPreset {
     // Bass++), and Flat is the existing shared flat preset above.
     static let bando = TrapTubeEQPreset(
         name: "Bando",
-        bandGains: [9, 8, 6, 3, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 2.7, 2.4, 2],
-        bass: 10, master: 100)
+        bandGains: [3.5, 2.5, 6, 3, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 2.7, 2.4, 2],
+        bass: 4.5, master: 100)
     static let defaultPreset = TrapTubeEQPreset(
         name: "Default",
         bandGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         bass: 0, master: 100)
     static let bass = TrapTubeEQPreset(
         name: "Bass",
-        bandGains: [6, 5, 4, 2, 1, 0.4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        bass: 6, master: 100)
+        bandGains: [4, 3, 4, 2, 1, 0.4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 4, master: 100)
     static let bassPlusPlus = TrapTubeEQPreset(
         name: "Bass++",
-        bandGains: [10, 9, 7, 5, 2, 0.8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        bass: 12, master: 100)
+        bandGains: [3, 1.5, 5.5, 5, 2, 0.8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 6, master: 100)
     static let acoustic = TrapTubeEQPreset(
         name: "Acoustic",
         bandGains: [5, 4, 3, 2, 3, 3, 3, 3.6, 4, 4, 4, 3.4, 3, 2.7, 2.4, 2],
@@ -2963,28 +3004,28 @@ struct TrapTubeEQPreset {
         bass: 0, master: 100)
     static let dance = TrapTubeEQPreset(
         name: "Dance",
-        bandGains: [6, 5, 3, 1, 0, 0, 0, 1.2, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
-        bass: 6, master: 100)
+        bandGains: [4, 3, 3, 1, 0, 0, 0, 1.2, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
+        bass: 4, master: 100)
     static let deep = TrapTubeEQPreset(
         name: "Deep",
-        bandGains: [7, 6, 5, 4, 3, 2.4, 2, 1.4, 1, 0.4, 0, -0.6, -1, -1.3, -1.6, -2],
-        bass: 6, master: 100)
+        bandGains: [4.5, 3.5, 5, 4, 3, 2.4, 2, 1.4, 1, 0.4, 0, -0.6, -1, -1.3, -1.6, -2],
+        bass: 3.5, master: 100)
     static let electronic = TrapTubeEQPreset(
         name: "Electronic",
-        bandGains: [5, 4, 3, 1, 0, 0.6, 1, 1.6, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
-        bass: 4, master: 100)
+        bandGains: [4.5, 3.5, 3, 1, 0, 0.6, 1, 1.6, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
+        bass: 3.5, master: 100)
     static let hipHop = TrapTubeEQPreset(
         name: "Hip Hop",
-        bandGains: [6, 5, 4, 2, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 3, 3, 3],
-        bass: 8, master: 100)
+        bandGains: [3, 2, 4, 2, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 3, 3, 3],
+        bass: 5, master: 100)
     static let jazz = TrapTubeEQPreset(
         name: "Jazz",
         bandGains: [3, 3, 2, 2, 2, 2.6, 3, 2.4, 2, 2.6, 3, 3, 3, 2.7, 2.4, 2],
         bass: 2, master: 100)
     static let loudness = TrapTubeEQPreset(
         name: "Loudness",
-        bandGains: [5, 4, 3, 1, 0, 0, 0, 1.2, 2, 3.2, 4, 4.6, 5, 5, 5, 5],
-        bass: 4, master: 110)
+        bandGains: [4.5, 3.5, 3, 1, 0, 0, 0, 1.2, 2, 3.2, 4, 4.6, 5, 5, 5, 5],
+        bass: 3.5, master: 110)
     static let lounge = TrapTubeEQPreset(
         name: "Lounge",
         bandGains: [3, 2, 2, 1, 2, 2, 2, 2, 2, 1.4, 1, 1, 1, 0.7, 0.4, 0],
@@ -3109,9 +3150,28 @@ struct TrapTubeEQSettingsSection: View {
     @State private var eqRefreshToken = 0
     @State private var reverbPreset: TrapTubeReverbPreset =
         TrapTubeFXSettings.shared.reverbPreset
+    /// Round 24: the live auto-headroom compensation for the
+    /// current curve, kept fresh by the manager's
+    /// settings-changed notification (see the readout row).
+    @State private var headroomDB: Float = TrapTubeEQManager.shared.headroomCompensationDB
 
     private var manager: TrapTubeEQManager { TrapTubeEQManager.shared }
     private var fx: TrapTubeFXSettings { TrapTubeFXSettings.shared }
+
+    /// Round 24: the Ghost limiter's runtime truth - "Limiter:
+    /// active / off / unavailable / pending" - composed from the
+    /// FX store's record of the engine's ACTUAL unit creation
+    /// (published at engine build), never from the toggle alone.
+    private var limiterStatusText: String {
+        switch fx.ghostLimiterAvailability {
+        case .some(true):
+            return fx.limiterEnabled ? "Limiter: active" : "Limiter: off"
+        case .some(false):
+            return "Limiter: unavailable"
+        case .none:
+            return "Limiter: pending (starts with the Ghost engine)"
+        }
+    }
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -3218,6 +3278,12 @@ struct TrapTubeEQSettingsSection: View {
             ))
             .font(.subheadline.weight(.semibold)).foregroundStyle(.white)
             .tint(accent)
+            // Round 24: the limiter's runtime truth under its
+            // toggle - whether the Ghost engine's unit actually
+            // exists in the running build.
+            Text(limiterStatusText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.white.opacity(0.55))
             TrapTubeEQSliderRow(title: "Virtual surround (width)", value: fx.widthPercent,
                                 range: 0...200, suffix: "%") {
                 fx.setWidthPercent($0)
@@ -3262,6 +3328,28 @@ struct TrapTubeEQSettingsSection: View {
                 .onReceive(NotificationCenter.default.publisher(
                     for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
                     if let status = note.userInfo?["status"] as? String { streamStatus = status }
+                }
+                // Round 24: the auto-headroom readout - the
+                // compensation both render paths are applying to
+                // the current curve right now. It moves as the
+                // sliders move: the manager posts
+                // TrapTubeEQSettingsChanged from every setter.
+                HStack {
+                    Text("Headroom").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    Text(headroomDB <= -0.05
+                         ? String(format: "%.1f dB (auto)", Double(headroomDB))
+                         : "0.0 dB (auto)")
+                        .font(.caption.weight(.bold)).foregroundStyle(accent)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+                .onAppear { headroomDB = manager.headroomCompensationDB }
+                .onReceive(NotificationCenter.default.publisher(
+                    for: Notification.Name("TrapTubeEQSettingsChanged"))) { _ in
+                    headroomDB = manager.headroomCompensationDB
                 }
                 // Round 22: Ghost is the only audio method - the
                 // Ghost/Tap A/B picker that used to sit here is
@@ -3411,6 +3499,16 @@ final class TrapTubeFeedModel: ObservableObject {
             ["query": query, "continuation": token as Any]
         }
     }
+
+    /// Round 24: manual pagination. True while YouTube has
+    /// handed us a continuation token for the current query -
+    /// the ONLY thing that puts a "Show more" button at the end
+    /// of the list. When a page comes back without a token this
+    /// turns false and the list truly ends: nothing auto-loads
+    /// ever again. Category switches and new searches reset
+    /// through load(reset:), which clears the token, so every
+    /// fresh view starts at batch 1 with its own button state.
+    var hasMoreContent: Bool { continuation != nil }
 
     private func load(reset: Bool, body: (String?) -> [String: Any]) async {
         generation += 1
@@ -4185,8 +4283,10 @@ struct TrapTubePlayerHomeView: View {
         } else {
             // Round 22: no ScrollView of its own - the EQ tab's
             // single page scrolls, and this lazy stack renders the
-            // feed inside it (pagination still keys off row
-            // appearances, which the page's scroll drives).
+            // feed inside it. Round 24: pagination is MANUAL -
+            // the old last-row onAppear prefetch scrolled
+            // forever; now the list bottoms out and a "Show more"
+            // button (below) is the only way another batch loads.
             LazyVStack(alignment: .leading, spacing: 6) {
                 Text(feed.sectionTitle.uppercased())
                     .font(.caption.weight(.black)).tracking(1.5)
@@ -4196,15 +4296,33 @@ struct TrapTubePlayerHomeView: View {
                     .padding(.bottom, 4)
                 ForEach(feed.items) { item in
                     row(item)
-                        .onAppear {
-                            if item.videoID == feed.items.last?.videoID {
-                                Task { await feed.loadMore() }
+                }
+                if feed.hasMoreContent {
+                    Button {
+                        Task { await feed.loadMore() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if feed.isLoading {
+                                ProgressView().tint(.white)
+                                Text("Loading…")
+                                    .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                            } else {
+                                Text("Show more")
+                                    .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                                Image(systemName: "chevron.down")
+                                    .font(.caption.weight(.bold))
+                                    .foregroundStyle(Color.white.opacity(0.5))
                             }
                         }
-                }
-                if feed.isLoading {
-                    HStack { Spacer(); ProgressView().tint(.white); Spacer() }
-                        .padding(.vertical, 14)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.white.opacity(0.08),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .padding(.horizontal, 16)
+                        .padding(.top, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(feed.isLoading)
                 }
             }
             .padding(.bottom, 16)
