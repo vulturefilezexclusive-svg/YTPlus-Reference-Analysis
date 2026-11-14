@@ -587,7 +587,7 @@ jobs:
           grep -Fq 'TrapTube.FX.WidthPercent' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
           grep -Fq 'TrapTube.FX.ReverbPreset' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
           grep -Fq 'AVAudioUnitReverb' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
-          grep -Fq 'AVAudioUnitDynamicsProcessor' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'kAudioUnitSubType_DynamicsProcessor' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
           grep -Fq 'processEffects' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
           grep -Fq 'scheduleProcessed' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
           grep -Fq 'startFilePump' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
