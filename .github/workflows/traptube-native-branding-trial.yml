@@ -391,6 +391,11 @@ jobs:
           grep -Fq 'struct TrapTubeEQSettingsSection' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'TrapTubeEQSettingsSection()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'TrapTubePlayerHomeView()' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          # Round 30: Share diagnostics export (EQ tab button -> .txt share sheet)
+          grep -Fq 'enum TrapTubeDiagnosticsExport' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'diagTrailSnapshot' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'Share diagnostics' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          grep -Fq 'TrapTubeShareDiagnosticsButton(controller: controller)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           if grep -Fq 'stemSeparationPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then echo "VERIFY FAIL: Round 22 removed the stem separation page from the EQ tab"; exit 35; fi
           if grep -Fq '"Stem Separation"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then echo "VERIFY FAIL: the Stem Separation segment must not come back"; exit 35; fi
           grep -Fq 'TrapTubeAudioBoostFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
