@@ -40,6 +40,27 @@ import Foundation
 // reducing the 16-band curve to this unit's 10 bands by nearest
 // frequency - the one structural deviation from the hybrid, whose
 // sheet drove a 10-band EQ directly.
+//
+// Round 26: Build 220 refuted the live-instance theory - two
+// independent FRESH clones, with the track list, readability,
+// playability and format descriptions all loaded first, still
+// threw -11838 at reader creation, and no AVAssetReader has
+// ever read a googlevideo asset on this device in either
+// TrapTube app. So the feeds are now a STAGED LADDER rather
+// than a bet on one mechanism: Stage 1 primes the same-asset
+// clone BEFORE the item plays (prime-before-play, driven from
+// the controller's load), Stage 2 is the Round 25 post-play
+// clone reader, Stage 3 extracts the audio to a local file
+// with an AVAssetExportSession passthrough over an audio-only
+// composition - the media stack that demonstrably works on
+// this device, being the stack AVPlayer itself uses - and
+// feeds it through the file pump; Stages 4 and 5 are the
+// streamed mint and the file download, and the tap remains
+// the final fallback. Every reader-creation attempt records
+// the asset facts (class, readability, playability,
+// protected-content flag, audio track count, scheme and host)
+// with the attempt, so a failure trail discriminates instead
+// of repeating a bare -11838.
 
 /// A download job's way back to a FRESH stream URL for the same
 /// format. googlevideo URLs are signed for the IP that minted them
@@ -292,7 +313,7 @@ final class TrapTubeFXSettings {
 @MainActor
 final class TrapTubeGhostAudio {
     enum Feed {
-        case none, sameAsset, streamed, file
+        case none, sameAsset, streamed, file, exported
     }
 
     struct Source {
@@ -412,6 +433,31 @@ final class TrapTubeGhostAudio {
     /// the instance, never the other way round.
     private var cloneSource: CloneSource?
     private var desiredPlaying = false
+
+    // MARK: Round 26: the staged ladder's bookkeeping
+    //
+    // prePlayAttempted/prePlayPrimed track Stage 1: the
+    // controller asks for the prime before the item is set on
+    // the player, and start() then ADOPTS a live pre-primed
+    // reader instead of tearing it down and starting over.
+    // lastEngagedStage records which ladder stage owns the
+    // live feed (1 pre-play reader, 2 post-play reader,
+    // 3 export extraction, 4 streamed mint, 5 file download)
+    // so the controller's diagnostics can name it - above all
+    // in the re-engagement note, "ghost re-engaged (stage N)".
+    // currentVideoID keys the Stage 3 export cache.
+    private var prePlayAttempted = false
+    private var prePlayPrimed = false
+    private(set) var lastEngagedStage: Int?
+    private var currentVideoID: String?
+    /// The local file the exported feed is pumping (a cache
+    /// file, or a staging file that could not be moved into
+    /// the cache). Kept apart from tempFileURL: teardown must
+    /// never delete the export cache.
+    private var exportedFileURL: URL?
+    /// The videoIDs whose export cache files may stay on disk,
+    /// most recent first, capped at two (current + previous).
+    private var exportKeepIDs: [String] = []
 
     // MARK: Round 24: failure reasons
     //
@@ -686,34 +732,57 @@ final class TrapTubeGhostAudio {
 
     // MARK: Starting feeds
 
-    /// Tries the feeds in Round 24's order: SAME-ASSET (a fresh
-    /// clone of the stream that just proved it loads on this
-    /// device - Round 25: cloned from the resolve-time
-    /// descriptor, never the playing item's live asset), then
-    /// the independently minted STREAMED feed, then the FILE
-    /// feed. The position provider is consulted at the moment
-    /// each feed actually primes, so a slow download still
-    /// lands on the video's current position. A nil minted
-    /// source no longer starves Ghost: the same-asset feed
-    /// needs no mint at all, which is the structural answer to
-    /// the Build 213 failure (IOS legs refused at load, ANDROID
+    /// Runs the Round 26 staged ladder: Stage 1's pre-play
+    /// reader is ADOPTED when preparePrePlay already engaged
+    /// it; otherwise Stage 2 (the post-play same-asset clone
+    /// reader), Stage 3 (export extraction to a local file,
+    /// fed through the file pump), Stage 4 (the independently
+    /// minted STREAMED feed) and Stage 5 (the FILE download).
+    /// The position provider is consulted at the moment each
+    /// stage actually primes, so a slow extraction or download
+    /// still lands on the video's current position. A nil
+    /// minted source no longer starves Ghost: Stages 1-3 need
+    /// no mint at all, which is the structural answer to the
+    /// Build 213 failure (IOS legs refused at load, ANDROID
     /// minting no audio-only URL at all, while the ANDROID
     /// muxed stream played fine).
-    func start(source: Source?, clone: CloneSource?, position: @escaping () -> TimeInterval) async -> Feed {
+    func start(source: Source?, clone: CloneSource?, videoID: String?,
+               position: @escaping () -> TimeInterval) async -> Feed {
         self.source = source
-        self.cloneSource = clone
-        failureTrail = []
-        lastFailureReason = nil
-        lastFailureShort = nil
+        if let clone { self.cloneSource = clone }
+        if let videoID { self.currentVideoID = videoID }
+        // Stage 1 adoption: the pre-play prime already built
+        // and started this reader and its pump. Tearing it
+        // down to re-prime would throw away the one route
+        // whose timing is provably contention-free.
+        if prePlayPrimed, feed == .sameAsset {
+            lastEngagedStage = 1
+            return .sameAsset
+        }
+        // When Stage 1 was attempted and refused, its exits
+        // are already on the trail; Stages 2+ append to it so
+        // a terminal failure shows BOTH attempts.
+        if !prePlayAttempted {
+            failureTrail = []
+            lastFailureReason = nil
+            lastFailureShort = nil
+        }
         teardownFeed(deleteTemp: true)
         if await primeSameAsset(startAt: position()) {
+            lastEngagedStage = 2
             return .sameAsset
+        }
+        if await primeExport(startAt: position()) {
+            lastEngagedStage = 3
+            return .exported
         }
         if let source {
             if await primeStreamed(source: source, startAt: position()) {
+                lastEngagedStage = 4
                 return .streamed
             }
             if await primeFileRoute(source: source, position: position) {
+                lastEngagedStage = 5
                 return .file
             }
         }
@@ -762,9 +831,9 @@ final class TrapTubeGhostAudio {
     /// player's own audio stays silenced exactly as before (the
     /// controller mutes the item before Ghost starts, whichever
     /// feed wins).
-    private func primeSameAsset(startAt: TimeInterval) async -> Bool {
+    private func primeSameAsset(startAt: TimeInterval, route: String = "same-asset") async -> Bool {
         guard let cloneSource else {
-            recordFailure(route: "same-asset",
+            recordFailure(route: route,
                           cause: "the resolver stashed no clone descriptor for this item",
                           short: "no clone descriptor")
             return false
@@ -772,11 +841,38 @@ final class TrapTubeGhostAudio {
         let asset = AVURLAsset(url: cloneSource.url, options: [
             "AVURLAssetHTTPHeaderFieldsKey": cloneSource.headers
         ])
-        guard let track = await loadReaderTrack(asset: asset, route: "same-asset") else {
+        guard let loaded = await loadReaderTrack(asset: asset, route: route) else {
             return false
         }
-        return primeReader(asset: asset, track: track, feedKind: .sameAsset,
-                           route: "same-asset", startAt: startAt)
+        return primeReader(asset: asset, track: loaded.track, facts: loaded.facts,
+                           feedKind: .sameAsset, route: route, startAt: startAt)
+    }
+
+    /// Round 26, Stage 1: PRIME-BEFORE-PLAY. The controller
+    /// calls this from load() AFTER the resolver returns and
+    /// BEFORE the item is set on the player or play() is
+    /// called: the same-asset clone is built, fully loaded,
+    /// and its reader created and started while no player
+    /// holds anything yet. If creation throws here too, the
+    /// refusal cannot be contention with a running player -
+    /// the Stage 0 facts recorded with the attempt say what
+    /// the asset was - and start() falls through to Stage 2.
+    /// On success the reader is left running (the pump
+    /// pre-schedules at the prime position) and start()
+    /// ADOPTS it instead of re-priming. The route is labeled
+    /// distinctly so the failure trail separates the pre-play
+    /// attempt from the post-play one.
+    func preparePrePlay(clone: CloneSource?, startAt: TimeInterval) async -> Bool {
+        prePlayAttempted = true
+        guard let clone else { return false }
+        self.cloneSource = clone
+        failureTrail = []
+        lastFailureReason = nil
+        lastFailureShort = nil
+        let ok = await primeSameAsset(startAt: startAt, route: "same-asset (pre-play)")
+        prePlayPrimed = ok
+        if !ok { finishFailure() }
+        return ok
     }
 
     private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
@@ -787,11 +883,11 @@ final class TrapTubeGhostAudio {
         // to swallow the real error whole - on the Build 213
         // device this is where an IOS leg's 403 went to die
         // without leaving a reason anywhere.
-        guard let track = await loadReaderTrack(asset: asset, route: "streamed") else {
+        guard let loaded = await loadReaderTrack(asset: asset, route: "streamed") else {
             return false
         }
-        return primeReader(asset: asset, track: track, feedKind: .streamed,
-                           route: "streamed", startAt: startAt)
+        return primeReader(asset: asset, track: loaded.track, facts: loaded.facts,
+                           feedKind: .streamed, route: "streamed", startAt: startAt)
     }
 
     /// Round 25: the FULL awaited load every reader feed
@@ -806,8 +902,19 @@ final class TrapTubeGhostAudio {
     /// with its real error (no try? anywhere in this path), and
     /// an asset that reports itself not readable names that as
     /// its own distinct cause.
-    private func loadReaderTrack(asset: AVAsset, route: String) async -> AVAssetTrack? {
+    ///
+    /// Round 26, Stage 0: the load also returns the FACTS
+    /// string every reader-creation attempt must carry - the
+    /// asset's class, its readability and playability, its
+    /// protected-content flag, the audio track count, and (for
+    /// a URL asset) the scheme and host ONLY, never the full
+    /// URL or any header value. Build 220 proved the -11838
+    /// refusal survives fresh clones and full loads alike; the
+    /// facts are what let the next device trail say WHAT was
+    /// refused instead of repeating the bare code.
+    private func loadReaderTrack(asset: AVAsset, route: String) async -> (track: AVAssetTrack, facts: String)? {
         let track: AVAssetTrack
+        let audioTrackCount: Int
         do {
             let tracks = try await asset.loadTracks(withMediaType: .audio)
             guard let first = tracks.first else {
@@ -817,19 +924,31 @@ final class TrapTubeGhostAudio {
                 return nil
             }
             track = first
+            audioTrackCount = tracks.count
         } catch {
             recordFailure(route: route,
                           cause: "track load failed - \(Self.describe(error))",
                           short: "track load \(Self.shortCode(error))")
             return nil
         }
+        let facts: String
         do {
             let readable = try await asset.load(.isReadable)
             let playable = try await asset.load(.isPlayable)
+            let protected = try await asset.load(.hasProtectedContent)
             _ = try await track.load(.formatDescriptions)
+            var parts = ["asset \(String(describing: type(of: asset)))",
+                         "readable \(readable)", "playable \(playable)",
+                         "protected \(protected)", "audio tracks \(audioTrackCount)"]
+            if let urlAsset = asset as? AVURLAsset {
+                let scheme = urlAsset.url.scheme ?? "?"
+                let host = urlAsset.url.host ?? "?"
+                parts.append("\(scheme)://\(host)")
+            }
+            facts = parts.joined(separator: ", ")
             guard readable else {
                 recordFailure(route: route,
-                              cause: "the asset reports it is not readable (playable: \(playable))",
+                              cause: "the asset reports it is not readable [\(facts)]",
                               short: "asset not readable")
                 return nil
             }
@@ -839,7 +958,7 @@ final class TrapTubeGhostAudio {
                           short: "property load \(Self.shortCode(error))")
             return nil
         }
-        return track
+        return (track, facts)
     }
 
     /// The reader prime both streamed-class feeds share: build
@@ -849,14 +968,19 @@ final class TrapTubeGhostAudio {
     /// locally rebuilt twin of what we hope the reader emits: the
     /// pump converts every emitted buffer into exactly this
     /// format before scheduling.
-    private func primeReader(asset: AVAsset, track: AVAssetTrack,
+    private func primeReader(asset: AVAsset, track: AVAssetTrack, facts: String,
                              feedKind: Feed, route: String, startAt: TimeInterval) -> Bool {
         let newReader: AVAssetReader
         do {
             newReader = try AVAssetReader(asset: asset)
         } catch {
+            // Round 26, Stage 0: the attempt's asset facts ride
+            // the cause - class, readability, playability,
+            // protected flag, track count, scheme and host - so
+            // a refusal trail discriminates instead of repeating
+            // the bare error code.
             recordFailure(route: route,
-                          cause: "reader creation failed - \(Self.describe(error))",
+                          cause: "reader creation failed [\(facts)] - \(Self.describe(error))",
                           short: "reader \(Self.shortCode(error))")
             return false
         }
@@ -908,8 +1032,8 @@ final class TrapTubeGhostAudio {
         // "reader start refused" cause, so a device trail can
         // discriminate the two refusals.
         guard newReader.startReading() else {
-            let cause = newReader.error.map { "reader start refused - \(Self.describe($0))" }
-                ?? "reader start refused"
+            let cause = newReader.error.map { "reader start refused [\(facts)] - \(Self.describe($0))" }
+                ?? "reader start refused [\(facts)]"
             recordFailure(route: route, cause: cause, short: "reader start refused")
             teardownFeed(deleteTemp: false)
             return false
@@ -918,6 +1042,145 @@ final class TrapTubeGhostAudio {
         startPump()
         if !engine.isRunning { try? engine.start() }
         if desiredPlaying { node.play() }
+        return true
+    }
+
+    // MARK: Round 26, Stage 3: export extraction
+    //
+    // The structural bypass for assets that refuse readers:
+    // the audio is extracted to a LOCAL file by an
+    // AVAssetExportSession - which reads through the media
+    // stack AVPlayer itself uses, the one fetch path that
+    // demonstrably works on this device - and the local file
+    // feeds the existing file pump. The export source is a
+    // fresh clone of the descriptor's asset (the muxed file,
+    // or the audio leg for a composition resolution) reduced
+    // to an audio-only AVMutableComposition, exported with
+    // the Passthrough preset so the AAC bitstream is carried
+    // untouched into an .m4a - never re-encoded. A hybrid-era
+    // note rejected export for riding "the same failing
+    // track-load"; that premise does not hold here, because
+    // THIS resolver's winning asset loads its tracks fine
+    // (the item builds and plays, and the clones complete the
+    // full property load) - the failure is specifically at
+    // AVAssetReader creation, which export never attempts.
+    // Extracted files are cached per videoID under Caches, so
+    // a replay or a re-prime of the same video skips the
+    // extraction entirely; at most the current and previous
+    // videos' files are kept.
+
+    private static var exportCacheDirectory: URL {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("TrapTubeGhostExport", isDirectory: true)
+    }
+
+    private static func exportCacheURL(videoID: String) -> URL {
+        exportCacheDirectory.appendingPathComponent("\(videoID).m4a")
+    }
+
+    /// Marks a video's cache file as worth keeping and prunes
+    /// the cache directory back to the two most recent.
+    private func noteExportEngaged(videoID: String) {
+        exportKeepIDs.removeAll { $0 == videoID }
+        exportKeepIDs.insert(videoID, at: 0)
+        exportKeepIDs = Array(exportKeepIDs.prefix(2))
+        let keep = Set(exportKeepIDs.map { "\($0).m4a" })
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: Self.exportCacheDirectory, includingPropertiesForKeys: nil) else { return }
+        for entry in entries where !keep.contains(entry.lastPathComponent) {
+            try? FileManager.default.removeItem(at: entry)
+        }
+    }
+
+    private func primeExport(startAt: TimeInterval) async -> Bool {
+        guard let cloneSource else {
+            recordFailure(route: "export",
+                          cause: "no clone descriptor to extract from",
+                          short: "export: no descriptor")
+            return false
+        }
+        // Cache first: a previous extraction of this video
+        // feeds instantly, with no media-stack work at all.
+        if let videoID = currentVideoID {
+            let cached = Self.exportCacheURL(videoID: videoID)
+            if FileManager.default.fileExists(atPath: cached.path) {
+                exportedFileURL = cached
+                if primeFile(localURL: cached, startAt: startAt, feedKind: .exported, route: "export") {
+                    noteExportEngaged(videoID: videoID)
+                    NSLog("[TrapTube Ghost] export feed: cache hit for %@", videoID)
+                    return true
+                }
+                // primeFile recorded why the cached file would
+                // not pump; fall through to a fresh extraction.
+            }
+        }
+        let asset = AVURLAsset(url: cloneSource.url, options: [
+            "AVURLAssetHTTPHeaderFieldsKey": cloneSource.headers
+        ])
+        guard let loaded = await loadReaderTrack(asset: asset, route: "export") else {
+            return false
+        }
+        let track = loaded.track
+        let composition = AVMutableComposition()
+        guard let compTrack = composition.addMutableTrack(withMediaType: .audio,
+                                                          preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            recordFailure(route: "export",
+                          cause: "the audio-only composition track could not be created",
+                          short: "export composition failed")
+            return false
+        }
+        do {
+            let range = try await track.load(.timeRange)
+            try compTrack.insertTimeRange(range, of: track, at: .zero)
+        } catch {
+            recordFailure(route: "export",
+                          cause: "audio track insertion failed - \(Self.describe(error))",
+                          short: "export insert \(Self.shortCode(error))")
+            return false
+        }
+        guard let session = AVAssetExportSession(asset: composition,
+                                                 presetName: AVAssetExportPresetPassthrough) else {
+            recordFailure(route: "export",
+                          cause: "export session could not be created for the audio-only composition",
+                          short: "export session unavailable")
+            return false
+        }
+        // Stage to a unique temp file; only a completed export
+        // is moved into the video's cache slot.
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tt-ghost-export-\(UUID().uuidString).m4a")
+        session.outputURL = staging
+        session.outputFileType = .m4a
+        let status: AVAssetExportSession.Status = await withCheckedContinuation { continuation in
+            session.exportAsynchronously { continuation.resume(returning: session.status) }
+        }
+        guard status == .completed else {
+            let statusName = status == .failed ? "failed"
+                : status == .cancelled ? "cancelled" : "status \(status.rawValue)"
+            let errorText = session.error.map { " - \(Self.describe($0))" } ?? ""
+            recordFailure(route: "export",
+                          cause: "export \(statusName)\(errorText)",
+                          short: "export \(statusName)")
+            try? FileManager.default.removeItem(at: staging)
+            return false
+        }
+        var finalURL = staging
+        if let videoID = currentVideoID {
+            let cached = Self.exportCacheURL(videoID: videoID)
+            try? FileManager.default.createDirectory(at: cached.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
+            try? FileManager.default.removeItem(at: cached)
+            if (try? FileManager.default.moveItem(at: staging, to: cached)) != nil {
+                finalURL = cached
+            }
+        }
+        exportedFileURL = finalURL
+        guard primeFile(localURL: finalURL, startAt: startAt, feedKind: .exported, route: "export") else {
+            return false
+        }
+        if let videoID = currentVideoID { noteExportEngaged(videoID: videoID) }
+        NSLog("[TrapTube Ghost] export feed: extraction completed for %@",
+              currentVideoID ?? "unknown video")
         return true
     }
 
@@ -960,9 +1223,15 @@ final class TrapTubeGhostAudio {
         return primeFile(localURL: local, startAt: position())
     }
 
-    private func primeFile(localURL: URL, startAt: TimeInterval) -> Bool {
+    /// Round 26: feedKind and route are parameters because the
+    /// Stage 3 export feed pumps a local file through this
+    /// exact path - same pump, same conversion gate - while
+    /// remaining a distinct feed (.exported) with its own
+    /// failure attribution.
+    private func primeFile(localURL: URL, startAt: TimeInterval,
+                           feedKind: Feed = .file, route: String = "file") -> Bool {
         guard let file = try? AVAudioFile(forReading: localURL) else {
-            recordFailure(route: "file", cause: "the downloaded file could not be opened as audio",
+            recordFailure(route: route, cause: "the local file could not be opened as audio",
                           short: "file open failed")
             return false
         }
@@ -970,7 +1239,7 @@ final class TrapTubeGhostAudio {
         // A degenerate processing format would poison the frame
         // math below and the graph connection alike.
         guard format.sampleRate > 0, format.channelCount > 0 else {
-            recordFailure(route: "file", cause: "the downloaded file reports a degenerate audio format",
+            recordFailure(route: route, cause: "the local file reports a degenerate audio format",
                           short: "bad file format")
             return false
         }
@@ -984,7 +1253,7 @@ final class TrapTubeGhostAudio {
         // effect could ever touch, which is why the file feed now
         // decodes through the shared pump instead.
         guard let canonical = streamFormat, connectGraph(format: canonical) else {
-            recordFailure(route: "file", cause: "graph connect refused the canonical format",
+            recordFailure(route: route, cause: "graph connect refused the canonical format",
                           short: "graph refused format")
             return false
         }
@@ -998,12 +1267,12 @@ final class TrapTubeGhostAudio {
         lastBufferAt = Date()
         let startFrame = AVAudioFramePosition(primeOffset * format.sampleRate)
         guard startFrame < file.length else {
-            recordFailure(route: "file", cause: "the requested position is past the end of the audio",
+            recordFailure(route: route, cause: "the requested position is past the end of the audio",
                           short: "position past end")
             return false
         }
         file.framePosition = startFrame
-        feed = .file
+        feed = feedKind
         startFilePump()
         if !engine.isRunning { try? engine.start() }
         if desiredPlaying { node.play() }
@@ -1023,11 +1292,15 @@ final class TrapTubeGhostAudio {
         pumpTask?.cancel()
         guard let pumpFile = loadedFile else { return }
         let generation = feedGeneration
+        // Round 26: the pump serves both local-file feeds (the
+        // downloaded .file and the extracted .exported); like
+        // the reader pump it captures WHICH one at prime time.
+        let pumpFeed = feed
         let chunkFrames = AVAudioFrameCount(max(pumpFile.processingFormat.sampleRate / 4, 1024))
         pumpTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled, self.feedGeneration == generation,
-                  self.feed == .file, self.loadedFile === pumpFile {
+                  self.feed == pumpFeed, self.loadedFile === pumpFile {
                 if self.scheduledAhead() > 3.5 {
                     try? await Task.sleep(nanoseconds: 100_000_000)
                     continue
@@ -1338,15 +1611,34 @@ final class TrapTubeGhostAudio {
         failureTrail = []
         let ok: Bool
         switch feed {
-        case .sameAsset:
-            // Round 25: re-primes from the clone descriptor -
-            // primeSameAsset builds a fresh clone asset on every
-            // call, so a resync never resurrects the playing
-            // item's live asset instance.
-            ok = await primeSameAsset(startAt: position)
-        case .streamed:
-            guard let source else { return false }
-            ok = await primeStreamed(source: source, startAt: position)
+        case .sameAsset, .streamed:
+            // Round 26: a resync of a reader feed re-runs the
+            // ladder from Stage 2 - a fresh clone reader first
+            // (Round 25: built from the descriptor on every
+            // call, never the playing item's live asset), then
+            // Stage 3, which serves the export cache instantly
+            // when this video was already extracted and extracts
+            // otherwise. Whichever stage lands is recorded in
+            // lastEngagedStage for the re-engagement note.
+            if await primeSameAsset(startAt: position) {
+                lastEngagedStage = 2
+                ok = true
+            } else if await primeExport(startAt: position) {
+                lastEngagedStage = 3
+                ok = true
+            } else {
+                ok = false
+            }
+        case .exported:
+            // The extracted file is still on disk: re-prime it
+            // directly. If it vanished, Stage 3 rebuilds it.
+            if let exportedFileURL {
+                ok = primeFile(localURL: exportedFileURL, startAt: position,
+                               feedKind: .exported, route: "export")
+            } else {
+                ok = await primeExport(startAt: position)
+            }
+            if ok { lastEngagedStage = 3 }
         case .file:
             guard let tempFileURL else { return false }
             ok = primeFile(localURL: tempFileURL, startAt: position)
@@ -1386,5 +1678,12 @@ final class TrapTubeGhostAudio {
         source = nil
         cloneSource = nil
         desiredPlaying = false
+        // Round 26: the ladder state belongs to one item's
+        // session; a new load starts its staging from scratch.
+        prePlayAttempted = false
+        prePlayPrimed = false
+        lastEngagedStage = nil
+        currentVideoID = nil
+        exportedFileURL = nil
     }
 }
