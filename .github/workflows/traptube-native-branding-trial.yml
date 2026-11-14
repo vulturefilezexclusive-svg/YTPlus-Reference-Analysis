@@ -20,7 +20,33 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    # Round 29: compile-only gate. Mirrors the main job's StemKit
+    # xcodebuild invocation and stops at the compile, so a Swift type
+    # error fails here in minutes instead of deep into the full build.
+    runs-on: xcode-27
+    timeout-minutes: 20
+    steps:
+      - name: Checkout TrapTube host integration
+        uses: actions/checkout@v4
+
+      - name: Compile TrapTubeStemKit only (pre-flight)
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          cd ci/TrapTubeStemKit
+          xcodebuild -resolvePackageDependencies
+          xcodebuild \
+            -scheme TrapTubeStemKit \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/stemkit-preflight" \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
   build:
+    needs: preflight
     runs-on: xcode-27
     timeout-minutes: 60
     permissions:
