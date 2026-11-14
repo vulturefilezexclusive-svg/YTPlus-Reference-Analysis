@@ -46,21 +46,25 @@ import Foundation
 // playability and format descriptions all loaded first, still
 // threw -11838 at reader creation, and no AVAssetReader has
 // ever read a googlevideo asset on this device in either
-// TrapTube app. So the feeds are now a STAGED LADDER rather
-// than a bet on one mechanism: Stage 1 primes the same-asset
-// clone BEFORE the item plays (prime-before-play, driven from
-// the controller's load), Stage 2 is the Round 25 post-play
-// clone reader, Stage 3 extracts the audio to a local file
-// with an AVAssetExportSession passthrough over an audio-only
+// TrapTube app. So the feeds became a STAGED LADDER rather
+// than a bet on one mechanism, and every reader-creation
+// attempt records the asset facts (class, readability,
+// playability, protected-content flag, audio track count,
+// scheme and host) with the attempt, so a failure trail
+// discriminates instead of repeating a bare -11838.
+//
+// Round 28: the ladder is EXPORT-FIRST and every stage must
+// prove it renders before it may be called live. Stage 1
+// extracts the audio to a local file with an
+// AVAssetExportSession passthrough over an audio-only
 // composition - the media stack that demonstrably works on
 // this device, being the stack AVPlayer itself uses - and
-// feeds it through the file pump; Stages 4 and 5 are the
-// streamed mint and the file download, and the tap remains
-// the final fallback. Every reader-creation attempt records
-// the asset facts (class, readability, playability,
-// protected-content flag, audio track count, scheme and host)
-// with the attempt, so a failure trail discriminates instead
-// of repeating a bare -11838.
+// feeds it through the file pump; Stage 2 is the streamed
+// mint, Stage 3 the file download, Stage 4 the clone reader
+// as last resort, and the tap remains the final fallback.
+// Round 26's prime-before-play reader stage was removed
+// outright: its awaited load delayed every play() and its
+// reader has never once been allowed to exist here.
 
 /// A download job's way back to a FRESH stream URL for the same
 /// format. googlevideo URLs are signed for the IP that minted them
@@ -404,6 +408,23 @@ final class TrapTubeGhostAudio {
     private var baselineRate: Float = 1
     private var correction: Float = 1
     private var outputLevelValue: Float = 1
+    /// Round 28: the two reasons the mixer can be silent
+    /// apart from the level itself - the user's own mute
+    /// (setMuted) and the HANDOFF SILENCE: while a takeover
+    /// prime is proving it renders, the feed renders at zero
+    /// mixer level, so the still-audible item stays the only
+    /// sound the user hears; the level opens the instant the
+    /// controller mutes the item at the handoff. Every write
+    /// of the mixer's outputVolume goes through
+    /// refreshMixerLevel, so a parameter re-apply (an engine
+    /// reset rebuilds the graph and re-applies everything)
+    /// can never stomp either state mid-handoff.
+    private var userMuted = false
+    private var handoffSilenced = false
+
+    private func refreshMixerLevel() {
+        engine.mainMixerNode.outputVolume = (userMuted || handoffSilenced) ? 0 : outputLevelValue
+    }
 
     // Round 22 effects state, cached exactly like the EQ state
     // above: an engine reset returns the units to factory defaults,
@@ -434,20 +455,25 @@ final class TrapTubeGhostAudio {
     private var cloneSource: CloneSource?
     private var desiredPlaying = false
 
-    // MARK: Round 26: the staged ladder's bookkeeping
+    // MARK: Round 28: the staged ladder's bookkeeping
     //
-    // prePlayAttempted/prePlayPrimed track Stage 1: the
-    // controller asks for the prime before the item is set on
-    // the player, and start() then ADOPTS a live pre-primed
-    // reader instead of tearing it down and starting over.
     // lastEngagedStage records which ladder stage owns the
-    // live feed (1 pre-play reader, 2 post-play reader,
-    // 3 export extraction, 4 streamed mint, 5 file download)
-    // so the controller's diagnostics can name it - above all
-    // in the re-engagement note, "ghost re-engaged (stage N)".
-    // currentVideoID keys the Stage 3 export cache.
-    private var prePlayAttempted = false
-    private var prePlayPrimed = false
+    // live feed (1 export extraction, 2 streamed mint,
+    // 3 file download, 4 post-play clone reader) so the
+    // controller's diagnostics can name it - above all in
+    // the re-engagement note, "ghost re-engaged (stage N)".
+    // Round 26's prime-before-play stage and its adoption
+    // bookkeeping are GONE: the pre-play prime's awaited
+    // clone load sat between the resolver's return and
+    // play() on every load, and the reader it built has
+    // never once been allowed to exist on the user's device
+    // (AVAssetReader creation refused with -11838 in both
+    // apps, at every timing) - pure latency in front of
+    // every playback, for a route with a zero-percent
+    // record. The reader survives only as the ladder's
+    // last resort (Stage 4 in start(), and last in the
+    // reader-feed resync).
+    // currentVideoID keys the Stage 1 export cache.
     private(set) var lastEngagedStage: Int?
     private var currentVideoID: String?
     /// The local file the exported feed is pumping (a cache
@@ -599,7 +625,7 @@ final class TrapTubeGhostAudio {
         eqUnit.bypass = bypassed
         eqUnit.globalGain = headroomGainDB
         varispeed.rate = baselineRate * correction
-        engine.mainMixerNode.outputVolume = outputLevelValue
+        refreshMixerLevel()
         pushReverbState()
         configureDynamicsUnit()
     }
@@ -694,7 +720,7 @@ final class TrapTubeGhostAudio {
         headroomGainDB = manager.headroomCompensationDB
         eqUnit.globalGain = headroomGainDB
         outputLevelValue = min(max(manager.masterGainPercent / 100, 0), 1)
-        if connected { engine.mainMixerNode.outputVolume = outputLevelValue }
+        if connected { refreshMixerLevel() }
     }
 
     func setBaselineRate(_ rate: Float) {
@@ -712,7 +738,8 @@ final class TrapTubeGhostAudio {
     /// The player view's own mute toggle, applied on top of the
     /// manager-driven level.
     func setMuted(_ muted: Bool) {
-        engine.mainMixerNode.outputVolume = muted ? 0 : outputLevelValue
+        userMuted = muted
+        refreshMixerLevel()
     }
 
     // MARK: Graph
@@ -760,59 +787,75 @@ final class TrapTubeGhostAudio {
 
     // MARK: Starting feeds
 
-    /// Runs the Round 26 staged ladder: Stage 1's pre-play
-    /// reader is ADOPTED when preparePrePlay already engaged
-    /// it; otherwise Stage 2 (the post-play same-asset clone
-    /// reader), Stage 3 (export extraction to a local file,
-    /// fed through the file pump), Stage 4 (the independently
-    /// minted STREAMED feed) and Stage 5 (the FILE download).
-    /// The position provider is consulted at the moment each
-    /// stage actually primes, so a slow extraction or download
-    /// still lands on the video's current position. A nil
-    /// minted source no longer starves Ghost: Stages 1-3 need
-    /// no mint at all, which is the structural answer to the
+    /// Round 28: the ladder is EXPORT-FIRST. Stage 1 is the
+    /// windowed export extraction - the one route with a
+    /// perfect record on the user's device, because it reads
+    /// through the media stack AVPlayer itself uses; Stage 2
+    /// the independently minted streamed feed; Stage 3 the
+    /// file download; Stage 4 the post-play clone reader as
+    /// last resort (its creation has been refused on this
+    /// device in every build of both apps). Round 26's
+    /// prime-before-play stage is GONE, not demoted: its
+    /// awaited clone load sat between the resolver's return
+    /// and play() on EVERY load, delaying playback itself to
+    /// build a reader this device has never once allowed -
+    /// pure latency, zero successes. The position provider
+    /// is consulted at the moment each stage actually
+    /// primes, so a slow extraction or download still lands
+    /// on the video's current position. A nil minted source
+    /// no longer starves Ghost: Stages 1 and 4 need no mint
+    /// at all, which is the structural answer to the
     /// Build 213 failure (IOS legs refused at load, ANDROID
     /// minting no audio-only URL at all, while the ANDROID
     /// muxed stream played fine).
+    ///
+    /// Round 28 NO-SILENCE HANDOFF: the whole ladder runs
+    /// with the mixer handoff-silenced while the controller
+    /// leaves the item AUDIBLE, and a stage only wins when
+    /// its prime has also proven it renders (confirmOrFail).
+    /// The controller mutes the item the moment start
+    /// returns a feed - the same instant this silence lifts
+    /// - so the user never hears a gap and never hears the
+    /// two legs double. The code this replaces muted the
+    /// item BEFORE the ladder ran, and a slow stage became
+    /// an open-ended silent video (Build 228: an 88-minute
+    /// mix audible for two seconds, then cut hard to
+    /// silence under "GHOST STARTING...").
     func start(source: Source?, clone: CloneSource?, videoID: String?,
                position: @escaping () -> TimeInterval) async -> Feed {
         self.source = source
         if let clone { self.cloneSource = clone }
         if let videoID { self.currentVideoID = videoID }
-        // Stage 1 adoption: the pre-play prime already built
-        // and started this reader and its pump. Tearing it
-        // down to re-prime would throw away the one route
-        // whose timing is provably contention-free.
-        if prePlayPrimed, feed == .sameAsset {
-            lastEngagedStage = 1
-            return .sameAsset
-        }
-        // When Stage 1 was attempted and refused, its exits
-        // are already on the trail; Stages 2+ append to it so
-        // a terminal failure shows BOTH attempts.
-        if !prePlayAttempted {
-            failureTrail = []
-            lastFailureReason = nil
-            lastFailureShort = nil
-        }
+        failureTrail = []
+        lastFailureReason = nil
+        lastFailureShort = nil
         teardownFeed(deleteTemp: true)
-        if await primeSameAsset(startAt: position()) {
-            lastEngagedStage = 2
-            return .sameAsset
+        handoffSilenced = true
+        defer {
+            handoffSilenced = false
+            refreshMixerLevel()
         }
-        if await primeExport(position: position) {
-            lastEngagedStage = 3
+        if await primeExport(position: position),
+           await confirmOrFail(route: "export") {
+            lastEngagedStage = 1
             return .exported
         }
         if let source {
-            if await primeStreamed(source: source, startAt: position()) {
-                lastEngagedStage = 4
+            if await primeStreamed(source: source, startAt: position()),
+               await confirmOrFail(route: "streamed") {
+                lastEngagedStage = 2
                 return .streamed
             }
-            if await primeFileRoute(source: source, position: position) {
-                lastEngagedStage = 5
+            if await primeFileRoute(source: source, position: position),
+               await confirmOrFail(route: "file") {
+                lastEngagedStage = 3
                 return .file
             }
+        }
+        if await primeSameAsset(startAt: position()),
+           await confirmOrFail(route: "same-asset") {
+            lastEngagedStage = 4
+            return .sameAsset
         }
         feed = .none
         finishFailure()
@@ -829,8 +872,17 @@ final class TrapTubeGhostAudio {
         // The trail is NOT reset here: the stall that escalated
         // to this call belongs to the same failure chain, and if
         // the file feed also fails the Diag should show both.
+        // Round 28: the escalation runs under the same
+        // handoff discipline as start() - the controller has
+        // restored the item's audio for the duration, the new
+        // feed renders silenced until it has proven itself,
+        // and only then does the takeover mute land again.
         teardownFeed(deleteTemp: true)
-        let ok = await primeFileRoute(source: source, position: position)
+        handoffSilenced = true
+        var ok = await primeFileRoute(source: source, position: position)
+        if ok { ok = await confirmOrFail(route: "file") }
+        handoffSilenced = false
+        refreshMixerLevel()
         if !ok { finishFailure() }
         return ok
     }
@@ -855,10 +907,10 @@ final class TrapTubeGhostAudio {
     /// prime builds a FRESH AVURLAsset from that descriptor.
     /// The player's live instance is never read. The feed joins
     /// the same pump, the same canonical conversion and the
-    /// same sync discipline as the streamed feed, and the video
-    /// player's own audio stays silenced exactly as before (the
-    /// controller mutes the item before Ghost starts, whichever
-    /// feed wins).
+    /// same sync discipline as the streamed feed. Round 28: the
+    /// item stays AUDIBLE until a feed has proven it renders -
+    /// the takeover mute lands at the handoff, never before
+    /// (see start).
     private func primeSameAsset(startAt: TimeInterval, route: String = "same-asset") async -> Bool {
         guard let cloneSource else {
             recordFailure(route: route,
@@ -874,33 +926,6 @@ final class TrapTubeGhostAudio {
         }
         return primeReader(asset: asset, track: loaded.track, facts: loaded.facts,
                            feedKind: .sameAsset, route: route, startAt: startAt)
-    }
-
-    /// Round 26, Stage 1: PRIME-BEFORE-PLAY. The controller
-    /// calls this from load() AFTER the resolver returns and
-    /// BEFORE the item is set on the player or play() is
-    /// called: the same-asset clone is built, fully loaded,
-    /// and its reader created and started while no player
-    /// holds anything yet. If creation throws here too, the
-    /// refusal cannot be contention with a running player -
-    /// the Stage 0 facts recorded with the attempt say what
-    /// the asset was - and start() falls through to Stage 2.
-    /// On success the reader is left running (the pump
-    /// pre-schedules at the prime position) and start()
-    /// ADOPTS it instead of re-priming. The route is labeled
-    /// distinctly so the failure trail separates the pre-play
-    /// attempt from the post-play one.
-    func preparePrePlay(clone: CloneSource?, startAt: TimeInterval) async -> Bool {
-        prePlayAttempted = true
-        guard let clone else { return false }
-        self.cloneSource = clone
-        failureTrail = []
-        lastFailureReason = nil
-        lastFailureShort = nil
-        let ok = await primeSameAsset(startAt: startAt, route: "same-asset (pre-play)")
-        prePlayPrimed = ok
-        if !ok { finishFailure() }
-        return ok
     }
 
     private func primeStreamed(source: Source, startAt: TimeInterval) async -> Bool {
@@ -1073,7 +1098,7 @@ final class TrapTubeGhostAudio {
         return true
     }
 
-    // MARK: Round 26, Stage 3: export extraction
+    // MARK: Round 28, Stage 1: export extraction
     //
     // The structural bypass for assets that refuse readers:
     // the audio is extracted to a LOCAL file by an
@@ -1174,7 +1199,7 @@ final class TrapTubeGhostAudio {
         return best
     }
 
-    /// Stage 3 entry: serve the window covering the CURRENT
+    /// Stage 1 entry: serve the window covering the CURRENT
     /// playhead from cache when one exists; otherwise extract
     /// it (see extractExportWindow). The position provider is
     /// consulted at prime time, never at ladder time: the
@@ -1390,7 +1415,7 @@ final class TrapTubeGhostAudio {
     }
 
     /// Round 26: feedKind and route are parameters because the
-    /// Stage 3 export feed pumps a local file through this
+    /// Stage 1 export feed pumps a local file through this
     /// exact path - same pump, same conversion gate - while
     /// remaining a distinct feed (.exported) with its own
     /// failure attribution.
@@ -1775,6 +1800,75 @@ final class TrapTubeGhostAudio {
         return primeOffset + Double(playerTime.sampleTime) / playerTime.sampleRate
     }
 
+    /// Round 28: whether the audio engine itself is running -
+    /// a liveness signal the controller's sync loop now
+    /// consults directly. A stopped engine (a media-services
+    /// reset, a session deactivation forced by the host app)
+    /// freezes every rendered-position signal with it, which
+    /// the position-based guard could previously only infer
+    /// after its window lapsed, and nothing anywhere
+    /// restarted it.
+    var engineIsRunning: Bool { engine.isRunning }
+
+    /// Round 28: restart a stopped engine under a live feed
+    /// and resume rendering. Returns true when a restart was
+    /// needed (and attempted), so the caller can breadcrumb
+    /// it; the rendered-position guard remains the arbiter of
+    /// whether the feed actually recovered.
+    @discardableResult
+    func restartEngineIfStopped() -> Bool {
+        guard feed != .none, !engine.isRunning else { return false }
+        try? engine.start()
+        if desiredPlaying { node.play() }
+        return true
+    }
+
+    /// Round 28: the handoff proof. A prime only ever proved
+    /// the feed OPENED - Build 223 declared "ghost live" over
+    /// an exported file that rendered nothing at all. This
+    /// waits until the player node's rendered position
+    /// actually ADVANCES (the Round 27 liveness definition)
+    /// before the caller may treat the feed as live. It runs
+    /// under the handoff silence (see start), so the proof
+    /// costs the user nothing: the item stays the only
+    /// audible leg until the controller mutes it at the
+    /// handoff. A paused session cannot prove rendering, so
+    /// it passes; the sync loop's guard owns liveness from
+    /// the first playing tick after a resume.
+    private func confirmRendering() async -> Bool {
+        guard desiredPlaying else { return true }
+        let deadline = Date().addingTimeInterval(1.5)
+        var baseline: TimeInterval?
+        while Date() < deadline {
+            if Task.isCancelled { return false }
+            guard feed != .none else { return false }
+            if !desiredPlaying { return true }
+            if let now = position() {
+                if let baseline {
+                    if now > baseline + 0.03 { return true }
+                } else {
+                    baseline = now
+                }
+            }
+            try? await Task.sleep(nanoseconds: 60_000_000)
+        }
+        return false
+    }
+
+    /// Round 28: the gate every ladder prime now passes
+    /// through - primed AND proven rendering, or the prime
+    /// is torn down and its exit recorded, so a feed that
+    /// opens but renders nothing falls through to the next
+    /// stage instead of being declared live over silence.
+    private func confirmOrFail(route: String) async -> Bool {
+        if await confirmRendering() { return true }
+        recordFailure(route: route,
+                      cause: "primed but rendered no progress within 1.5 s",
+                      short: "\(route) rendered nothing")
+        teardownFeed(deleteTemp: true)
+        return false
+    }
+
     func setDesiredPlaying(_ playing: Bool) {
         desiredPlaying = playing
         guard feed != .none else { return }
@@ -1797,7 +1891,13 @@ final class TrapTubeGhostAudio {
     }
 
     /// Hard resync: flush the node and re-prime the same feed at
-    /// the video's current position.
+    /// the video's current position. Round 28: a resync is a
+    /// re-prime, so it runs under start()'s handoff discipline -
+    /// the feed renders silenced until it has proven it renders
+    /// (confirmOrFail), and only a proven resync lets the
+    /// controller land (or keep) the takeover mute. When the
+    /// resync is a recovery, the controller has the item audible
+    /// for its duration.
     func resync(to position: TimeInterval) async -> Bool {
         guard feed != .none else { return false }
         // A resync owns a fresh failure trail: its primes record
@@ -1805,22 +1905,35 @@ final class TrapTubeGhostAudio {
         // fall back) reads the reason for THIS attempt, not a
         // stale one from the original start.
         failureTrail = []
-        let ok: Bool
+        handoffSilenced = true
+        var ok: Bool
         switch feed {
         case .sameAsset, .streamed:
-            // Round 26: a resync of a reader feed re-runs the
-            // ladder from Stage 2 - a fresh clone reader first
-            // (Round 25: built from the descriptor on every
-            // call, never the playing item's live asset), then
-            // Stage 3, which serves the export cache instantly
-            // when this video was already extracted and extracts
-            // otherwise. Whichever stage lands is recorded in
-            // lastEngagedStage for the re-engagement note.
-            if await primeSameAsset(startAt: position) {
-                lastEngagedStage = 2
+            // Round 28: a resync of a reader feed re-runs the
+            // ladder in start()'s export-first order (Round 26
+            // ran the clone reader first, then the export; the
+            // reader's record on this device is still zero
+            // successes, so it goes last here too). Whichever
+            // stage lands is recorded in lastEngagedStage for
+            // the re-engagement note.
+            if await primeExport(position: { position }) {
+                lastEngagedStage = 1
                 ok = true
-            } else if await primeExport(position: { position }) {
-                lastEngagedStage = 3
+            } else if let source {
+                if await primeStreamed(source: source, startAt: position) {
+                    lastEngagedStage = 2
+                    ok = true
+                } else if await primeFileRoute(source: source, position: { position }) {
+                    lastEngagedStage = 3
+                    ok = true
+                } else if await primeSameAsset(startAt: position) {
+                    lastEngagedStage = 4
+                    ok = true
+                } else {
+                    ok = false
+                }
+            } else if await primeSameAsset(startAt: position) {
+                lastEngagedStage = 4
                 ok = true
             } else {
                 ok = false
@@ -1830,7 +1943,7 @@ final class TrapTubeGhostAudio {
             // window re-primes the same file at its local
             // offset; a target outside it (a seek past the
             // window's end, an exhausted window) goes back
-            // through Stage 3, which serves the covering
+            // through Stage 1, which serves the covering
             // window from cache - the prefetched next window
             // makes that instant - or extracts it.
             if let exportedFileURL,
@@ -1842,17 +1955,36 @@ final class TrapTubeGhostAudio {
             } else {
                 // Covers an out-of-window target AND an
                 // in-window prime that failed (a pruned cache
-                // file is not a dead end): Stage 3 re-serves or
+                // file is not a dead end): Stage 1 re-serves or
                 // re-extracts the covering window.
                 ok = await primeExport(position: { position })
             }
-            if ok { lastEngagedStage = 3 }
+            if ok { lastEngagedStage = 1 }
         case .file:
-            guard let tempFileURL else { return false }
-            ok = primeFile(localURL: tempFileURL, startAt: position)
+            if let tempFileURL {
+                ok = primeFile(localURL: tempFileURL, startAt: position)
+            } else {
+                ok = false
+            }
         case .none:
-            return false
+            ok = false
         }
+        if ok {
+            // The confirmation names the feed that actually
+            // primed - after a ladder re-run that can differ
+            // from the feed that was resynced.
+            let route: String
+            switch feed {
+            case .exported: route = "export"
+            case .streamed: route = "streamed"
+            case .file: route = "file"
+            case .sameAsset: route = "same-asset"
+            case .none: route = "resync"
+            }
+            ok = await confirmOrFail(route: route)
+        }
+        handoffSilenced = false
+        refreshMixerLevel()
         if !ok { finishFailure() }
         return ok
     }
@@ -1886,10 +2018,9 @@ final class TrapTubeGhostAudio {
         source = nil
         cloneSource = nil
         desiredPlaying = false
-        // Round 26: the ladder state belongs to one item's
+        // Round 28: the ladder state belongs to one item's
         // session; a new load starts its staging from scratch.
-        prePlayAttempted = false
-        prePlayPrimed = false
+        handoffSilenced = false
         lastEngagedStage = nil
         currentVideoID = nil
         exportedFileURL = nil
