@@ -506,6 +506,31 @@ final class TrapTubeGhostAudio {
     /// the failure trail never sees.
     var onDiagnosticNote: ((String) -> Void)?
 
+    /// Round 31 candidate: whether the session currently wants the
+    /// engine rendering. The controller's sync loop reads it to tell a
+    /// pause the transport buttons already relayed from a pause the
+    /// video item took on its own.
+    var isDesiredPlaying: Bool { desiredPlaying }
+
+    /// Round 31 candidate: one line of ground truth about the output
+    /// path for the Share diagnostics export - engine, node, mixer
+    /// level and every silence flag - so "I can't hear anything"
+    /// names its cause instead of needing a guess.
+    var diagnosticsSnapshot: String {
+        let rendered = position().map { String(format: "%.1f s", $0) } ?? "no render time"
+        let engineText = engine.isRunning ? "running" : "STOPPED"
+        let nodeText = node.isPlaying ? "playing" : "not playing"
+        let mixerText = String(format: "%.2f", engine.mainMixerNode.outputVolume)
+        let aheadText = String(format: "%.1f", scheduledAhead())
+        var line = "engine \(engineText) · node \(nodeText) · mixer \(mixerText)"
+        line += " · handoff-silence \(handoffSilenced ? "ON" : "off")"
+        line += " · user-mute \(userMuted ? "ON" : "off")"
+        line += " · wants \(desiredPlaying ? "play" : "pause")"
+        line += " · scheduled ahead \(aheadText) s · rendered \(rendered)"
+        if let lastEngineStartError { line += " · \(lastEngineStartError)" }
+        return line
+    }
+
     /// The exported feed's current window, for the
     /// controller's prefetch trigger.
     var exportWindow: (start: TimeInterval, end: TimeInterval)? {
