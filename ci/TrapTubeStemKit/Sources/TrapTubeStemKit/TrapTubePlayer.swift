@@ -1792,7 +1792,10 @@ final class TrapTubePlayerController: ObservableObject {
         ghostDriftMs = nil
         usingTapFallback = false
         ghostFailureShort = nil
-        player.isMuted = false
+        // Round 29 candidate: a new load keeps the USER's mute choice
+        // (isMuted); only the takeover mute is cleared. It used to
+        // force the item audible while the mute button still read muted.
+        player.isMuted = isMuted
         ghostTakeoverMuted = false
         loadTask?.cancel()
         watchdogTask?.cancel()
