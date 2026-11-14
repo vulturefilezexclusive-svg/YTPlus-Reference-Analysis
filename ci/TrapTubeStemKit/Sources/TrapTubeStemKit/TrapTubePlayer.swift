@@ -1107,6 +1107,25 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var diagnosticsLine: String = "Diag: idle"
     private var diagSteps: [String] = []
 
+    // Round 21: one compact line proving what playback is doing right
+    // now - transport state, rate, and whether the video layer has a
+    // frame to show. The player's status block renders it, so a
+    // screenshot taken after an EQ attach shows the video leg's real
+    // state instead of a spinner and a guess.
+    @Published var playbackStateLine: String = "idle"
+    private func makePlaybackStateLine() -> String {
+        let state: String
+        switch player.timeControlStatus {
+        case .playing: state = "playing"
+        case .waitingToPlayAtSpecifiedRate: state = "buffering"
+        case .paused: state = "paused"
+        @unknown default: state = "unknown"
+        }
+        let shownRate = player.rate != 0 ? player.rate : rate
+        let video = (playerLayer?.isReadyForDisplay ?? false) ? "video ready" : "video not ready"
+        return "\(state) · \(shownRate, specifier: "%g")x · \(video)"
+    }
+
     // Round 16 watchdog: started the moment play() is called; if the
     // item still isn't readyToPlay 10s later it appends the item/player
     // state that distinguishes a stalled item pipeline from a stalled
@@ -1216,6 +1235,7 @@ final class TrapTubePlayerController: ObservableObject {
                     self.duration = itemDuration
                 }
                 self.isPlaying = self.player.timeControlStatus == .playing
+                self.playbackStateLine = self.makePlaybackStateLine()
                 self.checkSponsorSegments()
             }
     }
@@ -1307,7 +1327,7 @@ final class TrapTubePlayerController: ObservableObject {
                 // video-only; the tap is attached later only if
                 // Ghost fails outright (beginTapFallback).
                 if self.audioPath == .tap {
-                    self.hook.attachImmediately(to: resolved.item)
+                    self.preservingPlaybackIntent { self.hook.attachImmediately(to: resolved.item) }
                 }
                 self.startLoadWatchdog(for: resolved.item)
                 if self.audioPath == .ghost {
@@ -1493,6 +1513,30 @@ final class TrapTubePlayerController: ObservableObject {
             guard !Task.isCancelled else { return }
             self?.skipNotice = nil
         }
+    }
+
+    /// Round 21: run an EQ attach/detach operation without letting it
+    /// change whether the video is playing. Swapping an item's audio
+    /// mix mid-playback (a first attach, a Mode 2 re-attach, a
+    /// detach's mix restore) can leave AVPlayer parked in .paused
+    /// even though the user's intent never changed - the picture
+    /// freezes on a frame while the app insists nothing is wrong.
+    /// Snapshot the intent (a nonzero rate IS the intent: AVPlayer
+    /// keeps the rate set while it waits on the network), run the
+    /// operation, then resume at the same rate if the player came out
+    /// paused for any reason other than reaching the end. A user who
+    /// paused has rate 0, so this can never start playback they
+    /// stopped.
+    private func preservingPlaybackIntent(_ operation: () -> Void) {
+        let intentRate = player.rate
+        operation()
+        guard intentRate > 0, player.timeControlStatus == .paused,
+              let item = player.currentItem else { return }
+        let now = item.currentTime().seconds
+        let end = item.duration.seconds
+        if now.isFinite, end.isFinite, end > 0, now >= end - 0.25 { return }
+        player.rate = intentRate
+        noteDiagnostic("attach left playback paused - resumed at intent rate")
     }
 
     func togglePlayPause() {
@@ -1690,7 +1734,7 @@ final class TrapTubePlayerController: ObservableObject {
         ghost.teardownFeed(deleteTemp: true)
         player.isMuted = isMuted
         noteDiagnostic("ghost failed - tap fallback")
-        hook.attachImmediately(to: item)
+        preservingPlaybackIntent { hook.attachImmediately(to: item) }
     }
 
     /// The 5 Hz sync loop (the hybrid's tunables, unchanged):
@@ -1780,7 +1824,9 @@ final class TrapTubePlayerController: ObservableObject {
                 let source = TrapTubeGhostAudio.Source(
                     url: fresh.url, userAgent: fresh.userAgent,
                     refresher: { await TrapTubeStreamResolver.fetchGhostAudioSource(videoID: videoID) })
-                TrapTubeEQManager.shared.detach(from: item)
+                self.preservingPlaybackIntent {
+                    TrapTubeEQManager.shared.detach(from: item)
+                }
                 self.startGhost(source: source, item: item)
             }
         } else {
@@ -1791,7 +1837,7 @@ final class TrapTubePlayerController: ObservableObject {
             ghostDriftMs = nil
             usingTapFallback = false
             player.isMuted = isMuted
-            hook.attachImmediately(to: item)
+            preservingPlaybackIntent { hook.attachImmediately(to: item) }
         }
     }
 
@@ -1877,8 +1923,17 @@ private struct TrapTubePlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: LayerView, context: Context) {
-        uiView.playerLayer.player = player
-        onLayerAvailable?(uiView.playerLayer)
+        // Round 21: only touch the layer when the player actually
+        // changed. updateUIView fires on every SwiftUI state change
+        // (the controller publishes 4x/sec from its time observer),
+        // and re-assigning the same player to the layer each time can
+        // drop the frame being displayed - which reads on device as
+        // the video freezing right when the EQ attaches and the
+        // status lines start churning.
+        if uiView.playerLayer.player !== player {
+            uiView.playerLayer.player = player
+            onLayerAvailable?(uiView.playerLayer)
+        }
     }
 }
 
@@ -1927,7 +1982,15 @@ struct TrapTubeNativePlayerView: View {
     @State private var scrubTime: Double = 0
     @State private var showEQ = false
     @State private var reattachNote: String?
+    /// Round 21: the width the player column actually received,
+    /// measured read-only (see the body's background measure) and
+    /// printed in the status block as on-device proof of fit.
+    @State private var layoutWidth: Double = 0
     @Environment(\.dismiss) private var dismiss
+
+    private func noteLayoutWidth(_ width: Double) {
+        if abs(width - layoutWidth) > 0.5 { layoutWidth = width }
+    }
 
     init(request: TrapTubePlayerRequest) {
         self.request = request
@@ -1954,30 +2017,44 @@ struct TrapTubeNativePlayerView: View {
     }
 
     var body: some View {
-        // Round 20: the column's width comes from THIS cover's own
-        // geometry (the device's width inside its safe area), never
-        // from the widest child. In Round 19 the transport row's
-        // fixed frames plus its spacers' minimum lengths summed to
-        // ~404pt inside a ~353pt column; a VStack adopts its widest
-        // child's width, so the entire player rendered over-wide and
-        // centered, cropping controls and text off BOTH edges.
-        // Pinning the frame to the measured width makes that
-        // overflow class impossible: children lay out inside the
-        // pinned width or shrink - they cannot widen it.
-        GeometryReader { proxy in
-            ZStack {
-                Color.black.ignoresSafeArea()
-                VStack(spacing: 0) {
-                    topBar
-                    videoCard
-                    titleBlock
-                    eqStrip
-                    transportRow
-                    statusBlock
-                    Spacer(minLength: 0)
+        // Round 21: NO GeometryReader as the layout's width source,
+        // and no explicit width anywhere in the player. Round 19's
+        // widest child (the transport row's fixed frames + spacer
+        // minimums, ~404pt) widened the whole VStack; Round 20 pinned
+        // the column to a GeometryReader's measured width - and on
+        // device the player STILL rendered wider than the screen:
+        // title clipped to "rapTube Player", "1x" and "SETTIN..."
+        // cut at opposite edges, no minimize button in reach. The
+        // feed in this very same hosting controller sizes itself
+        // correctly with plain proposal-driven layout, so the player
+        // now does exactly what the feed does: a maxWidth/maxHeight
+        // frame takes the width the fullScreenCover proposes, and
+        // every child is built to fit inside it - flexible transport
+        // cells with a play button narrower than the narrowest cell,
+        // status values framed and truncating, diagnostics wrapping.
+        // A read-only background measure (below) records the width
+        // the column actually received and the status block prints
+        // it, so the next screenshot proves the fit instead of
+        // arguing about it.
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                topBar
+                videoCard
+                titleBlock
+                eqStrip
+                transportRow
+                statusBlock
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear { noteLayoutWidth(proxy.size.width) }
+                        .onChange(of: proxy.size.width) { noteLayoutWidth($0) }
                 }
-                .padding(.horizontal, 20)
-                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .top)
             }
         }
         .preferredColorScheme(.dark)
@@ -2285,9 +2362,13 @@ struct TrapTubeNativePlayerView: View {
             }
             Button { controller.togglePlayPause() } label: {
                 Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 27, weight: .bold))
+                    .font(.system(size: 24, weight: .bold))
                     .foregroundStyle(.white)
-                    .frame(width: 70, height: 70)
+                    // Round 21: 56pt, not 70 - at a 393pt screen the
+                    // column is 353pt and each of the six transport
+                    // cells is ~59pt, so the Round 19/20 70pt button
+                    // was the one fixed child wider than its own cell.
+                    .frame(width: 56, height: 56)
                     .background(accent, in: Circle())
                     .shadow(color: accent.opacity(0.35), radius: 12, y: 4)
             }
@@ -2350,33 +2431,25 @@ struct TrapTubeNativePlayerView: View {
     /// The EQ status line and the Round 15 diagnostics line, kept
     /// visible under the transport row: they are the only on-device
     /// evidence of what attach did, so the restyle moves them but
-    /// never hides them.
+    /// never hides them. Round 21 rebuilds the rows so they can
+    /// never widen the layout (in the old HStack + Spacer form, a
+    /// long status value's ideal width could exceed the column and
+    /// overflow both edges): labels keep their full text via
+    /// layoutPriority, values sit in a trailing frame and truncate
+    /// from the head, so the verdict at the END of a long status -
+    /// "... - attaching", "drift 12 ms" - is what survives. The
+    /// Playback row (Round 21) carries the controller's live state
+    /// line, and the View width row prints the measured column
+    /// width: together they make the next screenshot self-proving.
     private var statusBlock: some View {
         VStack(alignment: .leading, spacing: 5) {
             // Round 20: the audio-path line (Ghost feed + drift, or
             // the tap-fallback marker) above the EQ attach status.
             if !controller.pathStatusText.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "waveform")
-                    Text("Audio path")
-                    Spacer()
-                    Text(controller.pathStatusText)
-                        .foregroundStyle(accent)
-                        .multilineTextAlignment(.trailing)
-                }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.white.opacity(0.65))
+                statusRow(label: "Audio path", value: controller.pathStatusText)
             }
-            HStack(spacing: 6) {
-                Image(systemName: "waveform")
-                Text("EQ stream status")
-                Spacer()
-                Text(streamStatus)
-                    .foregroundStyle(accent)
-                    .multilineTextAlignment(.trailing)
-            }
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(Color.white.opacity(0.65))
+            statusRow(label: "EQ stream status", value: streamStatus)
+            statusRow(label: "Playback", value: controller.playbackStateLine)
 
             // Round 20: the seamless re-attach breadcrumb - the
             // re-attach's timestamp and its position verdict.
@@ -2384,6 +2457,7 @@ struct TrapTubeNativePlayerView: View {
                 Text(reattachNote)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Color.white.opacity(0.6))
+                    .lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -2392,8 +2466,33 @@ struct TrapTubeNativePlayerView: View {
                 .foregroundStyle(Color.white.opacity(0.55))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
+
+            Text(layoutWidth > 0
+                 ? "View width \(Int(layoutWidth.rounded())) pt"
+                 : "View width measuring…")
+                .font(.caption2)
+                .foregroundStyle(Color.white.opacity(0.35))
         }
         .padding(.top, 18)
+    }
+
+    /// One status row: icon + label on the left (never truncated),
+    /// the value right-aligned inside a flexible frame (truncates
+    /// from the head when it cannot fit).
+    private func statusRow(label: String, value: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "waveform")
+            Text(label)
+                .lineLimit(1)
+                .layoutPriority(1)
+            Text(value)
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(Color.white.opacity(0.65))
     }
 
     private func timeLabel(_ seconds: Double) -> String {
@@ -2433,21 +2532,101 @@ struct TrapTubeEQPreset {
         name: "Drill",
         bandGains: [8, 7, 5, 2, 0, -2, -1, 0, 1, 2, 3, 4, 5, 5, 4, 3],
         bass: 10, master: 105)
-    static let hipHop = TrapTubeEQPreset(
-        name: "Hip-Hop",
-        bandGains: [5, 5, 4, 2, 1, 0, 1, 2, 3, 3, 2, 2, 2, 1, 0, 0],
-        bass: 6, master: 105)
-    static let bass = TrapTubeEQPreset(
-        name: "Bass",
-        bandGains: [10, 9, 7, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        bass: 14, master: 95)
     static let clarity = TrapTubeEQPreset(
         name: "Clarity",
         bandGains: [-2, -2, -1, -3, -2, 0, 1, 2, 3, 4, 4, 3, 3, 4, 4, 5],
         bass: 2, master: 110)
 
-    /// Genre-first order; Flat sits last as the reset-style option.
-    static let all: [TrapTubeEQPreset] = [.trap, .drill, .hipHop, .bass, .clarity, .flat]
+    // MARK: Musi preset pack (Round 21)
+    //
+    // Musi's preset names, imported as real curves. The values are
+    // the 10-anchor curves the hybrid app's EQ library shipped in
+    // its Round 7 (anchors at 32, 64, 125, 250, 500, 1k, 2k, 4k, 8k,
+    // 16k Hz, plus the bass value), expanded onto this manager's 16
+    // frequencies by log-frequency interpolation - the same
+    // expansion the hybrid performs - and rounded to 0.1 dB. They
+    // are standard genre curves under Musi's names, not Musi's
+    // proprietary values. Masters are 100 except Loudness (110: a
+    // loudness curve is a level curve). Name collisions with the
+    // older TrapTube presets are resolved to ONE entry per name:
+    // Hip Hop (Musi spelling) replaces the old hyphenated entry
+    // with the Musi curve, Bass takes the Musi curve (the old
+    // extreme TrapTube bass curve lives on, near enough, as
+    // Bass++), and Flat is the existing shared flat preset above.
+    static let bando = TrapTubeEQPreset(
+        name: "Bando",
+        bandGains: [9, 8, 6, 3, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 2.7, 2.4, 2],
+        bass: 10, master: 100)
+    static let defaultPreset = TrapTubeEQPreset(
+        name: "Default",
+        bandGains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 0, master: 100)
+    static let bass = TrapTubeEQPreset(
+        name: "Bass",
+        bandGains: [6, 5, 4, 2, 1, 0.4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 6, master: 100)
+    static let bassPlusPlus = TrapTubeEQPreset(
+        name: "Bass++",
+        bandGains: [10, 9, 7, 5, 2, 0.8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        bass: 12, master: 100)
+    static let acoustic = TrapTubeEQPreset(
+        name: "Acoustic",
+        bandGains: [5, 4, 3, 2, 3, 3, 3, 3.6, 4, 4, 4, 3.4, 3, 2.7, 2.4, 2],
+        bass: 2, master: 100)
+    static let classical = TrapTubeEQPreset(
+        name: "Classical",
+        bandGains: [4, 3, 2, 1, 0, 0, 0, -0.6, -1, -1.6, -2, -2.6, -3, -3.3, -3.6, -4],
+        bass: 0, master: 100)
+    static let dance = TrapTubeEQPreset(
+        name: "Dance",
+        bandGains: [6, 5, 3, 1, 0, 0, 0, 1.2, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
+        bass: 6, master: 100)
+    static let deep = TrapTubeEQPreset(
+        name: "Deep",
+        bandGains: [7, 6, 5, 4, 3, 2.4, 2, 1.4, 1, 0.4, 0, -0.6, -1, -1.3, -1.6, -2],
+        bass: 6, master: 100)
+    static let electronic = TrapTubeEQPreset(
+        name: "Electronic",
+        bandGains: [5, 4, 3, 1, 0, 0.6, 1, 1.6, 2, 2.6, 3, 3.6, 4, 3.7, 3.4, 3],
+        bass: 4, master: 100)
+    static let hipHop = TrapTubeEQPreset(
+        name: "Hip Hop",
+        bandGains: [6, 5, 4, 2, 0, -0.6, -1, -0.4, 0, 1.2, 2, 2.6, 3, 3, 3, 3],
+        bass: 8, master: 100)
+    static let jazz = TrapTubeEQPreset(
+        name: "Jazz",
+        bandGains: [3, 3, 2, 2, 2, 2.6, 3, 2.4, 2, 2.6, 3, 3, 3, 2.7, 2.4, 2],
+        bass: 2, master: 100)
+    static let loudness = TrapTubeEQPreset(
+        name: "Loudness",
+        bandGains: [5, 4, 3, 1, 0, 0, 0, 1.2, 2, 3.2, 4, 4.6, 5, 5, 5, 5],
+        bass: 4, master: 110)
+    static let lounge = TrapTubeEQPreset(
+        name: "Lounge",
+        bandGains: [3, 2, 2, 1, 2, 2, 2, 2, 2, 1.4, 1, 1, 1, 0.7, 0.4, 0],
+        bass: 2, master: 100)
+    static let pop = TrapTubeEQPreset(
+        name: "Pop",
+        bandGains: [1, 1, 2, 3, 3, 2.4, 2, 1.4, 1, 0.4, 0, -0.6, -1, -1, -1, -1],
+        bass: 0, master: 100)
+    static let rock = TrapTubeEQPreset(
+        name: "Rock",
+        bandGains: [5, 4, 2, 1, 0, -0.6, -1, 0.2, 1, 1.6, 2, 2.6, 3, 3, 3, 3],
+        bass: 2, master: 100)
+    static let spokenWord = TrapTubeEQPreset(
+        name: "Spoken Word",
+        bandGains: [-2, -1, 0, 2, 4, 4.6, 5, 5, 5, 4.4, 4, 2.8, 2, 1.4, 0.8, 0],
+        bass: 0, master: 100)
+
+    /// TrapTube's own first, then the Musi pack in Musi's order;
+    /// Flat sits last as the reset-style option.
+    static let all: [TrapTubeEQPreset] = [
+        .trap, .drill, .clarity,
+        .bando, .defaultPreset, .bass, .bassPlusPlus, .acoustic,
+        .classical, .dance, .deep, .electronic, .hipHop, .jazz,
+        .loudness, .lounge, .pop, .rock, .spokenWord,
+        .flat
+    ]
 }
 
 struct TrapTubeEqualizerPanel: View {
@@ -2565,9 +2744,17 @@ struct TrapTubeEqualizerPanel: View {
                         .tint(accent)
                         HStack {
                             Text("Stream status").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                            Spacer()
+                                .lineLimit(1)
+                                .layoutPriority(1)
+                            // Round 21: the status string can be a
+                            // whole error sentence; framed + wrapped
+                            // to two lines so it can never push the
+                            // card wider than the sheet.
                             Text(streamStatus)
                                 .font(.caption.weight(.bold)).foregroundStyle(accent)
+                                .multilineTextAlignment(.trailing)
+                                .lineLimit(2)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                         .onAppear { streamStatus = manager.attachmentStatus }
                         .onReceive(NotificationCenter.default.publisher(
