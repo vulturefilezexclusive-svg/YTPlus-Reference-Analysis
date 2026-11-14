@@ -226,6 +226,43 @@ public final class TrapTubeAudioHook: NSObject {
         attachWhenTracksAreReady(item)
     }
 
+    // MARK: - Round 21: playback-intent preservation
+    //
+    // Attaching the tap can swap the item's audio mix (the manager's
+    // Mode 2 install, or a detach's mix restore on the way there).
+    // AVPlayer can come out of a mix swap in .paused even though the
+    // user never paused - and because the audio leg is what stalled,
+    // the VIDEO freezes on a frame with it: "the EQ hooked and the
+    // picture stopped." Nothing in the pre-Round-21 chain ever
+    // checked the transport state after an attach. The fix is a
+    // snapshot/restore around every attach this hook performs: a
+    // nonzero rate IS the playback intent (AVPlayer keeps the rate
+    // set while it waits on the network), so snapshot it before the
+    // attach and, if the player is found .paused afterwards with
+    // that intent still declared, resume at the same rate - unless
+    // the item simply reached its end, where staying paused is
+    // correct. A user who paused has rate 0, so a restore can never
+    // start playback they stopped.
+
+    /// The current playback intent as a rate; 0 means "not playing".
+    private func playbackIntentRate() -> Float { player?.rate ?? 0 }
+
+    /// Resume a player an attach left paused despite a playing
+    /// intent. Checked on the main queue, after the attach settles.
+    private func restorePlaybackIntent(_ intentRate: Float, for item: AVPlayerItem) {
+        guard intentRate > 0 else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let player = self.player,
+                  player.currentItem === item,
+                  player.timeControlStatus == .paused else { return }
+            let now = item.currentTime().seconds
+            let end = item.duration.seconds
+            if now.isFinite, end.isFinite, end > 0, now >= end - 0.25 { return }
+            player.rate = intentRate
+            NSLog("[TrapTube EQ] Attach left playback paused; resumed at the intended rate")
+        }
+    }
+
     /// Round 19: synchronous fast-path attach for the one moment the
     /// async chain is pure delay - immediately after the player
     /// controller has set the resolver's item and called play(). The
@@ -239,9 +276,11 @@ public final class TrapTubeAudioHook: NSObject {
     public func attachImmediately(to item: AVPlayerItem) {
         guard player?.currentItem === item else { return }
         if TrapTubeEQManager.shared.isAttached(to: item) { return }
+        let intentRate = playbackIntentRate()
         if !item.asset.tracks(withMediaType: .audio).isEmpty,
            TrapTubeEQManager.shared.attach(to: item) {
             NSLog("[TrapTube EQ] Attached audio processing tap immediately after play()")
+            restorePlaybackIntent(intentRate, for: item)
             return
         }
         attachWhenTracksAreReady(item)
@@ -286,6 +325,9 @@ public final class TrapTubeAudioHook: NSObject {
         attachmentTask?.cancel()
         attachmentTask = Task { [weak self, weak item] in
             guard let item else { return }
+            // Round 21: snapshot the playback intent before the
+            // attach; restored below once the attach settles.
+            let intentRate = self?.playbackIntentRate() ?? 0
             var attached = false
             if !item.asset.tracks(withMediaType: .audio).isEmpty {
                 attached = TrapTubeEQManager.shared.attach(to: item)
@@ -306,6 +348,7 @@ public final class TrapTubeAudioHook: NSObject {
             } else {
                 NSLog("[TrapTube EQ] Current player item did not expose a compatible audio-processing path")
             }
+            self.restorePlaybackIntent(intentRate, for: item)
         }
     }
 
