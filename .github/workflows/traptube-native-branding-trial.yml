@@ -396,6 +396,10 @@ jobs:
           grep -Fq 'diagTrailSnapshot' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           grep -Fq 'Share diagnostics' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
           grep -Fq 'TrapTubeShareDiagnosticsButton(controller: controller)' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift
+          # Round 31: video is the master clock (sync loop follows an involuntary item pause) + Ghost output-path snapshot in the export
+          grep -Fq 'var diagnosticsSnapshot' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeGhostAudio.swift
+          grep -Fq 'ghost paused: the video item paused without the transport buttons' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
+          grep -Fq 'var transportSnapshot' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubePlayer.swift
           if grep -Fq 'stemSeparationPage' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then echo "VERIFY FAIL: Round 22 removed the stem separation page from the EQ tab"; exit 35; fi
           if grep -Fq '"Stem Separation"' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/TrapTubeStemKit.swift; then echo "VERIFY FAIL: the Stem Separation segment must not come back"; exit 35; fi
           grep -Fq 'TrapTubeAudioBoostFactory' ci/TrapTubeStemKit/Sources/TrapTubeStemKit/UIControls.swift
