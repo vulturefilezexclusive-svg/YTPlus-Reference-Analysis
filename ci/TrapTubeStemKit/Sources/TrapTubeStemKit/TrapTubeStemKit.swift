@@ -515,37 +515,48 @@ private struct TrapTubeStemStudioView: View {
                      blue: Double(value & 255) / 255, opacity: 1)
     }
 
-    // Round 22: the tab is the EQ tab now. The old two-page
-    // setup (a Stem Separation page beside a Player page, switched
-    // by header buttons over a paging TabView) is gone - the stem
-    // separation page was deleted from this interface entirely,
-    // and what remains is ONE scrolling page: the EQ settings
-    // section first, then the YouTube search/player feed, with
-    // the mini player bar pinned underneath. The Demucs model
-    // code above stays compiled in (the workflow still verifies
-    // it) but no view in this tab reaches it anymore.
+    // Round 22 made this the EQ tab - and stacked everything on
+    // one continuous page, which the user rejected. Round 23: the
+    // tab is STRUCTURED. Three designed zones: the PLAYER section
+    // at the top (the live session's card when a stream is
+    // minimized into the store - a designed player stage when
+    // nothing is loaded), the EQUALIZER summary card (the full
+    // settings live behind it as the player's connected EQ panel,
+    // presented as a sheet - the same route the player itself
+    // uses - never as a settings block stacked over the feed),
+    // and the YOUTUBE search & feed section with its own header.
+    // The mini player bar stays pinned at the root; the Demucs
+    // model code above stays compiled in but unreached.
+    @State private var showEQPanel = false
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 22) {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("TRAPTUBE EQ").font(.system(size: 12, weight: .black, design: .rounded))
                             .tracking(2.2).foregroundStyle(accent)
                         Text("Equalizer").font(.system(size: 28, weight: .black, design: .rounded))
                             .foregroundStyle(.white)
-                        Text("The EQ settings and the YouTube player on one page - every change applies live to the playing stream.")
+                        Text("One player, one EQ panel, and the whole of YouTube - structured in sections, not stacked.")
                             .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.horizontal, 16)
 
-                    TrapTubeEQSettingsSection()
+                    TrapTubeEQPlayerSection(onOpenEQ: { showEQPanel = true },
+                                            onReopen: { if let saved = miniStore.request { reopenRequest = saved } })
+                        .padding(.horizontal, 16)
+
+                    eqSummaryCard
                         .padding(.horizontal, 16)
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("PLAYER").font(.caption.weight(.black))
+                        Text("YOUTUBE").font(.caption.weight(.black))
                             .tracking(1.5).foregroundStyle(accent)
-                        Text("Search YouTube and play - the EQ above rides along, and a minimized stream keeps playing under this page.")
+                        Text("Search & Feed").font(.system(size: 20, weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("Search YouTube, browse the categories, sign in for your channel - tap a video and it opens in the player above, EQ riding along.")
                             .font(.caption).foregroundStyle(Color.white.opacity(0.45))
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -569,11 +580,88 @@ private struct TrapTubeStemStudioView: View {
         .fullScreenCover(item: $reopenRequest) { request in
             TrapTubeNativePlayerView(request: request)
         }
+        .sheet(isPresented: $showEQPanel) {
+            eqPanelSheet
+        }
         .onAppear {
             // Round 19: build the EQ manager (and its audio engine
             // graph) the moment the tab opens, not at first attach.
             TrapTubeEQManager.prewarm()
         }
+    }
+
+    /// The EQ section entry: active preset, on/off state and the
+    /// key effect states at a glance, with the one tap into the
+    /// full panel. The settings themselves are NOT rendered here -
+    /// this card is the door, not the room.
+    private var eqSummaryCard: some View {
+        let manager = TrapTubeEQManager.shared
+        let fx = TrapTubeFXSettings.shared
+        let presetName = UserDefaults.standard.string(forKey: "TrapTube.EQ.Preset") ?? "Custom"
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("EQUALIZER").font(.caption.weight(.black))
+                        .tracking(1.5).foregroundStyle(accent)
+                    Text(presetName).font(.system(size: 20, weight: .black, design: .rounded))
+                        .foregroundStyle(.white).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text(manager.isEQEnabled ? "EQ ON" : "EQ OFF")
+                    .font(.caption2.weight(.black)).tracking(1.0)
+                    .foregroundStyle(manager.isEQEnabled ? Color.black : Color.white.opacity(0.6))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(manager.isEQEnabled ? accent : Color.white.opacity(0.12), in: Capsule())
+            }
+            Text("Reverb \(fx.reverbPreset.displayName) · Limiter \(fx.limiterEnabled ? "on" : "off") · Width \(fx.widthPercent)% · Bass +\(Int(manager.bassBoostDB.rounded())) dB · Master \(Int(manager.masterVolumePercent.rounded()))%")
+                .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                .fixedSize(horizontal: false, vertical: true)
+            Button { showEQPanel = true } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "slider.horizontal.3")
+                    Text("Open EQ Panel").font(.subheadline.weight(.bold))
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption.weight(.bold))
+                }
+                .foregroundStyle(.black)
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .background(accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(16)
+        .ttGlassCard(cornerRadius: 18)
+    }
+
+    /// The full EQ settings as the player's connected panel: the
+    /// ONE reusable settings section, presented as a sheet with
+    /// the same chrome the in-player panel uses. Every change
+    /// applies live to the playing stream through the manager.
+    private var eqPanelSheet: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Equalizer").font(.headline.weight(.bold)).foregroundStyle(.white)
+                    Text("Every change applies live to the playing stream.")
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Button("Done") { showEQPanel = false }
+                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+            }
+            .padding(.horizontal, 18).padding(.top, 16).padding(.bottom, 10)
+            ScrollView(showsIndicators: false) {
+                TrapTubeEQSettingsSection()
+                    .padding(18)
+            }
+        }
+        .background {
+            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
+                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
+                           startPoint: .top, endPoint: .bottom)
+                .ignoresSafeArea()
+        }
+        .preferredColorScheme(.dark)
     }
 
     /// Round 20's mini player bar, rendered by the root since
@@ -614,6 +702,191 @@ private struct TrapTubeStemStudioView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(.ultraThinMaterial)
+    }
+}
+
+/// Round 23: the EQ tab's PLAYER section. When a session is
+/// minimized into the store, its live card leads the tab -
+/// thumbnail, title/channel, progress, transport and the EQ
+/// strip with the live path readout, plus the two ways onward
+/// (reopen the full player, open the EQ panel). When nothing is
+/// playing, the section is still unmistakably the player: a
+/// designed stage prompting a pick from the feed below, not
+/// leftover settings space.
+private struct TrapTubeEQPlayerSection: View {
+    @ObservedObject private var store = TrapTubeMiniPlayerStore.shared
+    let onOpenEQ: () -> Void
+    let onReopen: () -> Void
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("PLAYER").font(.caption.weight(.black))
+                        .tracking(1.5).foregroundStyle(accent)
+                    Text("Premium Player").font(.system(size: 20, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                if store.controller != nil {
+                    Text("LIVE").font(.caption2.weight(.black)).tracking(1.2)
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(accent, in: Capsule())
+                }
+            }
+            if let controller = store.controller {
+                TrapTubeEQPlayerLiveCard(controller: controller, onOpenEQ: onOpenEQ, onReopen: onReopen)
+            } else {
+                emptyStage
+            }
+        }
+    }
+
+    private var emptyStage: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "play.circle.fill")
+                .font(.system(size: 42, weight: .semibold))
+                .foregroundStyle(accent)
+            Text("Nothing playing yet")
+                .font(.headline.weight(.bold)).foregroundStyle(.white)
+            Text("Pick a video from the search & feed below - it plays here with the full EQ and effects riding along, in the background and on the lock screen too.")
+                .font(.caption).foregroundStyle(Color.white.opacity(0.55))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 6) {
+                ForEach(["Ghost engine", "26 presets", "Reverb · Limiter"], id: \.self) { label in
+                    Text(label).font(.caption2.weight(.bold))
+                        .foregroundStyle(Color.white.opacity(0.75))
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(Color.white.opacity(0.08), in: Capsule())
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 22).padding(.horizontal, 16)
+        .ttGlassCard(cornerRadius: 18)
+    }
+}
+
+/// The live session's card: the minimized controller rendered as
+/// a designed player zone. Transport drives the SAME controller
+/// the full player uses (nothing reloads, nothing restarts), and
+/// the EQ strip carries the live audio-path readout.
+private struct TrapTubeEQPlayerLiveCard: View {
+    @ObservedObject var controller: TrapTubePlayerController
+    let onOpenEQ: () -> Void
+    let onReopen: () -> Void
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255,
+                     blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    private var progress: Double {
+        guard controller.duration > 0 else { return 0 }
+        return min(1, max(0, controller.currentTime / controller.duration))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                thumbnail
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
+                        .font(.subheadline.weight(.bold)).foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text(controller.author)
+                        .font(.caption).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Image(systemName: "waveform").font(.caption2.weight(.bold))
+                        Text(controller.pathStatusText.isEmpty ? "EQ connected" : controller.pathStatusText)
+                            .font(.caption2.weight(.bold)).lineLimit(1)
+                    }
+                    .foregroundStyle(accent)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.12))
+                    Capsule().fill(accent)
+                        .frame(width: max(0, proxy.size.width * progress))
+                }
+            }
+            .frame(height: 4)
+            HStack(spacing: 10) {
+                Button { controller.togglePlayPause() } label: {
+                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 15, weight: .bold)).foregroundStyle(.black)
+                        .frame(width: 38, height: 38)
+                        .background(accent, in: Circle())
+                }
+                .buttonStyle(.plain)
+                Text("\(timeText(controller.currentTime)) / \(timeText(controller.duration))")
+                    .font(.caption.weight(.semibold)).foregroundStyle(Color.white.opacity(0.6))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button { onReopen() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.caption2.weight(.bold))
+                        Text("Open Player").font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(Color.white.opacity(0.10), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                Button { onOpenEQ() } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "slider.horizontal.3").font(.caption2.weight(.bold))
+                        Text("EQ").font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .ttGlassCard(cornerRadius: 18)
+    }
+
+    @ViewBuilder
+    private var thumbnail: some View {
+        if let videoID = controller.sessionRequest?.videoID,
+           let url = URL(string: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg") {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().aspectRatio(contentMode: .fill)
+                default:
+                    Color.white.opacity(0.06)
+                }
+            }
+            .frame(width: 104, height: 58)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+
+    private func timeText(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
