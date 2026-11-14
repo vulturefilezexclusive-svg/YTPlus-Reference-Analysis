@@ -8,7 +8,7 @@ import Demucs
 @objc(TrapTubeStemStudioFactory) public final class TrapTubeStemStudioFactory: NSObject {
     @objc public static func makeViewController() -> UIViewController {
         let controller = UIHostingController(rootView: TrapTubeStemStudioView())
-        controller.title = "Stem Studio"
+        controller.title = "EQ"
         return controller
     }
 }
@@ -503,9 +503,8 @@ extension View {
 
 @MainActor
 private struct TrapTubeStemStudioView: View {
-    @StateObject private var model = TrapTubeStemModel()
-    @State private var showImporter = false
-    @State private var selectedPage = 0
+    @ObservedObject private var miniStore = TrapTubeMiniPlayerStore.shared
+    @State private var reopenRequest: TrapTubePlayerRequest?
 
     private var accent: Color {
         let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
@@ -516,21 +515,49 @@ private struct TrapTubeStemStudioView: View {
                      blue: Double(value & 255) / 255, opacity: 1)
     }
 
+    // Round 22: the tab is the EQ tab now. The old two-page
+    // setup (a Stem Separation page beside a Player page, switched
+    // by header buttons over a paging TabView) is gone - the stem
+    // separation page was deleted from this interface entirely,
+    // and what remains is ONE scrolling page: the EQ settings
+    // section first, then the YouTube search/player feed, with
+    // the mini player bar pinned underneath. The Demucs model
+    // code above stays compiled in (the workflow still verifies
+    // it) but no view in this tab reaches it anymore.
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                pageButton("Stem Separation", page: 0, symbol: "waveform")
-                pageButton("Player", page: 1, symbol: "play.circle.fill")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(.ultraThinMaterial)
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("TRAPTUBE EQ").font(.system(size: 12, weight: .black, design: .rounded))
+                            .tracking(2.2).foregroundStyle(accent)
+                        Text("Equalizer").font(.system(size: 28, weight: .black, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("The EQ settings and the YouTube player on one page - every change applies live to the playing stream.")
+                            .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 16)
 
-            TabView(selection: $selectedPage) {
-                stemSeparationPage.tag(0)
-                playerPage.tag(1)
+                    TrapTubeEQSettingsSection()
+                        .padding(.horizontal, 16)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("PLAYER").font(.caption.weight(.black))
+                            .tracking(1.5).foregroundStyle(accent)
+                        Text("Search YouTube and play - the EQ above rides along, and a minimized stream keeps playing under this page.")
+                            .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.horizontal, 16)
+
+                    TrapTubePlayerHomeView()
+                }
+                .padding(.vertical, 18)
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
+            if let mini = miniStore.controller {
+                miniPlayerBar(mini)
+            }
         }
         .background {
             LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
@@ -539,209 +566,56 @@ private struct TrapTubeStemStudioView: View {
                 .ignoresSafeArea()
         }
         .preferredColorScheme(.dark)
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.audio], allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first { model.importFile(url) }
-            case .failure(let error):
-                model.error = error.localizedDescription
-            }
+        .fullScreenCover(item: $reopenRequest) { request in
+            TrapTubeNativePlayerView(request: request)
         }
         .onAppear {
-            model.refresh()
             // Round 19: build the EQ manager (and its audio engine
-            // graph) the moment Stem Studio opens, not at first attach.
+            // graph) the moment the tab opens, not at first attach.
             TrapTubeEQManager.prewarm()
         }
     }
 
-    private var playerPage: some View {
-        TrapTubePlayerHomeView()
-    }
-
-    private var stemSeparationPage: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 18) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("STEM STUDIO").font(.system(size: 12, weight: .black, design: .rounded))
-                        .tracking(2.2).foregroundStyle(accent)
-                    Text("Separate your sound").font(.system(size: 28, weight: .black, design: .rounded))
-                        .foregroundStyle(.white)
-                    Text("Split a local audio file into vocals, drums, bass, and other instruments.")
-                        .font(.subheadline).foregroundStyle(Color.white.opacity(0.64))
-                }
-
-                Button { showImporter = true } label: {
-                    Label(model.selectedFile?.lastPathComponent ?? "Import audio file",
-                          systemImage: "folder.badge.plus")
-                        .font(.headline.weight(.bold)).lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
-                        .ttGlassCard(cornerRadius: 18)
-                        .overlay(RoundedRectangle(cornerRadius: 18).stroke(accent.opacity(0.45), lineWidth: 1))
-                }
-                .tint(accent)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    HStack {
-                        Text("Separation model").font(.headline.weight(.bold))
-                        Spacer()
-                        Text("QUALITY TIER").font(.system(size: 9, weight: .black)).tracking(1.1)
-                            .foregroundStyle(Color.white.opacity(0.42))
-                    }
-                    ForEach(TrapTubeStemModelOption.allCases) { option in
-                        let selected = model.selectedModelOption == option
-                        Button { model.selectedModelOption = option } label: {
-                            HStack(alignment: .top, spacing: 12) {
-                                Image(systemName: selected ? "largecircle.fill.circle" : "circle")
-                                    .font(.title3).foregroundStyle(selected ? accent : Color.white.opacity(0.35))
-                                    .padding(.top, 2)
-                                VStack(alignment: .leading, spacing: 5) {
-                                    HStack(alignment: .firstTextBaseline) {
-                                        Text(option.displayName).font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                                        Spacer(minLength: 4)
-                                        Text("\(option.qualityTier)/5")
-                                            .font(.caption.weight(.black).monospacedDigit()).foregroundStyle(accent)
-                                    }
-                                    HStack(spacing: 3) {
-                                        ForEach(1...5, id: \.self) { index in
-                                            Image(systemName: index <= option.qualityTier ? "star.fill" : "star")
-                                                .font(.system(size: 9, weight: .bold))
-                                                .foregroundStyle(index <= option.qualityTier ? accent : Color.white.opacity(0.2))
-                                        }
-                                    }
-                                    Text(option.detail).font(.caption).foregroundStyle(Color.white.opacity(0.62))
-                                        .fixedSize(horizontal: false, vertical: true)
-                                    Text("\(DemucsEngine.info(for: option.model).sizeMB) MB · \(DemucsEngine.isDownloaded(option.model) ? "Downloaded" : "Not downloaded")")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(DemucsEngine.isDownloaded(option.model) ? Color.green : Color.white.opacity(0.42))
-                                }
-                            }
-                            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                            .background(selected ? accent.opacity(0.12) : Color.white.opacity(0.035),
-                                        in: RoundedRectangle(cornerRadius: 13))
-                            .overlay(RoundedRectangle(cornerRadius: 13)
-                                .stroke(selected ? accent.opacity(0.65) : Color.white.opacity(0.07), lineWidth: 1))
-                        }
-                        .buttonStyle(.plain).disabled(model.isProcessing || model.isDownloading)
-                    }
-                    Text("Ratings show relative model tiers based on model descriptions, not independent benchmark scores. The fine-tuned option is larger and slower; the 6-stem model adds guitar and piano rather than promising better separation.")
-                        .font(.system(size: 10)).foregroundStyle(Color.white.opacity(0.42))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Label(model.isModelReady ? "\(model.selectedModelInfo.label) ready" : "Selected model not downloaded",
-                          systemImage: model.isModelReady ? "checkmark.seal.fill" : "cpu")
-                        .font(.headline.weight(.bold)).foregroundStyle(model.isModelReady ? Color.green : accent)
-                    Text(model.isModelReady
-                         ? "This model is stored in app support and can be reused offline."
-                         : "Download the selected model once. It stays in persistent app storage for offline use.")
-                        .font(.caption).foregroundStyle(Color.white.opacity(0.65))
-                    if !model.isModelReady {
-                        Button { model.downloadModel() } label: {
-                            HStack {
-                                if model.isDownloading { ProgressView().tint(.white) }
-                                else { Image(systemName: "arrow.down.circle.fill") }
-                                Text(model.isDownloading ? model.status : "Download \(model.selectedModelInfo.label) · \(model.selectedModelInfo.sizeMB) MB")
-                            }
-                            .font(.subheadline.weight(.bold)).frame(maxWidth: .infinity).padding(.vertical, 13)
-                            .background(accent, in: Capsule())
-                        }
-                        .disabled(model.isDownloading)
-                        if model.isDownloading { ProgressView(value: model.downloadProgress).tint(accent) }
-                    }
-                }
-                .padding(16).ttGlassCard(cornerRadius: 18)
-
-                Button { model.separate() } label: {
-                    HStack {
-                        if model.isProcessing { ProgressView().tint(.white) }
-                        else { Image(systemName: "waveform.badge.mic") }
-                        Text(model.isProcessing || model.isDownloading ? model.status :
-                             (model.isModelReady ? "Separate into \(model.availableStemNames.count) stems" : "Download model & separate"))
-                    }
-                    .font(.headline.weight(.bold)).frame(maxWidth: .infinity).padding(.vertical, 15)
-                    .background(accent, in: Capsule())
-                }
-                .disabled(model.selectedFile == nil || model.isProcessing || model.isDownloading)
-                .opacity(model.selectedFile == nil || model.isProcessing || model.isDownloading ? 0.45 : 1)
-
-                if model.isProcessing {
-                    ProgressView(value: model.processingProgress).tint(accent)
-                    Text(model.status).font(.caption).foregroundStyle(Color.white.opacity(0.65))
-                }
-                if let error = model.error {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(Color.red).fixedSize(horizontal: false, vertical: true)
-                }
-
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("Separated stems").font(.headline.weight(.bold)).foregroundStyle(.white)
-                    ForEach(model.availableStemNames, id: \.self) { name in
-                        HStack(spacing: 12) {
-                            Image(systemName: icon(for: name)).foregroundStyle(accent).frame(width: 24)
-                            Text(name.capitalized).font(.subheadline.weight(.bold)).foregroundStyle(.white)
-                            Spacer()
-                            if let url = model.outputs[name] {
-                                ShareLink(item: url) {
-                                    Image(systemName: "square.and.arrow.up").foregroundStyle(.white.opacity(0.7))
-                                }
-                                Button {
-                                    if model.playingStem == name { model.stopPlayback() }
-                                    else { model.play(name) }
-                                } label: {
-                                    Image(systemName: model.playingStem == name ? "stop.circle.fill" : "play.circle.fill")
-                                        .font(.title2).foregroundStyle(accent)
-                                }
-                                .buttonStyle(.plain)
-                            } else {
-                                Text("Not generated").font(.caption).foregroundStyle(.white.opacity(0.4))
-                            }
-                        }
-                        .padding(.vertical, 5)
-                    }
-                }
-                .padding(16).ttGlassCard(cornerRadius: 18)
-
-                Text("Processing runs locally with Metal acceleration. The selected model's initial download requires internet; downloaded models can be reused offline. Files remain on this device.")
-                    .font(.caption).foregroundStyle(Color.white.opacity(0.45))
+    /// Round 20's mini player bar, rendered by the root since
+    /// Round 22 (the feed view lives inside the scrolling page
+    /// now, where a bar at its end would never be seen): play/
+    /// pause, the title and path readout, close, and
+    /// tap-to-reopen, which re-presents the player with the SAME
+    /// controller - nothing reloads, the position is untouched.
+    private func miniPlayerBar(_ controller: TrapTubePlayerController) -> some View {
+        HStack(spacing: 12) {
+            Button { controller.togglePlayPause() } label: {
+                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(accent, in: Circle())
             }
-            .padding(18)
+            .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                Text(controller.pathStatusText.isEmpty ? "Now playing" : controller.pathStatusText)
+                    .font(.caption2).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if let saved = miniStore.request { reopenRequest = saved }
+            }
+            Button { miniStore.close() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: 28, height: 28)
+            }
+            .buttonStyle(.plain)
         }
-    }
-
-    private func pageButton(_ title: String, page: Int, symbol: String) -> some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) { selectedPage = page }
-        } label: {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 12, weight: .bold))
-                .frame(maxWidth: .infinity).padding(.vertical, 11)
-                .foregroundStyle(selectedPage == page ? .white : Color.white.opacity(0.58))
-                .background {
-                    if selectedPage == page {
-                        Capsule().fill(accent)
-                    } else if #available(iOS 26.0, *) {
-                        Capsule().glassEffect(.regular, in: Capsule())
-                    } else {
-                        Capsule().fill(.ultraThinMaterial)
-                    }
-                }
-                .overlay(Capsule().stroke(Color.white.opacity(selectedPage == page ? 0.25 : 0.12), lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func icon(for stem: String) -> String {
-        switch stem {
-        case "vocals": return "mic.fill"
-        case "drums": return "drum.fill"
-        case "bass": return "guitars.fill"
-        default: return "waveform"
-        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
     }
 }
-
 
 struct TrapTubeEQSliderRow: View {
     let title: String
