@@ -1391,6 +1391,14 @@ final class TrapTubePlayerController: ObservableObject {
     @Published var isMuted = false
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
+    /// Round 32: the playing item's real display aspect (width /
+    /// height from its presentation size), so the player surface
+    /// sizes to the VIDEO instead of forcing everything into a
+    /// fixed 16:9 box - a 4:3 or portrait video letterboxed
+    /// inside 16:9 inside the card was the "letterbox-in-a-box"
+    /// the Round 32 brief calls out. Defaults to 16:9 until the
+    /// item reports its size.
+    @Published var videoAspect: Double = 16.0 / 9.0
     @Published var rate: Float = 1.0
 
     // Ghost Tier 1 - the audio engine for this player (see
@@ -1443,6 +1451,34 @@ final class TrapTubePlayerController: ObservableObject {
     private var ghostLivenessVideo: TimeInterval = -1
     private var ghostLivenessSince: Date = .distantPast
     private var ghostSilentStrikes = 0
+    /// Round 32: audibility bookkeeping. The rendered-position
+    /// guard proves the render clock runs; the output-peak
+    /// guard (the engine's mixer tap) proves nonzero samples
+    /// leave the chain. The last completed liveness window's
+    /// audio advance and the window-completed flag ride here
+    /// so the sync loop can pair the two proofs over the SAME
+    /// window.
+    private var ghostInaudibleStrikes = 0
+    private var ghostLivenessWindowElapsed = false
+    private var ghostLastWindowAudioAdvance: TimeInterval = 0
+
+    /// Round 32: start a fresh liveness window. The window
+    /// used to survive pauses untouched, so the first
+    /// post-resume verdict compared against the PRE-PAUSE
+    /// baseline - and a verdict landing before the resume
+    /// re-prime completed counted a false strike. Two false
+    /// strikes tear Ghost down to the tap, which is one way
+    /// audio "comes back" after pause -> replay WITHOUT the
+    /// EQ. Every resume edge and every resync now re-baselines
+    /// the window instead. The strike counters are
+    /// deliberately NOT reset here: a recovery that still
+    /// renders nothing must still be able to reach its
+    /// fallback strike.
+    private func rebaselineGhostLivenessWindow() {
+        ghostLivenessSince = .distantPast
+        ghostLivenessWindowElapsed = false
+        _ = ghost.takeOutputPeak()
+    }
     /// Round 28: true while the playing item is muted BY the
     /// Ghost takeover - as opposed to the user's own mute
     /// choice, which lives in isMuted. Before this round,
@@ -1512,6 +1548,11 @@ final class TrapTubePlayerController: ObservableObject {
         ghostLivenessAudio = audioTime
         ghostLivenessVideo = videoTime
         ghostLivenessSince = now
+        // Round 32: publish the completed window so the sync
+        // loop can pair it with the mixer output peak (the
+        // audibility guard) over the same span.
+        ghostLivenessWindowElapsed = true
+        ghostLastWindowAudioAdvance = audioAdvanced
         if audioAdvanced >= 0.05 {
             ghostSilentStrikes = 0
             return false
@@ -1711,6 +1752,11 @@ final class TrapTubePlayerController: ObservableObject {
                     // The load is proven alive; the heartbeat's job is done.
                     self.heartbeatTask?.cancel()
                     self.heartbeatTask = nil
+                }
+                if let size = self.player.currentItem?.presentationSize,
+                   size.width > 0, size.height > 0 {
+                    let aspect = Double(size.width / size.height)
+                    if abs(aspect - self.videoAspect) > 0.01 { self.videoAspect = aspect }
                 }
                 if let itemDuration = self.player.currentItem?.duration.seconds,
                    itemDuration.isFinite, itemDuration != self.duration {
@@ -2237,6 +2283,10 @@ final class TrapTubePlayerController: ObservableObject {
         } else {
             player.rate = rate
             ghost.setDesiredPlaying(true)
+            // Round 32: a user resume starts a fresh liveness
+            // window - the pre-pause baseline must not judge
+            // the resume (see rebaselineGhostLivenessWindow).
+            rebaselineGhostLivenessWindow()
             // Round 27 (the Build 223 pause/resume defect): a
             // user resume RE-ENGAGES the local-file Ghost feeds
             // at the video's exact current position. The pause
@@ -2430,7 +2480,16 @@ final class TrapTubePlayerController: ObservableObject {
                 return
             }
             self.ghostFeed = feed
-            self.ghost.setDesiredPlaying(self.player.timeControlStatus == .playing)
+            // Round 32: the SAME predicate the pre-ladder call
+            // above used (!= .paused). The == .playing form
+            // latched desiredPlaying OFF whenever the item was
+            // still buffering (.waitingToPlayAtSpecifiedRate)
+            // at the moment the ladder returned - and the sync
+            // loop's stall-exit resume (resumeRendering) no-ops
+            // on a false desired state, so Ghost could park
+            // silent under a playing video until a drift resync
+            // happened to re-prime it.
+            self.ghost.setDesiredPlaying(self.player.timeControlStatus != .paused)
             self.ghost.setMuted(self.isMuted)
             // Round 28: THE HANDOFF. The returned feed has
             // proven it renders - it rendered at zero mixer
@@ -2620,6 +2679,8 @@ final class TrapTubePlayerController: ObservableObject {
         lastHardResync = Date.distantPast
         ghostLivenessSince = .distantPast
         ghostSilentStrikes = 0
+        ghostInaudibleStrikes = 0
+        ghostLivenessWindowElapsed = false
         ghostAudioSeconds = nil
         var waitingOnVideo = false
         var pausedOnVideo = false
@@ -2696,7 +2757,20 @@ final class TrapTubePlayerController: ObservableObject {
                 }
                 if waitingOnVideo {
                     waitingOnVideo = false
-                    self.ghost.resumeRendering()
+                    // Round 32: resumeRendering() no-ops when the
+                    // engine's desired state is off - and that
+                    // state could have been latched off while the
+                    // item was still buffering (see startGhost).
+                    // A stall ending under a session that wants
+                    // playback re-asserts the desired state
+                    // instead of trusting it.
+                    if self.ghost.isDesiredPlaying {
+                        self.ghost.resumeRendering()
+                    } else {
+                        self.ghost.setDesiredPlaying(true)
+                        self.noteDiagnostic("ghost resume: desired-playing re-asserted as the video's stall ended")
+                    }
+                    self.rebaselineGhostLivenessWindow()
                     // Round 25: a stall ending is a fresh start
                     // for the reader feed - the re-engagement
                     // budget resets before this re-prime route
@@ -2756,6 +2830,56 @@ final class TrapTubePlayerController: ObservableObject {
                     }
                     continue
                 }
+                // Round 32: the AUDIBILITY proof. The liveness
+                // guard above proves the render clock advances;
+                // it cannot prove the samples are nonzero - a
+                // chain can render silence in perfect sync
+                // (Build 242's recording: drift ±30 ms, "audio
+                // at N s" advancing, and nothing heard). While
+                // the takeover mute is landed, pair each
+                // completed liveness window with the peak the
+                // mixer output actually reached: a rendered
+                // position advancing over a 0.000 peak is a
+                // live-but-inaudible feed, and the Round 28
+                // guarantee applies - restore the item's audio
+                // and recover, never sit silent on a muted
+                // item. Two consecutive silent windows trigger
+                // the recovery (a genuinely silent song intro
+                // gets its grace), four concede to the tap.
+                if self.ghostLivenessWindowElapsed {
+                    self.ghostLivenessWindowElapsed = false
+                    let peak = self.ghost.takeOutputPeak()
+                    if self.ghostTakeoverMuted,
+                       self.ghostLastWindowAudioAdvance >= 0.05 {
+                        if peak < 0.0005 {
+                            self.ghostInaudibleStrikes += 1
+                            if self.ghostInaudibleStrikes >= 4, let item = self.player.currentItem {
+                                self.beginTapFallback(item: item,
+                                                      reason: "ghost live-but-inaudible: the \(self.ghostFeedName(self.ghostFeed)) feed renders silence (mixer output peak \(String(format: "%.4f", peak)))")
+                            } else if self.ghostInaudibleStrikes == 2 {
+                                self.noteDiagnostic("ghost live-but-inaudible: mixer output peak \(String(format: "%.4f", peak)) across two windows while the rendered position advances - restoring the item's audio and re-engaging")
+                                self.restoreItemAudioAfterGhostTakeover()
+                                await self.hardResyncGhost()
+                            } else if self.ghostInaudibleStrikes == 3 {
+                                // The first re-engagement changed
+                                // nothing. One more, and the
+                                // counter keeps running through
+                                // it: the resync re-lands the
+                                // takeover mute only by proving
+                                // rendering again, so the next
+                                // silent window is judged muted -
+                                // and reaches the fallback strike
+                                // instead of parking forever with
+                                // the item covering for a feed
+                                // that renders silence.
+                                self.restoreItemAudioAfterGhostTakeover()
+                                await self.hardResyncGhost()
+                            }
+                            continue
+                        }
+                        self.ghostInaudibleStrikes = 0
+                    }
+                }
                 let magnitude = abs(drift)
                 if magnitude <= 0.025 {
                     self.ghost.setCorrection(1)
@@ -2785,6 +2909,12 @@ final class TrapTubePlayerController: ObservableObject {
     private func hardResyncGhost() async {
         lastHardResync = Date()
         ghost.setCorrection(1)
+        // Round 32: a resync re-bases the feed; the liveness
+        // window re-bases with it, so the recovery's own
+        // extraction gap is never judged against the
+        // pre-resync baseline. (Interruption-end and
+        // foreground resumes reach the window through here.)
+        rebaselineGhostLivenessWindow()
         let target = player.currentTime().seconds
         // Round 27: every hard resync names itself in the Diag
         // - the feed, the drift that provoked it, the position
@@ -2978,6 +3108,15 @@ struct TrapTubeNativePlayerView: View {
     @State private var scrubTime: Double = 0
     @State private var showEQ = false
     @State private var reattachNote: String?
+    /// Round 32: overlay transport visibility - shown on open
+    /// and on tap, faded out after a few seconds of playback,
+    /// pinned visible while paused (the native player's
+    /// behavior; see overlayTransport).
+    @State private var controlsVisible = true
+    @State private var controlsHideTask: Task<Void, Never>?
+    /// Round 32: the entrance - the player fades/scales in on
+    /// presentation instead of popping in as a static sheet.
+    @State private var playerEntered = false
     /// Round 21: the width the player column actually received,
     /// measured read-only (see the body's background measure) and
     /// printed in the status block as on-device proof of fit.
@@ -3045,6 +3184,8 @@ struct TrapTubeNativePlayerView: View {
             }
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .opacity(playerEntered ? 1 : 0)
+            .scaleEffect(playerEntered ? 1 : 0.98)
             .background {
                 GeometryReader { proxy in
                     Color.clear
@@ -3055,6 +3196,8 @@ struct TrapTubeNativePlayerView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear {
+            withAnimation(.easeOut(duration: 0.25)) { playerEntered = true }
+            scheduleControlsHide()
             streamStatus = TrapTubeEQManager.shared.attachmentStatus
             controller.sessionRequest = request
             // Round 20: an adopted (minimized) session already has
@@ -3064,6 +3207,16 @@ struct TrapTubeNativePlayerView: View {
             }
         }
         .onDisappear { controller.stop() }
+        .onChange(of: controller.isPlaying) { playing in
+            // Round 32: the overlay transport fades while
+            // playing and pins visible while paused.
+            if playing {
+                scheduleControlsHide()
+            } else {
+                controlsHideTask?.cancel()
+                withAnimation(.easeInOut(duration: 0.2)) { controlsVisible = true }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: Notification.Name("TrapTubeEQAttachmentStatusChanged"))) { note in
             if let status = note.userInfo?["status"] as? String { streamStatus = status }
@@ -3120,6 +3273,25 @@ struct TrapTubeNativePlayerView: View {
         dismiss()
     }
 
+    /// Round 32: tap on the video toggles the overlay transport.
+    private func toggleControls() {
+        withAnimation(.easeInOut(duration: 0.2)) { controlsVisible.toggle() }
+        scheduleControlsHide()
+    }
+
+    /// Round 32: fade the overlay transport out after a few
+    /// seconds of uninterrupted playback; a pause (the
+    /// isPlaying change handler) cancels the fade and pins it.
+    private func scheduleControlsHide() {
+        controlsHideTask?.cancel()
+        guard controlsVisible else { return }
+        controlsHideTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            guard !Task.isCancelled, controller.isPlaying else { return }
+            withAnimation(.easeInOut(duration: 0.25)) { controlsVisible = false }
+        }
+    }
+
     private var titleBlock: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
@@ -3138,11 +3310,13 @@ struct TrapTubeNativePlayerView: View {
     }
 
     /// Round 19 restyle: the video sits in a charcoal card like the
-    /// mockup - rounded video, then the in-card strip (speaker, the red
-    /// scrubber, fullscreen), then the time labels, all inside the
+    /// mockup - rounded video, then the time labels, all inside the
     /// card's padding. PiP keeps a glass button at the video's top
     /// right; the SponsorBlock pill moved to the top left so it never
-    /// collides with the scrub strip.
+    /// collides with the scrub strip. Round 32: the strip (speaker,
+    /// scrubber, fullscreen) moved INTO the video as the fading
+    /// overlay transport, and the video area sizes to the video's
+    /// own aspect instead of a fixed 16:9.
     private var videoCard: some View {
         VStack(spacing: 6) {
             ZStack {
@@ -3178,7 +3352,29 @@ struct TrapTubeNativePlayerView: View {
                     Spacer()
                 }
                 if controller.isLoading {
-                    ProgressView().tint(.white).scaleEffect(1.3)
+                    // Round 32: the loading state shows the
+                    // video's own thumbnail, not a dead black
+                    // screen with a centered spinner - the
+                    // picture is present from the first moment,
+                    // the spinner shrinks to a corner, and the
+                    // item's own audio starts the moment the
+                    // item exists (load() plays it before Ghost
+                    // ever engages).
+                    AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(request.videoID)/hqdefault.jpg")) { image in
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } placeholder: {
+                        Color.black
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
+                    VStack {
+                        Spacer()
+                        HStack {
+                            Spacer()
+                            ProgressView().tint(.white)
+                                .padding(10)
+                        }
+                    }
                 }
                 if let message = controller.errorMessage {
                     VStack(spacing: 10) {
@@ -3190,31 +3386,20 @@ struct TrapTubeNativePlayerView: View {
                             .padding(.horizontal, 24)
                     }
                 }
+                if controlsVisible, controller.errorMessage == nil, !controller.isLoading {
+                    overlayTransport
+                }
             }
-            .aspectRatio(16 / 9, contentMode: .fit)
+            // Round 32: the surface sizes to the VIDEO's aspect
+            // (the controller publishes it from the item's
+            // presentation size), not a fixed 16:9 for every
+            // video.
+            .aspectRatio(CGFloat(controller.videoAspect), contentMode: .fit)
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 14))
+            .contentShape(Rectangle())
+            .onTapGesture { toggleControls() }
             .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
-
-            HStack(spacing: 12) {
-                Button { controller.toggleMute() } label: {
-                    Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                scrubber
-                Button { controller.presentFullscreen() } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 4)
-            .padding(.top, 2)
 
             HStack {
                 Text(timeLabel(scrubbing ? scrubTime : controller.currentTime))
@@ -3231,9 +3416,71 @@ struct TrapTubeNativePlayerView: View {
             .stroke(Color.white.opacity(0.06), lineWidth: 1))
     }
 
-    /// The mockup's thin in-card scrubber: gray track, red played
+    /// Round 32: the transport OVERLAYS the video in the native
+    /// arrangement - the accent play/pause flanked by the
+    /// 15-second skips in the center, mute + scrubber +
+    /// fullscreen along the bottom - over a light scrim, and it
+    /// fades with playback (see toggleControls /
+    /// scheduleControlsHide). It replaces the fixed strip that
+    /// used to sit under the video card; the speed / EQ /
+    /// settings utilities stay in the row below (transportRow).
+    private var overlayTransport: some View {
+        ZStack {
+            HStack(spacing: 34) {
+                overlaySkipButton(symbol: "gobackward.15") { controller.skip(by: -15) }
+                Button { controller.togglePlayPause() } label: {
+                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 64, height: 64)
+                        .background(accent, in: Circle())
+                        .shadow(color: accent.opacity(0.35), radius: 12, y: 4)
+                }
+                .buttonStyle(.plain)
+                overlaySkipButton(symbol: "goforward.15") { controller.skip(by: 15) }
+            }
+            VStack {
+                Spacer()
+                HStack(spacing: 12) {
+                    Button { controller.toggleMute() } label: {
+                        Image(systemName: controller.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                    scrubber
+                    Button { controller.presentFullscreen() } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 8)
+            }
+        }
+        .background(Color.black.opacity(0.25))
+        .transition(.opacity)
+    }
+
+    private func overlaySkipButton(symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 23, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 48, height: 48)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// The mockup's thin scrubber: gray track, red played
     /// portion, red knob. It really seeks - drag (or tap) updates the
-    /// scrub position, release commits the seek.
+    /// scrub position, release commits the seek. Round 32: it
+    /// lives in the overlay transport's bottom row.
     private var scrubber: some View {
         GeometryReader { geometry in
             let width = max(geometry.size.width, 1)
@@ -3331,15 +3578,17 @@ struct TrapTubeNativePlayerView: View {
         15, 11, 19, 6, 12, 17, 9, 14
     ]
 
-    /// The mockup's transport row: speed, -15s, the big red play/pause
-    /// button, +15s, EQ, and SETTINGS. Round 20: every cell is
-    /// flexible (maxWidth .infinity) and there are no spacers, so the
-    /// row's total width IS the column width by construction - the
-    /// Round 19 row's fixed frames plus spacer minimums summed wider
-    /// than the column and widened the whole player (see the body
-    /// pinning note). SETTINGS is a menu of real
-    /// player actions (fullscreen, PiP, the EQ enable switch, reset to
-    /// flat) rather than a dead gear.
+    /// The utility row under the card: speed, EQ, and SETTINGS.
+    /// Round 20: every cell is flexible (maxWidth .infinity) and
+    /// there are no spacers, so the row's total width IS the
+    /// column width by construction - the Round 19 row's fixed
+    /// frames plus spacer minimums summed wider than the column
+    /// and widened the whole player (see the body pinning note).
+    /// SETTINGS is a menu of real player actions (fullscreen,
+    /// PiP, the EQ enable switch, reset to flat) rather than a
+    /// dead gear. Round 32: the play/pause and ±15s buttons that
+    /// used to live here moved into the video's overlay
+    /// transport - one transport, in the native place.
     private var transportRow: some View {
         HStack(alignment: .center, spacing: 0) {
             Menu {
@@ -3352,26 +3601,6 @@ struct TrapTubeNativePlayerView: View {
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
-            }
-            transportButton(symbol: "gobackward.15", caption: "15 SEC") {
-                controller.skip(by: -15)
-            }
-            Button { controller.togglePlayPause() } label: {
-                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(.white)
-                    // Round 21: 56pt, not 70 - at a 393pt screen the
-                    // column is 353pt and each of the six transport
-                    // cells is ~59pt, so the Round 19/20 70pt button
-                    // was the one fixed child wider than its own cell.
-                    .frame(width: 56, height: 56)
-                    .background(accent, in: Circle())
-                    .shadow(color: accent.opacity(0.35), radius: 12, y: 4)
-            }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity)
-            transportButton(symbol: "goforward.15", caption: "15 SEC") {
-                controller.skip(by: 15)
             }
             transportButton(symbol: "slider.horizontal.3", caption: "EQ") {
                 showEQ = true
