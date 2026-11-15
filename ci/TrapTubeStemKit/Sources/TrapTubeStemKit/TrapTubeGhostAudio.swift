@@ -1095,9 +1095,9 @@ final class TrapTubeGhostAudio {
         // and only then does the takeover mute land again.
         teardownFeed(deleteTemp: true)
         let silence = beginSilence()
+        defer { endSilence(silence) }
         var ok = await primeFileRoute(source: source, position: position)
         if ok { ok = await confirmOrFail(route: "file") }
-        endSilence(silence)
         if !ok { finishFailure() }
         return ok
     }
@@ -2123,6 +2123,7 @@ final class TrapTubeGhostAudio {
         // stale one from the original start.
         failureTrail = []
         let silence = beginSilence()
+        defer { endSilence(silence) }
         var ok: Bool
         switch feed {
         case .sameAsset, .streamed:
@@ -2200,7 +2201,6 @@ final class TrapTubeGhostAudio {
             }
             ok = await confirmOrFail(route: route)
         }
-        endSilence(silence)
         if !ok { finishFailure() }
         return ok
     }
