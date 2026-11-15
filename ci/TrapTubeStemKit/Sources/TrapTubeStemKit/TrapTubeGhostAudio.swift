@@ -173,6 +173,89 @@ final class TrapTubeGhostDownloader: NSObject, URLSessionDownloadDelegate {
     }
 }
 
+/// Round 32: a lock-protected peak-level accumulator fed by a
+/// tap on the Ghost engine's main mixer output. The render
+/// thread records; the main actor reads-and-resets per
+/// measurement window. It exists because the Round 27/28
+/// liveness proof (the rendered position advances) shows the
+/// render clock runs - it says nothing about whether the
+/// samples leaving the chain are nonzero. Build 242's device
+/// recording had drift in the ±30 ms band and "audio at N s"
+/// advancing while the user heard nothing: a chain rendering
+/// silence in perfect sync passes every existing check. This
+/// meter is the missing half of the proof.
+final class TrapTubeOutputPeakMeter {
+    private let lock = NSLock()
+    private var peak: Float = 0
+
+    func record(_ buffer: AVAudioPCMBuffer) {
+        let frames = Int(buffer.frameLength)
+        guard frames > 0 else { return }
+        var local: Float = 0
+        if buffer.format.commonFormat == .pcmFormatFloat32,
+           let channelData = buffer.floatChannelData {
+            let channels = Int(buffer.format.channelCount)
+            if buffer.format.isInterleaved {
+                let data = channelData[0]
+                let total = frames * channels
+                for index in 0..<total {
+                    let value = abs(data[index])
+                    if value > local { local = value }
+                }
+            } else {
+                for channel in 0..<channels {
+                    let data = channelData[channel]
+                    for index in 0..<frames {
+                        let value = abs(data[index])
+                        if value > local { local = value }
+                    }
+                }
+            }
+        } else if buffer.format.commonFormat == .pcmFormatInt16,
+                  let channelData = buffer.int16ChannelData {
+            let channels = Int(buffer.format.channelCount)
+            if buffer.format.isInterleaved {
+                let data = channelData[0]
+                let total = frames * channels
+                for index in 0..<total {
+                    let value = abs(Float(data[index]) / 32_768)
+                    if value > local { local = value }
+                }
+            } else {
+                for channel in 0..<channels {
+                    let data = channelData[channel]
+                    for index in 0..<frames {
+                        let value = abs(Float(data[index]) / 32_768)
+                        if value > local { local = value }
+                    }
+                }
+            }
+        }
+        guard local > 0 else { return }
+        lock.lock()
+        if local > peak { peak = local }
+        lock.unlock()
+    }
+
+    /// The peak since the last take, without resetting - the
+    /// diagnostics snapshot's read.
+    var currentPeak: Float {
+        lock.lock()
+        defer { lock.unlock() }
+        return peak
+    }
+
+    /// Returns the peak since the last take and resets the
+    /// accumulator: one measurement window per call.
+    func take() -> Float {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = peak
+        peak = 0
+        return value
+    }
+}
+
 // MARK: - Ghost sound effects (Round 22: the Poweramp port)
 //
 // A persisted settings store for the effects that live in the
@@ -247,10 +330,24 @@ final class TrapTubeFXSettings {
     /// nil until the first Ghost engine exists in this process:
     /// no engine, no limiter, and the card says that instead of
     /// implying one is running.
-    private(set) var ghostLimiterAvailability: Bool?
+    /// Round 32 (A2): the storage now sits behind a lock - the
+    /// value is written at engine creation and read by SwiftUI
+    /// views, and until this round that was plain unsynchronized
+    /// shared state. Same call sites, same semantics; the fix
+    /// stays a drive-by, not an actor refactor.
+    private let limiterAvailabilityLock = NSLock()
+    private var limiterAvailabilityStorage: Bool?
+
+    var ghostLimiterAvailability: Bool? {
+        limiterAvailabilityLock.lock()
+        defer { limiterAvailabilityLock.unlock() }
+        return limiterAvailabilityStorage
+    }
 
     func noteGhostLimiterAvailability(_ available: Bool) {
-        ghostLimiterAvailability = available
+        limiterAvailabilityLock.lock()
+        limiterAvailabilityStorage = available
+        limiterAvailabilityLock.unlock()
     }
 
     private init() {
@@ -422,6 +519,39 @@ final class TrapTubeGhostAudio {
     private var userMuted = false
     private var handoffSilenced = false
 
+    /// Round 32 (A1): the generation stamp that owns the
+    /// current handoff silence. handoffSilenced is set by
+    /// three entry points (start, switchToFile, resync) and
+    /// cleared from several exits, and the controller cancels
+    /// the previous Ghost task before a new start - but task
+    /// cancellation is cooperative, so a cancelled start
+    /// suspended mid-prime can still run its clear and lift
+    /// the silence during the NEXT start's prime. Each entry
+    /// point bumps this counter and captures its value; a
+    /// clear only lands when its captured value is still
+    /// current - the feedGeneration discipline, applied to
+    /// the silence flag.
+    private var silenceGeneration = 0
+
+    /// Begin a handoff silence owned by a fresh generation;
+    /// returns the generation the caller must present to
+    /// endSilence(_:) for its clear to land.
+    private func beginSilence() -> Int {
+        silenceGeneration += 1
+        handoffSilenced = true
+        return silenceGeneration
+    }
+
+    /// End a handoff silence, but only for the generation
+    /// that currently owns it: a stale attempt's clear is
+    /// dropped, so the live attempt's prime stays silenced
+    /// until IT decides otherwise.
+    private func endSilence(_ generation: Int) {
+        guard generation == silenceGeneration else { return }
+        handoffSilenced = false
+        refreshMixerLevel()
+    }
+
     private func refreshMixerLevel() {
         engine.mainMixerNode.outputVolume = (userMuted || handoffSilenced) ? 0 : outputLevelValue
     }
@@ -523,6 +653,7 @@ final class TrapTubeGhostAudio {
         let mixerText = String(format: "%.2f", engine.mainMixerNode.outputVolume)
         let aheadText = String(format: "%.1f", scheduledAhead())
         var line = "engine \(engineText) · node \(nodeText) · mixer \(mixerText)"
+        line += String(format: " · output peak %.3f", outputPeakMeter.currentPeak)
         line += " · handoff-silence \(handoffSilenced ? "ON" : "off")"
         line += " · user-mute \(userMuted ? "ON" : "off")"
         line += " · wants \(desiredPlaying ? "play" : "pause")"
@@ -616,6 +747,36 @@ final class TrapTubeGhostAudio {
             deepest = next
         }
         return "\(deepest.domain) \(deepest.code)"
+    }
+
+    // MARK: Round 32: output audibility proof
+    //
+    // A tap on the main mixer's output bus feeds the peak
+    // meter: the samples that actually LEAVE the chain, after
+    // every unit and after the mixer level itself (so a stuck
+    // handoff silence reads as the 0.000 it sounds like). The
+    // controller pairs each liveness window with one take of
+    // this meter (see takeOutputPeak in the sync loop's
+    // audibility guard).
+    private let outputPeakMeter = TrapTubeOutputPeakMeter()
+    private var outputMeterTapInstalled = false
+
+    /// The peak amplitude at the mixer output since the last
+    /// take; taking resets the window.
+    func takeOutputPeak() -> Float { outputPeakMeter.take() }
+
+    /// Installs the level tap once per graph build.
+    /// engine.reset() (in wireChain) removes node taps, so
+    /// wireChain clears the flag and connectGraph re-installs
+    /// after every rebuild; primes that reuse the graph keep
+    /// the tap they already have.
+    private func ensureOutputMeterTap() {
+        guard !outputMeterTapInstalled else { return }
+        outputMeterTapInstalled = true
+        let meter = outputPeakMeter
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 2048, format: nil) { buffer, _ in
+            meter.record(buffer)
+        }
     }
 
     private var reader: AVAssetReader?
@@ -802,11 +963,15 @@ final class TrapTubeGhostAudio {
     /// format it cannot route.
     @discardableResult
     private func connectGraph(format: AVAudioFormat) -> Bool {
-        if connected, graphFormat == format { return true }
+        if connected, graphFormat == format {
+            ensureOutputMeterTap()
+            return true
+        }
         guard format.sampleRate > 0, format.channelCount > 0 else { return false }
         graphFormat = format
         connected = true
         wireChain(format: format)
+        ensureOutputMeterTap()
         return true
     }
 
@@ -821,6 +986,9 @@ final class TrapTubeGhostAudio {
     /// time this runs - there is no late arrival to insert.
     private func wireChain(format: AVAudioFormat) {
         engine.reset()
+        // Round 32: the reset also removes the output level
+        // tap; connectGraph re-installs it after the rebuild.
+        outputMeterTapInstalled = false
         loadedReverbPreset = .off
         engine.connect(node, to: varispeed, format: format)
         engine.connect(varispeed, to: eqUnit, format: format)
@@ -881,11 +1049,8 @@ final class TrapTubeGhostAudio {
         lastFailureReason = nil
         lastFailureShort = nil
         teardownFeed(deleteTemp: true)
-        handoffSilenced = true
-        defer {
-            handoffSilenced = false
-            refreshMixerLevel()
-        }
+        let silence = beginSilence()
+        defer { endSilence(silence) }
         if await primeExport(position: position),
            await confirmOrFail(route: "export") {
             lastEngagedStage = 1
@@ -929,11 +1094,10 @@ final class TrapTubeGhostAudio {
         // feed renders silenced until it has proven itself,
         // and only then does the takeover mute land again.
         teardownFeed(deleteTemp: true)
-        handoffSilenced = true
+        let silence = beginSilence()
         var ok = await primeFileRoute(source: source, position: position)
         if ok { ok = await confirmOrFail(route: "file") }
-        handoffSilenced = false
-        refreshMixerLevel()
+        endSilence(silence)
         if !ok { finishFailure() }
         return ok
     }
@@ -1958,7 +2122,7 @@ final class TrapTubeGhostAudio {
         // fall back) reads the reason for THIS attempt, not a
         // stale one from the original start.
         failureTrail = []
-        handoffSilenced = true
+        let silence = beginSilence()
         var ok: Bool
         switch feed {
         case .sameAsset, .streamed:
@@ -2036,8 +2200,7 @@ final class TrapTubeGhostAudio {
             }
             ok = await confirmOrFail(route: route)
         }
-        handoffSilenced = false
-        refreshMixerLevel()
+        endSilence(silence)
         if !ok { finishFailure() }
         return ok
     }
@@ -2073,6 +2236,9 @@ final class TrapTubeGhostAudio {
         desiredPlaying = false
         // Round 28: the ladder state belongs to one item's
         // session; a new load starts its staging from scratch.
+        // Round 32 (A1): the generation bump retires any
+        // in-flight attempt's pending clear along with it.
+        silenceGeneration += 1
         handoffSilenced = false
         lastEngagedStage = nil
         currentVideoID = nil
