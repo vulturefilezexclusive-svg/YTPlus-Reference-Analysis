@@ -785,6 +785,7 @@ final class TrapTubeGhostAudio {
     private var scheduledFrames: AVAudioFramePosition = 0
     private var primeOffset: TimeInterval = 0
     private var lastBufferAt = Date.distantPast
+    private var lastSilentBufferLog = Date.distantPast
     private var stallReported = false
     var onStreamStalled: (() -> Void)?
 
@@ -1913,10 +1914,53 @@ final class TrapTubeGhostAudio {
         guard let pcm = canonicalBuffer(from: raw),
               pcm.format == graphFormat else { return false }
         processEffects(pcm)
+        // Round 33 (Commit C): upstream audibility diagnostic. The
+        // mixer output peak reads 0.000 while the rendered position
+        // advances, and the meter alone cannot tell silent source
+        // buffers from a dead tap or a zeroed downstream stage. Log
+        // the peak of each buffer AT the schedule point — after
+        // effects, before the mixer — but only when it is silent
+        // and throttled to once per 5 s, so a healthy feed stays
+        // quiet in the log. Silent-buffer logs + mixer 0 = the
+        // export extraction is producing silence; no logs + mixer
+        // 0 = the silence appears downstream of the schedule point.
+        // The throttle is checked first so the O(N) peak scan runs
+        // at most once per 5 s.
+        if Date().timeIntervalSince(lastSilentBufferLog) >= 5, silentBufferPeak(pcm) < 0.0005 {
+            lastSilentBufferLog = Date()
+            NSLog("[TrapTube Ghost] scheduleProcessed: SILENT buffer (frames=%d)", Int(pcm.frameLength))
+        }
         node.scheduleBuffer(pcm, completionHandler: nil)
         scheduledFrames += AVAudioFramePosition(pcm.frameLength)
         lastBufferAt = Date()
         return true
+    }
+
+    /// Peak absolute sample of a canonical-format (float32) buffer.
+    /// Round 33 diagnostic helper for scheduleProcessed: O(N) over
+    /// the scheduled samples, negligible for 100–500 ms chunks, and
+    /// the caller throttles it to at most once per 5 s.
+    private func silentBufferPeak(_ buffer: AVAudioPCMBuffer) -> Float {
+        guard buffer.format.commonFormat == .pcmFormatFloat32,
+              let channelData = buffer.floatChannelData else { return 0 }
+        let frames = Int(buffer.frameLength)
+        let channels = Int(buffer.format.channelCount)
+        guard frames > 0, channels > 0 else { return 0 }
+        var peak: Float = 0
+        if buffer.format.isInterleaved {
+            let data = channelData[0]
+            for i in 0..<(frames * channels) {
+                peak = max(peak, abs(data[i]))
+            }
+        } else {
+            for c in 0..<channels {
+                let data = channelData[c]
+                for f in 0..<frames {
+                    peak = max(peak, abs(data[f]))
+                }
+            }
+        }
+        return peak
     }
 
     /// Round 22 buffer effects: virtual surround (mid/side
