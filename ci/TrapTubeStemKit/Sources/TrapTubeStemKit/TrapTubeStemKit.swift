@@ -568,7 +568,9 @@ private struct TrapTubeStemStudioView: View {
                 .padding(.vertical, 18)
             }
             if let mini = miniStore.controller {
-                miniPlayerBar(mini)
+                TrapTubeMiniPlayerBar(controller: mini, onReopen: {
+                    if let saved = miniStore.request { reopenRequest = saved }
+                }, onClose: { miniStore.close() })
             }
         }
         .background {
@@ -665,43 +667,79 @@ private struct TrapTubeStemStudioView: View {
         .preferredColorScheme(.dark)
     }
 
-    /// Round 20's mini player bar, rendered by the root since
-    /// Round 22 (the feed view lives inside the scrolling page
-    /// now, where a bar at its end would never be seen): play/
-    /// pause, the title and path readout, close, and
-    /// tap-to-reopen, which re-presents the player with the SAME
-    /// controller - nothing reloads, the position is untouched.
-    private func miniPlayerBar(_ controller: TrapTubePlayerController) -> some View {
-        HStack(spacing: 12) {
-            Button { controller.togglePlayPause() } label: {
-                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 36, height: 36)
-                    .background(accent, in: Circle())
+}
+
+/// Round 20's mini player bar, rendered by the root since
+/// Round 22 (the feed view lives inside the scrolling page
+/// now, where a bar at its end would never be seen): play/
+/// pause, the title and path readout, close, and
+/// tap-to-reopen, which re-presents the player with the SAME
+/// controller - nothing reloads, the position is untouched.
+/// Round 32: the bar is its own OBSERVING view. It used to be
+/// a plain function on the tab root, which observes only the
+/// store - so it re-rendered when a session was held or
+/// closed, but its play/pause icon and status line could sit
+/// stale while the session played on. Observing the
+/// controller (exactly like the live card below) keeps the
+/// icon and readout live, and the bar gains the progress
+/// line the live card already had.
+private struct TrapTubeMiniPlayerBar: View {
+    @ObservedObject var controller: TrapTubePlayerController
+    let onReopen: () -> Void
+    let onClose: () -> Void
+
+    private var accent: Color {
+        let hex = UserDefaults.standard.string(forKey: "TrapTube.AccentHex") ?? "D1091F"
+        let clean = hex.replacingOccurrences(of: "#", with: "")
+        let value = UInt64(clean, radix: 16) ?? 0xD1091F
+        return Color(.sRGB, red: Double((value >> 16) & 255) / 255,
+                     green: Double((value >> 8) & 255) / 255, blue: Double(value & 255) / 255, opacity: 1)
+    }
+
+    private var progress: Double {
+        guard controller.duration > 0 else { return 0 }
+        return min(1, max(0, controller.currentTime / controller.duration))
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button { controller.togglePlayPause() } label: {
+                    Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 36, height: 36)
+                        .background(accent, in: Circle())
+                }
+                .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
+                    Text(controller.pathStatusText.isEmpty ? "Now playing" : controller.pathStatusText)
+                        .font(.caption2).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .onTapGesture { onReopen() }
+                Button { onClose() } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .frame(width: 28, height: 28)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(controller.title.isEmpty ? "TrapTube Player" : controller.title)
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(.white).lineLimit(1)
-                Text(controller.pathStatusText.isEmpty ? "Now playing" : controller.pathStatusText)
-                    .font(.caption2).foregroundStyle(Color.white.opacity(0.55)).lineLimit(1)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.12))
+                    Capsule().fill(accent)
+                        .frame(width: max(0, proxy.size.width * progress))
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                if let saved = miniStore.request { reopenRequest = saved }
-            }
-            Button { miniStore.close() } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .frame(width: 28, height: 28)
-            }
-            .buttonStyle(.plain)
+            .frame(height: 2)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
         .background(.ultraThinMaterial)
     }
 }
