@@ -2849,7 +2849,21 @@ final class TrapTubePlayerController: ObservableObject {
                 if self.ghostLivenessWindowElapsed {
                     self.ghostLivenessWindowElapsed = false
                     let peak = self.ghost.takeOutputPeak()
-                    if self.ghostTakeoverMuted,
+                    // Round 33 (Commit A): intentional silence is
+                    // not a dead feed. When the user muted or the
+                    // master gain is 0%, the mixer output reads 0
+                    // by design — counting it as an inaudible
+                    // strike resyncs a healthy feed and eventually
+                    // concedes to the tap for no reason. Skip
+                    // strike counting (and clear any stale strikes)
+                    // while the silence is intentional; counting
+                    // resumes fresh on unmute. The liveness guard
+                    // is untouched: a muted feed still advances
+                    // its render clock.
+                    let isIntentionallySilent = self.isMuted || TrapTubeEQManager.shared.masterGainPercent <= 0
+                    if isIntentionallySilent {
+                        self.ghostInaudibleStrikes = 0
+                    } else if self.ghostTakeoverMuted,
                        self.ghostLastWindowAudioAdvance >= 0.05 {
                         if peak < 0.0005 {
                             self.ghostInaudibleStrikes += 1
