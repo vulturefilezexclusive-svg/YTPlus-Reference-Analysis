@@ -2861,7 +2861,20 @@ final class TrapTubePlayerController: ObservableObject {
                     // is untouched: a muted feed still advances
                     // its render clock.
                     let isIntentionallySilent = self.isMuted || TrapTubeEQManager.shared.masterGainPercent <= 0
-                    if isIntentionallySilent {
+                    if ghost.resyncInFlight > 0 {
+                        // Round 34 (Commit D): a re-prime is running —
+                        // a detached resync or file switch holds the
+                        // handoff silence while it re-primes, and a tick
+                        // that samples the peak mid-re-prime reads 0 and
+                        // counts a strike against a healthy feed. Skip
+                        // this window's counting. The strikes are
+                        // deliberately left untouched: the ladder's
+                        // escalation depends on them surviving resyncs
+                        // (2 → resync, 3 → resync, 4 → tap fallback),
+                        // so a reset here would let a genuinely silent
+                        // feed resync forever and never reach the
+                        // fallback.
+                    } else if isIntentionallySilent {
                         self.ghostInaudibleStrikes = 0
                     } else if self.ghostTakeoverMuted,
                        self.ghostLastWindowAudioAdvance >= 0.05 {

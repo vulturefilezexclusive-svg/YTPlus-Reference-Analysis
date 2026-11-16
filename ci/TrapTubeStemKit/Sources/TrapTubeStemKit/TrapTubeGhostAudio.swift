@@ -786,6 +786,15 @@ final class TrapTubeGhostAudio {
     private var primeOffset: TimeInterval = 0
     private var lastBufferAt = Date.distantPast
     private var lastSilentBufferLog = Date.distantPast
+    /// Round 34: re-primes in flight. A counter, not a Bool —
+    /// resyncs and file switches can overlap, and a Bool cleared
+    /// by the first finisher would unguard the second while it
+    /// still holds the handoff silence. The controller's
+    /// audibility guard reads this and skips strike counting
+    /// while any re-prime runs. Internal (not private) so the
+    /// controller can read it; both classes are @MainActor, so
+    /// no lock is needed.
+    var resyncInFlight = 0
     private var stallReported = false
     var onStreamStalled: (() -> Void)?
 
@@ -1086,6 +1095,8 @@ final class TrapTubeGhostAudio {
             finishFailure()
             return false
         }
+        resyncInFlight += 1
+        defer { resyncInFlight -= 1 }
         // The trail is NOT reset here: the stall that escalated
         // to this call belongs to the same failure chain, and if
         // the file feed also fails the Diag should show both.
@@ -2161,6 +2172,8 @@ final class TrapTubeGhostAudio {
     /// for its duration.
     func resync(to position: TimeInterval) async -> Bool {
         guard feed != .none else { return false }
+        resyncInFlight += 1
+        defer { resyncInFlight -= 1 }
         // A resync owns a fresh failure trail: its primes record
         // anew, and the caller (hard resync, then escalate or
         // fall back) reads the reason for THIS attempt, not a
