@@ -3391,6 +3391,36 @@ struct TrapTubeNativePlayerView: View {
     private var videoCard: some View {
         VStack(spacing: 6) {
             ZStack {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .overlay {
+                        HStack(spacing: 0) {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture(count: 2) {
+                                    guard !controlsVisible else { return }
+                                    controller.seek(to: max(0, controller.currentTime - 10))
+                                }
+                                .onTapGesture { toggleControls() }
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture(count: 2) {
+                                    guard !controlsVisible else { return }
+                                    controller.seek(to: min(controller.duration, controller.currentTime + 10))
+                                }
+                                .onTapGesture { toggleControls() }
+                        }
+                    }
+                    .simultaneousGesture(
+                        DragGesture(minimumDistance: 50)
+                            .onEnded { value in
+                                guard !controlsVisible else { return }
+                                let translation = value.translation
+                                if translation.height > 100 && abs(translation.height) > abs(translation.width) {
+                                    minimize()
+                                }
+                            }
+                    )
                 TrapTubePlayerLayerView(player: controller.player,
                                         onLayerAvailable: { controller.registerPlayerLayer($0) })
                 VStack {
@@ -3466,35 +3496,6 @@ struct TrapTubeNativePlayerView: View {
             .aspectRatio(CGFloat(controller.videoAspect), contentMode: .fit)
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 14))
-            .contentShape(Rectangle())
-            .overlay {
-                HStack(spacing: 0) {
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            guard !controlsVisible else { return }
-                            controller.seek(to: max(0, controller.currentTime - 10))
-                        }
-                        .onTapGesture { toggleControls() }
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) {
-                            guard !controlsVisible else { return }
-                            controller.seek(to: min(controller.duration, controller.currentTime + 10))
-                        }
-                        .onTapGesture { toggleControls() }
-                }
-            }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 50)
-                    .onEnded { value in
-                        guard !controlsVisible else { return }
-                        let translation = value.translation
-                        if translation.height > 100 && abs(translation.height) > abs(translation.width) {
-                            minimize()
-                        }
-                    }
-            )
             .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
 
             HStack {
