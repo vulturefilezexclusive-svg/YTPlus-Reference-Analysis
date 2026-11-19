@@ -7,6 +7,49 @@ import WebKit
 import CryptoKit
 import MediaPlayer
 
+struct CachedThumbnailView: View {
+    let url: URL?
+    var width: CGFloat? = nil
+    var height: CGFloat? = nil
+    @State private var image: UIImage?
+    @State private var isLoading = false
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: width, height: height)
+                    .clipped()
+            } else if isLoading {
+                ProgressView()
+                    .frame(width: width, height: height)
+            } else {
+                Color.gray.opacity(0.3)
+                    .frame(width: width, height: height)
+            }
+        }
+        .task {
+            await loadImage()
+        }
+    }
+    private func loadImage() async {
+        guard let url = url else { return }
+        isLoading = true
+        defer { isLoading = false }
+        let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad)
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            if let uiImage = UIImage(data: data) {
+                withAnimation {
+                    image = uiImage
+                }
+            }
+        } catch {
+        }
+    }
+}
+
 // MARK: - Musi-style stream resolution
 //
 // Musi could equalize any YouTube stream because it never used YouTube's
@@ -3206,7 +3249,6 @@ struct TrapTubeNativePlayerView: View {
                 titleBlock
                 eqStrip
                 transportRow
-                statusBlock
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 20)
@@ -3260,6 +3302,8 @@ struct TrapTubeNativePlayerView: View {
         }
         .sheet(isPresented: $showEQ) {
             TrapTubeEqualizerPanel()
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
     }
 
@@ -3387,11 +3431,9 @@ struct TrapTubeNativePlayerView: View {
                     // item's own audio starts the moment the
                     // item exists (load() plays it before Ghost
                     // ever engages).
-                    AsyncImage(url: URL(string: "https://i.ytimg.com/vi/\(request.videoID)/hqdefault.jpg")) { image in
-                        image.resizable().aspectRatio(contentMode: .fill)
-                    } placeholder: {
-                        Color.black
-                    }
+                    CachedThumbnailView(
+                        url: URL(string: "https://i.ytimg.com/vi/\(request.videoID)/hqdefault.jpg")
+                    )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                     VStack {
@@ -3425,7 +3467,34 @@ struct TrapTubeNativePlayerView: View {
             .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .contentShape(Rectangle())
-            .onTapGesture { toggleControls() }
+            .overlay {
+                HStack(spacing: 0) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            guard !controlsVisible else { return }
+                            controller.seek(to: max(0, controller.currentTime - 10))
+                        }
+                        .onTapGesture { toggleControls() }
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture(count: 2) {
+                            guard !controlsVisible else { return }
+                            controller.seek(to: min(controller.duration, controller.currentTime + 10))
+                        }
+                        .onTapGesture { toggleControls() }
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 50)
+                    .onEnded { value in
+                        guard !controlsVisible else { return }
+                        let translation = value.translation
+                        if translation.height > 100 && abs(translation.height) > abs(translation.width) {
+                            minimize()
+                        }
+                    }
+            )
             .animation(.easeInOut(duration: 0.2), value: controller.skipNotice)
 
             HStack {
@@ -3693,40 +3762,7 @@ struct TrapTubeNativePlayerView: View {
     /// Playback row (Round 21) carries the controller's live state
     /// line, and the View width row prints the measured column
     /// width: together they make the next screenshot self-proving.
-    private var statusBlock: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            // Round 20: the audio-path line (Ghost feed + drift, or
-            // the tap-fallback marker) above the EQ attach status.
-            if !controller.pathStatusText.isEmpty {
-                statusRow(label: "Audio path", value: controller.pathStatusText)
-            }
-            statusRow(label: "EQ stream status", value: streamStatus)
-            statusRow(label: "Playback", value: controller.playbackStateLine)
 
-            // Round 20: the seamless re-attach breadcrumb - the
-            // re-attach's timestamp and its position verdict.
-            if let reattachNote {
-                Text(reattachNote)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Color.white.opacity(0.6))
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            Text(controller.diagnosticsLine)
-                .font(.caption2.monospaced())
-                .foregroundStyle(Color.white.opacity(0.55))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(layoutWidth > 0
-                 ? "View width \(Int(layoutWidth.rounded())) pt"
-                 : "View width measuring…")
-                .font(.caption2)
-                .foregroundStyle(Color.white.opacity(0.35))
-        }
-        .padding(.top, 18)
-    }
 
     /// One status row: icon + label on the left (never truncated),
     /// the value right-aligned inside a flexible frame (truncates
@@ -3954,7 +3990,7 @@ struct TrapTubeEqualizerPanel: View {
                 }
                 Spacer()
                 Button("Done") { dismiss() }
-                    .font(.subheadline.weight(.bold)).foregroundStyle(accent)
+                    .font(.subheadline.weight(.bold)).foregroundStyle(.white)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
@@ -3964,12 +4000,7 @@ struct TrapTubeEqualizerPanel: View {
                     .padding(18)
             }
         }
-        .background {
-            LinearGradient(colors: [Color(red: 0.055, green: 0.04, blue: 0.075),
-                                    Color(red: 0.015, green: 0.015, blue: 0.028)],
-                           startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
-        }
+        .background(Color(red: 0.129, green: 0.129, blue: 0.129).ignoresSafeArea())
         .preferredColorScheme(.dark)
     }
 }
@@ -5176,15 +5207,11 @@ struct TrapTubePlayerHomeView: View {
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 ZStack(alignment: .bottomTrailing) {
-                    AsyncImage(url: item.thumbnailURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable().aspectRatio(contentMode: .fill)
-                        default:
-                            Color.white.opacity(0.08)
-                        }
-                    }
-                    .frame(width: 132, height: 74)
+                    CachedThumbnailView(
+                        url: item.thumbnailURL,
+                        width: 132,
+                        height: 74
+                    )
                     .clipped()
                     if let duration = item.duration {
                         Text(duration)

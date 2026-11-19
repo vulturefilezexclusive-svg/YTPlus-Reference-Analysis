@@ -552,16 +552,6 @@ private struct TrapTubeStemStudioView: View {
                     eqSummaryCard
                         .padding(.horizontal, 16)
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("YOUTUBE").font(.caption.weight(.black))
-                            .tracking(1.5).foregroundStyle(accent)
-                        Text("Search & Feed").font(.system(size: 20, weight: .black, design: .rounded))
-                            .foregroundStyle(.white)
-                        Text("Search YouTube, browse the categories, sign in for your channel - tap a video and it opens in the player above, EQ riding along.")
-                            .font(.caption).foregroundStyle(Color.white.opacity(0.45))
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .padding(.horizontal, 16)
 
                     TrapTubePlayerHomeView()
                 }
@@ -967,15 +957,11 @@ private struct TrapTubeEQPlayerLiveCard: View {
     private var thumbnail: some View {
         if let videoID = controller.sessionRequest?.videoID,
            let url = URL(string: "https://i.ytimg.com/vi/\(videoID)/hqdefault.jpg") {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let image):
-                    image.resizable().aspectRatio(contentMode: .fill)
-                default:
-                    Color.white.opacity(0.06)
-                }
-            }
-            .frame(width: 104, height: 58)
+            CachedThumbnailView(
+                url: url,
+                width: 104,
+                height: 58
+            )
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
